@@ -4,20 +4,17 @@ set -e
 echo "🚀 Установка VPN Bot..."
 echo "=========================================="
 
-# Проверка прав
 if [ "$EUID" -ne 0 ]; then
     echo "❌ Запустите с root правами: sudo bash install.sh"
     exit 1
 fi
 
-# Определяем IP
 IP=$(curl -s ifconfig.me || echo "localhost")
 
 echo "📦 Установка зависимостей..."
 apt-get update -qq
 apt-get install -y -qq python3 python3-pip python3-venv git sqlite3 curl ufw
 
-# Создаём папку проекта
 cd /opt
 rm -rf vpn-bot
 git clone https://github.com/lestat258/vpn_bot.git vpn-bot
@@ -39,29 +36,22 @@ init_db()
 import sqlite3
 conn = sqlite3.connect('/opt/vpn-bot/data.db')
 c = conn.cursor()
-
-# Создаём таблицу settings если её нет
 c.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
-
-# Добавляем администратора
 c.execute(\"INSERT OR REPLACE INTO settings (key, value) VALUES ('admin_username', 'admin')\")
 c.execute(\"INSERT OR REPLACE INTO settings (key, value) VALUES ('admin_password', 'admin')\")
 c.execute(\"INSERT OR REPLACE INTO settings (key, value) VALUES ('first_login', 'false')\")
 c.execute(\"INSERT OR REPLACE INTO settings (key, value) VALUES ('bot_token', '')\")
 c.execute(\"INSERT OR REPLACE INTO settings (key, value) VALUES ('admin_id', '')\")
-
 conn.commit()
 conn.close()
 print('✅ База данных настроена')
 "
 
-echo "⚙️ Настройка systemd..."
 cp systemd/*.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable vpn-bot vpn-admin 2>/dev/null || true
 systemctl start vpn-bot vpn-admin
 
-# Открываем порт 8000
 ufw allow 8000/tcp 2>/dev/null || true
 
 echo ""
