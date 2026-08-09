@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-bullhorn"></i> Рассылка</h1>
+    <a href="/dashboard" class="back-link">← Вернуться</a>
+</div>
+
+{% if request.query_params.get('sent') %}
+<div class="alert alert-success">✅ Рассылка отправлена!</div>
+{% endif %}
+{% if request.query_params.get('error') %}
+<div class="alert alert-danger">❌ Ошибка: {{ request.query_params.get('error') }}</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-header">✏️ Создать рассылку</div>
+    <div class="card-body">
+        <form method="POST" action="/broadcast/send">
+            <div class="form-group">
+                <label>Текст сообщения</label>
+                <textarea class="form-control" name="message" placeholder="Введите текст сообщения... Поддерживается HTML" required></textarea>
+            </div>
+            <div class="row">
+                <div class="form-group">
+                    <label>Фильтр получателей</label>
+                    <select class="form-control" name="filter">
+                        <option value="all">Все пользователи</option>
+                        <option value="active">С активной подпиской</option>
+                        <option value="expired">С истекшей подпиской</option>
+                    </select>
+                </div>
+            </div>
+            <button type="submit" class="btn btn-primary" onclick="return confirm('Отправить рассылку?')">📨 Отправить</button>
+        </form>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">📋 История рассылок</div>
+    <div class="card-body">
+        {% if broadcasts %}
+        <div class="table-wrapper">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Сообщение</th>
+                        <th>Фильтр</th>
+                        <th>Статус</th>
+                        <th>Отправлено</th>
+                        <th>Дата</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for b in broadcasts %}
+                    <tr>
+                        <td>#{{ b[0] }}</td>
+                        <td>{{ b[1][:50] }}...</td>
+                        <td>{{ b[2] }}</td>
+                        <td>
+                            {% if b[5] == 'sent' %}
+                            <span class="badge badge-success">✅ Отправлено</span>
+                            {% elif b[5] == 'pending' %}
+                            <span class="badge badge-warning">⏳ В обработке</span>
+                            {% else %}
+                            <span class="badge badge-info">{{ b[5] }}</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ b[6] or 0 }}</td>
+                        <td>{{ b[7][:16] if b[7] else '-' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="text-muted text-center">Нет отправленных рассылок</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

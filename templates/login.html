@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>VPN Bot Admin</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: #f2f2f7;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            padding: 40px;
+            max-width: 400px;
+            width: 100%;
+        }
+        .logo {
+            text-align: center;
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+        h1 {
+            text-align: center;
+            font-size: 24px;
+            font-weight: 700;
+            color: #1c1c1e;
+            margin-bottom: 5px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #8e8e93;
+            font-size: 14px;
+            margin-bottom: 30px;
+        }
+        .input-group {
+            margin: 15px 0;
+        }
+        .input-group label {
+            display: block;
+            font-weight: 600;
+            color: #1c1c1e;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        .input-group input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e5e5ea;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: border-color 0.2s;
+        }
+        .input-group input:focus {
+            outline: none;
+            border-color: #007aff;
+        }
+        .btn {
+            width: 100%;
+            padding: 14px;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            background: #007aff;
+            color: white;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-top: 10px;
+        }
+        .btn:hover {
+            background: #0066d9;
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .error {
+            color: #ff3b30;
+            font-size: 14px;
+            text-align: center;
+            margin-top: 10px;
+        }
+        .success {
+            color: #34c759;
+            font-size: 14px;
+            text-align: center;
+            margin-top: 10px;
+        }
+        .twofa-section {
+            margin-top: 20px;
+            border-top: 1px solid #e5e5ea;
+            padding-top: 20px;
+        }
+        .twofa-section label {
+            display: block;
+            font-weight: 600;
+            color: #1c1c1e;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        .twofa-section input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e5e5ea;
+            border-radius: 10px;
+            font-size: 16px;
+            letter-spacing: 4px;
+            text-align: center;
+        }
+        .twofa-section input:focus {
+            outline: none;
+            border-color: #007aff;
+        }
+        .twofa-hint {
+            text-align: center;
+            color: #8e8e93;
+            font-size: 12px;
+            margin-top: 8px;
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">🔐</div>
+        <h1>VPN Bot Admin</h1>
+        <p class="subtitle">Вход в панель управления</p>
+
+        <form id="loginForm" method="POST" action="/login">
+            <div class="input-group">
+                <label for="username">Логин</label>
+                <input type="text" id="username" name="username" required autofocus>
+            </div>
+
+            <div class="input-group">
+                <label for="password">Пароль</label>
+                <input type="password" id="password" name="password" required>
+            </div>
+
+            <!-- Секция 2FA (показывается только если включена) -->
+            <div id="twofa-section" class="twofa-section hidden">
+                <label for="twofa_code">Код из приложения-аутентификатора</label>
+                <input type="text" id="twofa_code" name="twofa_code" placeholder="000000" maxlength="6" autocomplete="off">
+                <div class="twofa-hint">Введите 6-значный код из Google Authenticator</div>
+            </div>
+
+            <button type="submit" class="btn" id="login-btn">Войти</button>
+        </form>
+
+        <div id="message"></div>
+    </div>
+
+    <script>
+        // Проверка, включена ли 2FA
+        async function check2FAStatus() {
+            try {
+                const response = await fetch('/2fa/status');
+                const data = await response.json();
+                
+                if (data.enabled) {
+                    document.getElementById('twofa-section').classList.remove('hidden');
+                }
+            } catch (error) {
+                console.error('Ошибка проверки 2FA:', error);
+            }
+        }
+
+        // Обработка отправки формы
+        document.getElementById('loginForm').addEventListener('submit', function(e) {
+            const twofaInput = document.getElementById('twofa_code');
+            const twofaSection = document.getElementById('twofa-section');
+            
+            // Если 2FA включена - проверяем наличие кода
+            if (!twofaSection.classList.contains('hidden')) {
+                if (!twofaInput.value || twofaInput.value.length !== 6) {
+                    e.preventDefault();
+                    const msg = document.getElementById('message');
+                    msg.className = 'error';
+                    msg.textContent = '❌ Введите 6-значный код из приложения-аутентификатора';
+                    return;
+                }
+            }
+        });
+
+        // Ограничение ввода для кода 2FA
+        document.getElementById('twofa_code').addEventListener('input', function(e) {
+            this.value = this.value.replace(/[^0-9]/g, '').slice(0, 6);
+        });
+
+        // Проверяем статус 2FA при загрузке
+        document.addEventListener('DOMContentLoaded', check2FAStatus);
+    </script>
+</body>
+</html>

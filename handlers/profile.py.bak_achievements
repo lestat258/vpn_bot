@@ -1,0 +1,1046 @@
+"""
+Обработчики профиля и ключей
+"""
+import logging
+import sqlite3
+from datetime import datetime, timedelta
+from aiogram import Router, types, F, Bot
+from aiogram.fsm.context import FSMContext
+from aiogram.filters import Command
+
+from database import get_setting, set_setting
+from keyboards import (
+    get_keys_keyboard,
+    get_profile_keyboard,
+    get_tariffs_keyboard,
+    get_main_keyboard,
+    get_confirmation_keyboard,
+    get_back_keyboard
+)
+from states import EnterPromocode, AdminAddKey, UserExtendKey, CustomDeposit
+from utils import (
+    get_active_subscriptions,
+    get_user_balance,
+    find_subid_by_email,
+    get_server_link,
+    extend_subscription,
+    get_subscription_details,
+    get_tariff_by_id
+)
+from server_manager import server_manager
+from xui_client import XUIClient
+
+router = Router()
+DB_PATH = '/opt/vpn-bot/data.db'
+ADMIN_ID = int(get_setting('admin_id') or 812021055)
+
+# Временное хранилище для продления
+renew_temp = {}
+
+# ============ ПРОФИЛЬ ============
+
+@router.message(F.text == "👤 Профиль")
+async def profile(message: types.Message):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute('SELECT first_name, created_at, referrer_id, balance FROM users WHERE telegram_id = ?', (message.from_user.id,))
+    user = c.fetchone()
+
+    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ? AND is_active = 1 AND datetime(end_date) > datetime("now")', (message.from_user.id,))
+    active_subs_count = c.fetchone()[0]
+
+    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ?', (message.from_user.id,))
+    total_subs_count = c.fetchone()[0]
+
+    c.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (message.from_user.id,))
+    ref_count = c.fetchone()[0]
+
+    conn.close()
+
+    profile_text = (
+        f"👤 <b>Ваш профиль</b>\n\n"
+        f"📛 Имя: {user[0] if user else 'Не указано'}\n"
+        f"📅 Регистрация: {user[1][:10] if user else 'Неизвестно'}\n"
+        f"👥 Приглашено друзей: {ref_count}\n"
+        f"💰 Баланс: {user[3] if user else 0:.2f} ₽\n"
+        f"🔑 Активных ключей: {active_subs_count}\n"
+        f"📋 Всего ключей: {total_subs_count}\n"
+    )
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM promocodes WHERE is_active = 1 AND (valid_until IS NULL OR valid_until > datetime("now"))')
+    has_promocodes = c.fetchone()[0] > 0
+    conn.close()
+
+    await message.answer(
+        profile_text,
+        reply_markup=get_profile_keyboard(has_promocodes),
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+
+@router.callback_query(F.data == "back_to_profile")
+async def back_to_profile(callback: types.CallbackQuery):
+    await callback.message.delete()
+    class FakeMessage:
+        from_user = callback.from_user
+        chat = callback.message.chat
+        async def answer(self, *args, **kwargs):
+            await callback.message.answer(*args, **kwargs)
+    await profile(FakeMessage())
+    await callback.answer()
+
+# ============ БАЛАНС И АВТО-ПРОДЛЕНИЕ ============
+
+@router.callback_query(F.data == "balance_auto_renew")
+async def balance_auto_renew_menu(callback: types.CallbackQuery):
+    telegram_id = callback.from_user.id
+    
+    balance = get_user_balance(telegram_id)
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT s.id, t.name, s.end_date, s.auto_renew, t.price_rub
+        FROM subscriptions s
+        JOIN tariffs t ON t.id = s.tariff_id
+        WHERE s.telegram_id = ? AND s.is_active = 1 AND datetime(s.end_date) > datetime('now')
+        ORDER BY s.end_date ASC
+    ''', (telegram_id,))
+    subscriptions = c.fetchall()
+    conn.close()
+    
+    text = f"""💰 <b>Баланс и авто-продление</b>
+
+💳 <b>Ваш баланс:</b> <code>{balance:.2f} ₽</code>
+
+<b>📖 Что такое баланс?</b>
+Баланс — это ваш внутренний счёт в боте. Вы можете пополнить его и использовать для:
+• Автоматического продления подписок
+• Покупки новых ключей (в разработке)
+
+<b>🔄 Как работает авто-продление?</b>
+• Включите авто-продление для нужных подписок
+• За 3 дня до окончания мы напомним вам
+• В день окончания спишем деньги с баланса
+• Подписка продлится автоматически!
+
+<b>📋 Ваши подписки:</b>
+"""
+    
+    if not subscriptions:
+        text += "\n❌ У вас нет активных подписок"
+    else:
+        for sub in subscriptions:
+            sub_id, tariff_name, end_date, auto_renew, price = sub
+            days_left = (datetime.fromisoformat(end_date) - datetime.now()).days
+            status = "✅" if auto_renew else "❌"
+            text += f"\n📦 {tariff_name} (до {end_date[:10]}, {days_left} дн.) — {status} авто-продление"
+    
+    text += "\n\nВыберите действие:"
+    
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="💰 Пополнить баланс", callback_data="deposit")],
+        [types.InlineKeyboardButton(text="🔄 Управление подписками", callback_data="my_keys")],
+        [types.InlineKeyboardButton(text="ℹ️ Как это работает", callback_data="balance_help")],
+        [types.InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="back_to_profile")]
+    ])
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "balance_help")
+async def balance_help(callback: types.CallbackQuery):
+    text = """ℹ️ <b>Как работает баланс и авто-продление</b>
+
+💰 <b>Баланс</b>
+• Это ваш внутренний счёт в боте
+• Можно пополнить через раздел "Пополнить баланс"
+• Средства хранятся на вашем счёте
+
+🔄 <b>Авто-продление</b>
+• Включите авто-продление для любой подписки
+• За 3 дня до окончания придёт напоминание
+• В день окончания деньги автоматически спишутся
+• Подписка продлится без вашего участия!
+
+💡 <b>Зачем это нужно?</b>
+• Не нужно каждый раз вручную продлевать
+• Не потеряете доступ к VPN
+• Экономите время
+
+⚠️ <b>Важно!</b>
+• Убедитесь, что на балансе достаточно средств
+• Если средств недостаточно — мы уведомим вас
+• Вы всегда можете отключить авто-продление
+
+📱 <b>Как управлять?</b>
+1. Перейдите в "Баланс и авто-продление"
+2. Пополните баланс при необходимости
+3. Включите авто-продление для нужных подписок
+4. Всё! Бот позаботится об остальном"""
+
+    kb = get_back_keyboard("balance_auto_renew")
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+# ============ КЛЮЧИ ============
+
+@router.callback_query(F.data == "my_keys")
+async def show_my_keys(callback: types.CallbackQuery):
+    await callback.message.delete()
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ? AND is_active = 1 AND datetime(end_date) > datetime("now")', (callback.from_user.id,))
+    count = c.fetchone()[0]
+    conn.close()
+
+    if count == 0:
+        kb = get_back_keyboard("back_to_tariffs")
+        await callback.message.answer(
+            "🔑 <b>У вас нет активных ключей</b>\n\n"
+            "Вы можете приобрести ключ в разделе «📋 Купить ключ».",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+    else:
+        await callback.message.answer(
+            "🔑 <b>Ваши ключи</b>\n\nВыберите подписку чтобы увидеть ключ и инструкцию:",
+            reply_markup=get_keys_keyboard(callback.from_user.id),
+            parse_mode="HTML"
+        )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("key_"))
+async def show_key_detail(callback: types.CallbackQuery):
+    sub_id = int(callback.data.split("_")[1])
+
+    sub = get_subscription_details(sub_id)
+    
+    if not sub or sub[8] != callback.from_user.id:
+        await callback.message.answer("❌ Подписка не найдена", parse_mode="HTML")
+        await callback.answer()
+        return
+
+    sub_id, email, end_date, tariff_name, xui_client_uid, traffic_used, tariff_id, start_date, user_id = sub
+    days_left = (datetime.fromisoformat(end_date) - datetime.now()).days
+
+    tariff = get_tariff_by_id(tariff_id)
+    traffic_limit = tariff[4] if tariff else 0
+    ip_limit = tariff[5] if tariff else 3
+
+    traffic_used_gb = traffic_used or 0
+    traffic_limit_str = f"{traffic_limit:.0f} ГБ" if traffic_limit > 0 else "∞"
+
+    subid = find_subid_by_email(email)
+    if not subid:
+        subid = xui_client_uid
+
+    best_server = server_manager.get_best_server()
+    if best_server:
+        sub_url = server_manager.get_server_sub_url(best_server['id'])
+        if not sub_url:
+            sub_url = server_manager.get_sub_url_for_server(best_server['id'])
+            if not sub_url:
+                sub_url = best_server['url'].replace('/panel', '').replace('/api', '') + '/sub/'
+        link = f"{sub_url}{subid}"
+    else:
+        link = f"https://node5.vpn4us.ru:2096/sub/{subid}"
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT auto_renew FROM subscriptions WHERE id = ?', (sub_id,))
+    auto_renew_row = c.fetchone()
+    conn.close()
+    auto_renew_enabled = auto_renew_row[0] == 1 if auto_renew_row else False
+    auto_renew_text = "✅" if auto_renew_enabled else "❌"
+    
+    user_balance = get_user_balance(callback.from_user.id)
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🔄 Продлить", callback_data=f"renew_from_key_{sub_id}")],
+        [types.InlineKeyboardButton(text=f"🔄 Авто-продление {auto_renew_text}", callback_data=f"toggle_auto_renew_{sub_id}")],
+        [types.InlineKeyboardButton(text="🗑 Удалить ключ", callback_data=f"delete_key_{sub_id}")],
+        [types.InlineKeyboardButton(text="🔙 Назад к ключам", callback_data="my_keys")],
+        [types.InlineKeyboardButton(text="🏠 На главную", callback_data="back_to_main")]
+    ])
+
+    text = (
+        f"🔑 <b>Ключ: {tariff_name}</b>\n\n"
+        f"📧 E-mail в панели: <code>{email}</code>\n"
+        f"📅 Создан: {start_date[:10] if start_date else 'Неизвестно'}\n"
+        f"📅 Истекает: {end_date[:10]}\n"
+        f"⏳ Осталось: {days_left} дн.\n\n"
+        f"📊 <b>Трафик:</b>\n"
+        f"   • Использовано: {traffic_used_gb:.2f} ГБ\n"
+        f"   • Лимит: {traffic_limit_str}\n"
+        f"📱 Лимит IP: {ip_limit}\n\n"
+        f"💳 <b>Баланс:</b> {user_balance:.2f} ₽\n"
+        f"🔄 <b>Авто-продление:</b> {auto_renew_text}\n\n"
+        f"🔗 <b>Ссылка:</b>\n"
+        f"<code>{link}</code>"
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+# ============ ПРОДЛЕНИЕ КЛЮЧА ============
+
+@router.callback_query(F.data.startswith("renew_from_key_"))
+async def renew_from_key(callback: types.CallbackQuery):
+    sub_id = int(callback.data.replace("renew_from_key_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT telegram_id FROM subscriptions WHERE id = ?', (sub_id,))
+    sub = c.fetchone()
+    conn.close()
+
+    if not sub or sub[0] != callback.from_user.id:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    renew_temp[callback.from_user.id] = sub_id
+
+    await callback.message.answer(
+        "📋 <b>Выберите тариф для продления</b>\n\n"
+        "После оплаты дни будут добавлены к вашей подписке.",
+        reply_markup=get_tariffs_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+# ============ УДАЛЕНИЕ КЛЮЧА (ПОЛЬЗОВАТЕЛЬ) ============
+
+@router.callback_query(F.data.startswith("delete_key_"))
+async def user_delete_key(callback: types.CallbackQuery):
+    sub_id = int(callback.data.replace("delete_key_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT telegram_id, xui_email FROM subscriptions WHERE id = ?', (sub_id,))
+    sub = c.fetchone()
+    conn.close()
+
+    if not sub or sub[0] != callback.from_user.id:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    kb = get_confirmation_keyboard(f"confirm_delete_key_{sub_id}", "my_keys")
+
+    await callback.message.answer(
+        "⚠️ <b>Удаление ключа</b>\n\n"
+        "Вы уверены, что хотите удалить этот ключ?\n"
+        "После удаления доступ к VPN будет потерян.",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("confirm_delete_key_"))
+async def user_confirm_delete_key(callback: types.CallbackQuery):
+    sub_id = int(callback.data.replace("confirm_delete_key_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT telegram_id, xui_email FROM subscriptions WHERE id = ?', (sub_id,))
+    sub = c.fetchone()
+
+    if not sub or sub[0] != callback.from_user.id:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    telegram_id, xui_email = sub
+
+    best_server = server_manager.get_best_server()
+    if best_server:
+        xui = XUIClient(url=best_server['url'], api_token=best_server['api_token'])
+        xui.delete_client(xui_email)
+
+    c.execute('DELETE FROM subscriptions WHERE id = ?', (sub_id,))
+    conn.commit()
+    conn.close()
+
+    await callback.message.answer("✅ Ключ удалён")
+    await callback.answer()
+    await show_my_keys(callback)
+
+# ============ ПОПОЛНЕНИЕ БАЛАНСА ============
+
+@router.callback_query(F.data == "deposit")
+async def deposit_menu(callback: types.CallbackQuery):
+    balance = get_user_balance(callback.from_user.id)
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="100 ₽", callback_data="deposit_100")],
+        [types.InlineKeyboardButton(text="200 ₽", callback_data="deposit_200")],
+        [types.InlineKeyboardButton(text="500 ₽", callback_data="deposit_500")],
+        [types.InlineKeyboardButton(text="1000 ₽", callback_data="deposit_1000")],
+        [types.InlineKeyboardButton(text="✏️ Своя сумма", callback_data="deposit_custom")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_profile")]
+    ])
+
+    await callback.message.edit_text(
+        f"💰 <b>Пополнение баланса</b>\n\n"
+        f"Текущий баланс: <b>{balance:.2f} ₽</b>\n\n"
+        f"Выберите сумму для пополнения или введите свою:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "deposit_custom")
+async def deposit_custom(callback: types.CallbackQuery, state: FSMContext):
+    """Пополнение на произвольную сумму"""
+    logging.info(f"🔍 deposit_custom вызван для {callback.from_user.id}")
+    
+    await callback.message.delete()
+    
+    await callback.message.answer(
+        "✏️ <b>Введите сумму пополнения</b>\n\n"
+        "Минимальная сумма: <b>10 ₽</b>\n"
+        "Максимальная сумма: <b>100000 ₽</b>\n\n"
+        "Введите число (например: 150, 250.50):\n"
+        "Или отправьте /cancel для отмены",
+        parse_mode="HTML"
+    )
+    
+    await state.set_state(CustomDeposit.amount)
+    await callback.answer()
+    logging.info(f"✅ Состояние установлено: CustomDeposit.amount")
+
+@router.message(CustomDeposit.amount)
+async def deposit_custom_amount(message: types.Message, state: FSMContext):
+    """Обработка введённой суммы"""
+    logging.info(f"🔍 Получено сообщение в состоянии CustomDeposit: {message.text}")
+    
+    if message.text.lower() in ['/cancel', 'отмена', 'cancel']:
+        await state.clear()
+        await message.answer(
+            "❌ Пополнение отменено.",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        amount_str = message.text.replace(',', '.')
+        amount = float(amount_str)
+        
+        logging.info(f"💰 Сумма для пополнения: {amount}")
+        
+        if amount < 10:
+            await message.answer(
+                "❌ Минимальная сумма пополнения: <b>10 ₽</b>\n\n"
+                "Пожалуйста, введите сумму больше 10 ₽:",
+                parse_mode="HTML"
+            )
+            return
+        
+        if amount > 100000:
+            await message.answer(
+                "❌ Максимальная сумма пополнения: <b>100000 ₽</b>\n\n"
+                "Пожалуйста, введите сумму меньше 100000 ₽:",
+                parse_mode="HTML"
+            )
+            return
+        
+        amount = round(amount, 2)
+        
+        from yookassa import Payment
+        
+        payment = Payment.create({
+            "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+            "confirmation": {"type": "redirect", "return_url": "https://t.me/lestat258_bot"},
+            "capture": True,
+            "description": f"Пополнение баланса на {amount:.2f}₽",
+            "metadata": {
+                "telegram_id": message.from_user.id,
+                "type": "deposit",
+                "amount": amount
+            }
+        })
+        
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO payments (payment_id, telegram_id, tariff_id, amount_rub, status)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (payment.id, message.from_user.id, 0, amount, 'pending'))
+        conn.commit()
+        conn.close()
+        
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text=f"💳 Оплатить {amount:.2f}₽", url=payment.confirmation.confirmation_url)],
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="deposit")]
+        ])
+        
+        await message.answer(
+            f"💳 <b>Пополнение баланса</b>\n\n"
+            f"Сумма: <b>{amount:.2f} ₽</b>\n\n"
+            f"Нажмите кнопку для оплаты:",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+        await state.clear()
+        logging.info(f"✅ Платёж создан для {message.from_user.id} на сумму {amount}")
+        
+    except ValueError:
+        await message.answer(
+            "❌ <b>Ошибка!</b>\n\n"
+            "Пожалуйста, введите число.\n"
+            "Примеры: 150, 250.50, 1000\n\n"
+            "Или отправьте /cancel для отмены",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"❌ Ошибка создания платежа: {e}")
+        await message.answer(
+            f"❌ Ошибка при создании платежа: {str(e)}\n\n"
+            "Попробуйте позже.",
+            parse_mode="HTML"
+        )
+        await state.clear()
+
+@router.callback_query(F.data.startswith("deposit_"))
+async def deposit_process(callback: types.CallbackQuery):
+    """Обработка фиксированных сумм (100, 200, 500, 1000)"""
+    if callback.data == "deposit_custom":
+        return
+    
+    amount = int(callback.data.replace("deposit_", ""))
+
+    try:
+        from yookassa import Payment
+
+        payment = Payment.create({
+            "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+            "confirmation": {"type": "redirect", "return_url": "https://t.me/lestat258_bot"},
+            "capture": True,
+            "description": f"Пополнение баланса на {amount}₽",
+            "metadata": {
+                "telegram_id": callback.from_user.id,
+                "type": "deposit",
+                "amount": amount
+            }
+        })
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO payments (payment_id, telegram_id, tariff_id, amount_rub, status)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (payment.id, callback.from_user.id, 0, amount, 'pending'))
+        conn.commit()
+        conn.close()
+
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text=f"💳 Оплатить {amount}₽", url=payment.confirmation.confirmation_url)],
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="deposit")]
+        ])
+
+        await callback.message.edit_text(
+            f"💳 <b>Пополнение баланса</b>\n\n"
+            f"Сумма: <b>{amount} ₽</b>\n\n"
+            f"Нажмите кнопку для оплаты:",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        logging.error(f"Deposit error: {e}")
+        await callback.message.edit_text(
+            f"❌ Ошибка при создании платежа: {e}",
+            reply_markup=get_back_keyboard("deposit")
+        )
+
+    await callback.answer()
+
+@router.message(Command("cancel"))
+async def cancel_deposit(message: types.Message, state: FSMContext):
+    """Отмена пополнения"""
+    current_state = await state.get_state()
+    if current_state == CustomDeposit.amount:
+        await state.clear()
+        await message.answer(
+            "❌ Пополнение отменено.\n\n"
+            "Вы можете вернуться в раздел пополнения через профиль.",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer("Нет активных операций для отмены.")
+
+# ============ ПРОМОКОДЫ ============
+
+@router.callback_query(F.data == "profile_promocode")
+async def profile_promocode(callback: types.CallbackQuery):
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🎟️ Ввести промокод", callback_data="enter_promocode")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_profile")]
+    ])
+
+    await callback.message.edit_text(
+        "🏷️ <b>Промокоды и скидки</b>\n\n"
+        "Введите промокод, чтобы получить скидку на подписку.\n"
+        "Промокоды действуют ограниченное время.",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "enter_promocode")
+async def enter_promocode_start(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.answer(
+        "✏️ Введите код промокода:\n"
+        "(или отправьте /cancel для отмены)"
+    )
+    await state.set_state(EnterPromocode.waiting)
+    await callback.answer()
+
+@router.message(EnterPromocode.waiting)
+async def enter_promocode_process(message: types.Message, state: FSMContext):
+    code = message.text.strip().upper()
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute('''
+        SELECT id, discount_percent, discount_amount, valid_until, max_uses, used_count
+        FROM promocodes
+        WHERE code = ? AND is_active = 1
+    ''', (code,))
+    promocode = c.fetchone()
+
+    if not promocode:
+        await message.answer("❌ Промокод не найден или неактивен")
+        conn.close()
+        await state.clear()
+        return
+
+    promocode_id, discount_percent, discount_amount, valid_until, max_uses, used_count = promocode
+
+    if valid_until and datetime.now() > datetime.fromisoformat(valid_until):
+        await message.answer("❌ Срок действия промокода истек")
+        conn.close()
+        await state.clear()
+        return
+
+    if used_count >= max_uses:
+        await message.answer("❌ Промокод уже использован максимальное количество раз")
+        conn.close()
+        await state.clear()
+        return
+
+    c.execute('SELECT id FROM promocode_uses WHERE promocode_id = ? AND user_id = ?',
+              (promocode_id, message.from_user.id))
+    if c.fetchone():
+        await message.answer("❌ Вы уже использовали этот промокод")
+        conn.close()
+        await state.clear()
+        return
+
+    c.execute('INSERT INTO promocode_uses (promocode_id, user_id) VALUES (?, ?)',
+              (promocode_id, message.from_user.id))
+    c.execute('UPDATE promocodes SET used_count = used_count + 1 WHERE id = ?', (promocode_id,))
+    conn.commit()
+    conn.close()
+
+    if discount_percent > 0:
+        await message.answer(f"✅ Промокод активирован! Скидка {discount_percent}% на следующую покупку", parse_mode="HTML")
+    elif discount_amount > 0:
+        await message.answer(f"✅ Промокод активирован! Скидка {discount_amount}₽ на следующую покупку", parse_mode="HTML")
+
+    set_setting(f'promocode_user_{message.from_user.id}', f'{discount_percent}|{discount_amount}')
+    await state.clear()
+
+# ============ АВТО-ПРОДЛЕНИЕ ============
+
+@router.callback_query(F.data.startswith("toggle_auto_renew_"))
+async def toggle_auto_renew(callback: types.CallbackQuery):
+    """Включение/выключение авто-продления для подписки"""
+    sub_id = int(callback.data.replace("toggle_auto_renew_", ""))
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute('SELECT telegram_id, auto_renew FROM subscriptions WHERE id = ?', (sub_id,))
+    sub = c.fetchone()
+    
+    if not sub or sub[0] != callback.from_user.id:
+        await callback.answer("⛔ Доступ запрещён")
+        conn.close()
+        return
+    
+    current_status = sub[1] or 0
+    new_status = 0 if current_status else 1
+    
+    c.execute('UPDATE subscriptions SET auto_renew = ? WHERE id = ?', (new_status, sub_id))
+    conn.commit()
+    conn.close()
+    
+    status_text = "✅ Включено" if new_status else "❌ Выключено"
+    await callback.answer(f"Авто-продление: {status_text}", show_alert=True)
+    
+    new_callback = types.CallbackQuery(
+        id=callback.id,
+        from_user=callback.from_user,
+        chat_instance=callback.chat_instance,
+        message=callback.message,
+        data=f"key_{sub_id}",
+        inline_message_id=callback.inline_message_id
+    )
+    
+    await show_key_detail(new_callback)
+
+# ============ ДОСТИЖЕНИЯ И ТРИГГЕРЫ ============
+
+@router.callback_query(F.data == "my_achievements")
+async def show_achievements(callback: types.CallbackQuery):
+    """Показывает прогресс по триггерам и достижениям"""
+    from trigger_manager import trigger_manager
+    
+    status = trigger_manager.get_user_trigger_status(callback.from_user.id)
+    
+    trigger_descriptions = {
+        'referrals': {
+            'name': '👥 Рефералы',
+            'description': 'Приглашайте друзей по вашей реферальной ссылке. Каждый новый пользователь приближает вас к награде!',
+            'reward': 'Промокод на скидку'
+        },
+        'purchases': {
+            'name': '🛒 Покупки',
+            'description': 'Оплачивайте подписки. Чем больше покупок, тем выше скидка!',
+            'reward': 'Промокод на скидку'
+        },
+        'subscription_days': {
+            'name': '📅 Дни подписки',
+            'description': 'Суммарное количество дней с активной подпиской. Оставайтесь с нами и получайте бонусы!',
+            'reward': 'Промокод на скидку'
+        },
+        'first_payment': {
+            'name': '💳 Первая оплата',
+            'description': 'Совершите первую оплату подписки. Новые пользователи получают приветственный бонус!',
+            'reward': 'Промокод на скидку'
+        }
+    }
+    
+    text = "🏆 <b>Достижения и бонусы</b>
+
+"
+    text += "Выполняйте действия и получайте промокоды на скидки!
+"
+    text += "Промокоды автоматически выдаются при достижении целей.
+"
+    text += "Все полученные промокоды хранятся в разделе «🎫 Мои промокоды».
+"
+    text += "Вы можете использовать их в любое удобное время.
+
+"
+    
+    if not status:
+        text += "📋 <b>Доступные достижения:</b>
+
+"
+        for key, info in trigger_descriptions.items():
+            text += f"{info['name']}
+"
+            text += f"   {info['description']}
+"
+            text += f"   🎁 Награда: {info['reward']}
+
+"
+        
+        text += "💡 Начните действовать, чтобы открыть достижения!
+"
+        text += "📌 Полученные промокоды будут ждать вас в разделе «🎫 Мои промокоды»."
+        kb = get_back_keyboard("back_to_profile")
+        await callback.message.edit_text(
+            text,
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    
+    text += "📊 <b>Ваш прогресс:</b>
+
+"
+    
+    for trigger_type, data in status.items():
+        info = trigger_descriptions.get(trigger_type, {})
+        name = info.get('name', trigger_type)
+        description = info.get('description', '')
+        
+        current = data['current']
+        target = data['target']
+        is_completed = data['is_completed']
+        
+        progress = min(int((current / target) * 100), 100)
+        bar = "█" * (progress // 10) + "░" * (10 - progress // 10)
+        
+        status_icon = "✅" if is_completed else "⏳"
+        
+        text += f"{name}
+"
+        text += f"   {description}
+"
+        text += f"   Прогресс: {bar} {progress}%
+"
+        text += f"   {current}/{target} {status_icon}
+"
+        
+        # Показываем, какие промокоды можно получить
+        if data.get('promocodes'):
+            text += "   🎁 <b>Доступные награды:</b>
+"
+            for promo in data['promocodes']:
+                if promo['discount_percent'] > 0:
+                    text += f"      • {promo['code']}: {promo['discount_percent']}% скидка
+"
+                elif promo['discount_amount'] > 0:
+                    text += f"      • {promo['code']}: {promo['discount_amount']}₽ скидка
+"
+            text += "   📌 После получения промокод появится в «🎫 Мои промокоды»
+"
+        else:
+            if is_completed:
+                text += "   ✅ Все награды получены! Проверьте «🎫 Мои промокоды»
+"
+        text += "
+"
+    
+    text += "ℹ️ <b>Как это работает?</b>
+"
+    text += "1️⃣ Выполняйте действия из списка выше
+"
+    text += "2️⃣ При достижении цели вы получаете промокод
+"
+    text += "3️⃣ Промокод автоматически появляется в разделе «🎫 Мои промокоды»
+"
+    text += "4️⃣ Вы получаете уведомление о новой награде
+"
+    text += "5️⃣ Используйте промокод в любое время
+"
+    text += "6️⃣ Срок действия промокода — 3 месяца
+
+"
+    text += "💡 Приглашайте друзей, покупайте подписки и получайте бонусы!
+"
+    text += "📌 Все промокоды хранятся в «🎫 Мои промокоды»."
+    
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🔄 Обновить прогресс", callback_data="my_achievements")],
+        [types.InlineKeyboardButton(text="🎫 Мои промокоды", callback_data="my_promocodes")],
+        [types.InlineKeyboardButton(text="📖 О программе", callback_data="achievements_help")],
+        [types.InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="back_to_profile")]
+    ])
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()@router.callback_query(F.data == "achievements_help")
+async def achievements_help(callback: types.CallbackQuery):
+    """Подробная справка о системе достижений"""
+    text = """📖 <b>Система достижений и бонусов</b>
+
+🎯 <b>Что это?</b>
+Это система автоматических наград за активность.
+Вы выполняете действия, а бот выдаёт вам промокоды на скидки!
+
+📋 <b>Доступные достижения:</b>
+
+👥 <b>Рефералы</b>
+Приглашайте друзей по реферальной ссылке.
+За каждых 1, 3, 5, 10 друзей → промокод на скидку!
+
+🛒 <b>Покупки</b>
+Оплачивайте подписки в боте.
+За 1, 3, 5 покупок → промокод на скидку!
+
+📅 <b>Дни подписки</b>
+Будьте с нами дольше.
+За 7, 30, 90, 365 дней → промокод на скидку!
+
+💳 <b>Первая оплата</b>
+Совершите первую покупку.
+Приветственный бонус → промокод на скидку!
+
+⚡ <b>Как это работает?</b>
+1️⃣ Вы выполняете действие (приглашаете друга, покупаете подписку)
+2️⃣ Бот автоматически проверяет прогресс
+3️⃣ При достижении цели вы получаете промокод
+4️⃣ Промокод появляется в разделе «🎫 Мои промокоды»
+5️⃣ Вы получаете уведомление о новой награде
+6️⃣ Используйте промокод когда захотите
+
+🎁 <b>Где смотреть прогресс?</b>
+В разделе «🏆 Достижения» в вашем профиле.
+
+🎫 <b>Где хранятся промокоды?</b>
+Все полученные промокоды хранятся в разделе «🎫 Мои промокоды».
+
+📌 <b>Важно!</b>
+• Срок действия промокода — 3 месяца
+• Каждый промокод можно использовать только 1 раз
+• Вы сами решаете, когда применить промокод
+
+💡 <b>Совет:</b>
+Чем больше вы активны, тем больше скидок получаете!
+Приглашайте друзей и продлевайте подписки."""
+    
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🏆 Мои достижения", callback_data="my_achievements")],
+        [types.InlineKeyboardButton(text="🎫 Мои промокоды", callback_data="my_promocodes")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_profile")]
+    ])
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()@router.callback_query(F.data == "my_promocodes")
+async def show_my_promocodes(callback: types.CallbackQuery):
+    """Показывает все промокоды пользователя"""
+    from trigger_manager import trigger_manager
+    
+    # Активные промокоды
+    active = trigger_manager.get_user_promocodes(callback.from_user.id)
+    
+    # Использованные промокоды
+    used = trigger_manager.get_user_used_promocodes(callback.from_user.id)
+    
+    text = "🎫 <b>Мои промокоды</b>\n\n"
+    
+    if not active and not used:
+        text += "У вас пока нет промокодов.\n"
+        text += "Выполняйте достижения в разделе «🏆 Достижения» и получайте скидки!"
+    else:
+        if active:
+            text += "🟢 <b>Активные промокоды:</b>\n\n"
+            for promo in active:
+                days_left = (datetime.fromisoformat(promo['expires_at']) - datetime.now()).days
+                if promo['discount_percent'] > 0:
+                    discount_text = f"{promo['discount_percent']}%"
+                else:
+                    discount_text = f"{promo['discount_amount']}₽"
+                
+                # Определяем иконку для типа триггера
+                trigger_icons = {
+                    'referrals': '👥',
+                    'purchases': '🛒',
+                    'subscription_days': '📅',
+                    'first_payment': '💳'
+                }
+                icon = trigger_icons.get(promo.get('trigger_type', ''), '🎫')
+                
+                text += f"{icon} <b>{promo['code']}</b>\n"
+                text += f"   Скидка: {discount_text}\n"
+                text += f"   Действует: {days_left} дн.\n"
+                text += f"   ID: <code>{promo['id']}</code>\n\n"
+            
+            text += "💡 Используйте промокод при оформлении подписки!\n"
+            text += "Для применения введите ID промокода.\n\n"
+        else:
+            text += "❌ <b>Нет активных промокодов</b>\n\n"
+        
+        if used:
+            text += "🔒 <b>Использованные промокоды:</b>\n\n"
+            for promo in used[:5]:
+                if promo['discount_percent'] > 0:
+                    discount_text = f"{promo['discount_percent']}%"
+                else:
+                    discount_text = f"{promo['discount_amount']}₽"
+                
+                text += f"📌 {promo['code']} ({discount_text})\n"
+                text += f"   Использован: {promo['used_at'][:10]}\n"
+            if len(used) > 5:
+                text += f"\n... и ещё {len(used) - 5} промокодов\n"
+    
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🔄 Применить промокод", callback_data="apply_promocode")],
+        [types.InlineKeyboardButton(text="🏆 Достижения", callback_data="my_achievements")],
+        [types.InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="back_to_profile")]
+    ])
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "apply_promocode")
+async def apply_promocode_start(callback: types.CallbackQuery, state: FSMContext):
+    """Начало применения промокода"""
+    await callback.message.answer(
+        "✏️ <b>Введите ID промокода</b>\n\n"
+        "Введите ID промокода из списка активных.\n"
+        "Промокод будет применён к следующей покупке.\n\n"
+        "Или отправьте /cancel для отмены.",
+        parse_mode="HTML"
+    )
+    await state.set_state("waiting_promocode_id")
+    await callback.answer()
+
+@router.message(F.text)
+async def apply_promocode_process(message: types.Message, state: FSMContext):
+    """Обработка ввода ID промокода"""
+    current_state = await state.get_state()
+    if current_state != "waiting_promocode_id":
+        return
+    
+    if message.text.lower() == '/cancel':
+        await state.clear()
+        await message.answer(
+            "❌ Применение промокода отменено.",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        promo_id = int(message.text)
+        from trigger_manager import trigger_manager
+        
+        if trigger_manager.use_promocode(message.from_user.id, promo_id):
+            await message.answer(
+                f"✅ <b>Промокод применён!</b>\n\n"
+                f"Скидка будет применена при следующей покупке.\n"
+                f"ID промокода: <code>{promo_id}</code>",
+                parse_mode="HTML"
+            )
+            await state.clear()
+        else:
+            await message.answer(
+                "❌ <b>Не удалось применить промокод</b>\n\n"
+                "Возможные причины:\n"
+                "• Неверный ID\n"
+                "• Промокод уже использован\n"
+                "• Срок действия истёк\n\n"
+                "Проверьте список активных промокодов.",
+                parse_mode="HTML"
+            )
+    except ValueError:
+        await message.answer(
+            "❌ <b>Ошибка!</b>\n\n"
+            "Введите числовой ID промокода.\n"
+            "Пример: 123",
+            parse_mode="HTML"
+        )

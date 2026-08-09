@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h2>📈 Аналитика</h2></div>
+<div class="stat-grid">
+    <div class="stat-card blue"><h3>{{ total_users }}</h3><small>Всего пользователей</small></div>
+    <div class="stat-card green"><h3>{{ active_users }}</h3><small>Активных</small></div>
+    <div class="stat-card orange"><h3>{{ total_payments }}</h3><small>Всего платежей</small></div>
+    <div class="stat-card purple"><h3>{{ total_revenue }} ₽</h3><small>Выручка</small></div>
+</div>
+<div class="card"><div class="card-header">📊 Продажи за 7 дней</div><div class="card-body">
+    <ul class="list-unstyled">{% for d in payments_daily %}<li>{{ d[0] }} — {{ d[1] }} платежей</li>{% endfor %}</ul>
+</div></div>
+<div class="card"><div class="card-header">🏷️ Популярные тарифы</div><div class="card-body">
+    <ul class="list-unstyled">{% for t in top_tariffs %}<li>{{ t[0] }} — {{ t[1] }} подписок</li>{% endfor %}</ul>
+</div></div>
+{% endblock %}

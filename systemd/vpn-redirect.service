@@ -1,0 +1,17 @@
+[Unit]
+Description=VPN Incy Redirect API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/vpn-bot
+Environment="PATH=/opt/vpn-bot/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/opt/vpn-bot/venv/bin/python /opt/vpn-bot/redirect_api.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

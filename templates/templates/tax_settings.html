@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h2>🧾 Настройки налогов</h2>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        ⚙️ Конфигурация
+    </div>
+    <div class="card-body">
+        <form method="POST" action="/tax-settings">
+            <div class="mb-3 form-check">
+                <input type="checkbox" name="tax_enabled" class="form-check-input" id="tax_enabled"
+                       {% if settings.get('tax_enabled') == 'true' %}checked{% endif %}>
+                <label class="form-check-label fw-semibold" for="tax_enabled">
+                    Включить отправку чеков
+                </label>
+                <div class="text-muted small">При включении для каждого успешного платежа будет создаваться чек</div>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-semibold">ИНН самозанятого (12 цифр)</label>
+                <input type="text" name="tax_inn" class="form-control form-control-lg" 
+                       value="{{ settings.get('tax_inn', '') }}" 
+                       placeholder="Например: 631926684806">
+                <div class="text-muted small">12 цифр без пробелов и тире</div>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-semibold">Пароль от «Мой налог»</label>
+                <input type="password" name="tax_password" class="form-control form-control-lg" 
+                       value="{{ settings.get('tax_password', '') }}"
+                       placeholder="Пароль от личного кабинета">
+                <div class="text-muted small">Тот же пароль, что и для входа на lknpd.nalog.ru</div>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-semibold">Шаблон описания чека</label>
+                <input type="text" name="tax_description_template" class="form-control form-control-lg" 
+                       value="{{ settings.get('tax_description_template', 'Оплата VPN-подписки') }}">
+                <div class="text-muted small">Будет подставляться в описание чека</div>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-lg px-5">💾 Сохранить настройки</button>
+        </form>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        📖 Как это работает
+    </div>
+    <div class="card-body">
+        <ol class="mb-0">
+            <li>При успешной оплате подписки создаётся чек в «Мой налог»</li>
+            <li>Чек регистрирует доход самозанятого</li>
+            <li>Ссылка на чек отправляется пользователю в Telegram</li>
+            <li>Пользователь может сохранить чек для своих целей</li>
+        </ol>
+    </div>
+</div>
+{% endblock %}

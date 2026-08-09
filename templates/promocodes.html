@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-ticket"></i> Промокоды</h1>
+</div>
+
+{% if request.query_params.get('saved') %}
+<div class="alert alert-success">✅ Промокод создан!</div>
+{% endif %}
+{% if request.query_params.get('deleted') %}
+<div class="alert alert-success">✅ Промокод удалён!</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-header">➕ Создать промокод</div>
+    <div class="card-body">
+        <form method="POST" action="/promocodes/add">
+            <div class="row">
+                <div class="form-group">
+                    <label>Код промокода</label>
+                    <input type="text" class="form-control" name="code" placeholder="Введите код" required>
+                </div>
+                <div class="form-group">
+                    <label>Тип активации</label>
+                    <select class="form-control" name="trigger_type" id="trigger_type" onchange="toggleTriggerParams()">
+                        <option value="manual">✋ Ручная активация</option>
+                        <option value="referrals">👥 Рефералы</option>
+                        <option value="purchases">🛒 Покупки</option>
+                        <option value="subscription_days">📅 Дни подписки</option>
+                        <option value="first_payment">💳 Первая оплата</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="trigger_params" class="hidden" style="display:none;">
+                <div class="row">
+                    <div class="form-group">
+                        <label>Целевое значение</label>
+                        <input type="number" class="form-control" name="trigger_target" placeholder="Например: 5" min="1">
+                    </div>
+                    <div class="form-group">
+                        <label>Описание триггера</label>
+                        <input type="text" class="form-control" name="trigger_description" placeholder="Описание для пользователя" value="Достижение цели">
+                    </div>
+                </div>
+                <div class="alert alert-info" id="trigger_info">
+                    <span>ℹ️ </span>
+                    <span id="trigger_description">При достижении цели промокод активируется автоматически</span>
+                </div>
+            </div>
+
+            <div class="row">
+                <div class="form-group">
+                    <label>Скидка (%)</label>
+                    <input type="number" class="form-control" name="discount_percent" placeholder="30" min="0" max="100">
+                </div>
+                <div class="form-group">
+                    <label>Скидка (₽)</label>
+                    <input type="number" class="form-control" name="discount_amount" placeholder="200" min="0" step="0.01">
+                </div>
+            </div>
+
+            <div class="row">
+                <div class="form-group">
+                    <label>Максимальное использование</label>
+                    <input type="number" class="form-control" name="max_uses" placeholder="100" value="1" min="1">
+                </div>
+                <div class="form-group">
+                    <label>Действителен до</label>
+                    <input type="datetime-local" class="form-control" name="valid_until">
+                </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary">✅ Создать промокод</button>
+        </form>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <span>📋 Список промокодов</span>
+        <span class="text-muted">Всего: {{ promocodes|length }}</span>
+    </div>
+    <div class="card-body">
+        <div class="table-wrapper">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Код</th>
+                        <th>Скидка</th>
+                        <th>Тип</th>
+                        <th>Использовано</th>
+                        <th>Статус</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for promo in promocodes %}
+                    <tr>
+                        <td><code>{{ promo[1] }}</code></td>
+                        <td>
+                            {% if promo[2] > 0 %}{{ promo[2] }}%{% endif %}
+                            {% if promo[3] > 0 %}{{ promo[3] }}₽{% endif %}
+                            {% if promo[2] == 0 and promo[3] == 0 %}0{% endif %}
+                        </td>
+                        <td>
+                            {% if promo[7] == 'manual' %}
+                            <span class="badge badge-secondary">✋ Ручной</span>
+                            {% elif promo[7] == 'referrals' %}
+                            <span class="badge badge-info">👥 Рефералы</span>
+                            {% elif promo[7] == 'purchases' %}
+                            <span class="badge badge-warning">🛒 Покупки</span>
+                            {% elif promo[7] == 'subscription_days' %}
+                            <span class="badge badge-info">📅 Дни подписки</span>
+                            {% elif promo[7] == 'first_payment' %}
+                            <span class="badge badge-success">💳 Первая оплата</span>
+                            {% else %}
+                            <span class="badge badge-secondary">{{ promo[7] }}</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ promo[6] }}/{{ promo[5] }}</td>
+                        <td>
+                            {% if promo[8] == 1 %}
+                            <span class="badge badge-success">✅ Активен</span>
+                            {% else %}
+                            <span class="badge badge-danger">❌ Неактивен</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <div class="btn-group">
+                                <a href="/promocodes/edit/{{ promo[0] }}" class="btn btn-primary btn-sm"><i class="fas fa-pen"></i></a>
+                                <form method="POST" action="/promocodes/delete/{{ promo[0] }}" style="display:inline;">
+                                    <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Удалить промокод?')"><i class="fas fa-trash"></i></button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+function toggleTriggerParams() {
+    const triggerType = document.getElementById('trigger_type').value;
+    const paramsDiv = document.getElementById('trigger_params');
+    const descriptionSpan = document.getElementById('trigger_description');
+    const descriptions = {
+        'manual': 'Промокод активируется вручную администратором',
+        'referrals': 'Пригласите указанное количество друзей по реферальной ссылке',
+        'purchases': 'Совершите указанное количество покупок в боте',
+        'subscription_days': 'Наберите указанное количество дней с активной подпиской',
+        'first_payment': 'Промокод активируется после первой оплаты'
+    };
+    if (triggerType === 'manual') {
+        paramsDiv.style.display = 'none';
+    } else {
+        paramsDiv.style.display = 'block';
+        descriptionSpan.textContent = descriptions[triggerType] || 'При достижении цели промокод активируется автоматически';
+    }
+}
+document.addEventListener('DOMContentLoaded', toggleTriggerParams);
+</script>
+{% endblock %}

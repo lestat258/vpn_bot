@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h2>💳 Оплаты</h2></div>
+<div class="stat-grid">
+    <div class="stat-card blue"><h3>{{ total_payments }}</h3><small>Всего платежей</small></div>
+    <div class="stat-card green"><h3>{{ total_amount }} ₽</h3><small>Общая сумма</small></div>
+    <div class="stat-card orange"><h3>{{ paid_count }}</h3><small>Успешных</small></div>
+    <div class="stat-card red"><h3>{{ pending_count }}</h3><small>В обработке</small></div>
+</div>
+<div class="card"><div class="card-header">📋 История платежей</div><div class="card-body p-0">
+    <div class="table-responsive"><table class="table table-striped table-hover">
+        <thead><tr><th>ID</th><th>Пользователь</th><th>Тариф</th><th>Сумма</th><th>Статус</th><th>Дата</th></tr></thead>
+        <tbody>{% for p in payments %}<tr>
+            <td>{{ p[0] }}</td><td>{{ p[1] or '—' }}</td><td>{{ p[2] or '—' }}</td>
+            <td>{{ p[3] }} ₽</td>
+            <td>{% if p[4] == 'paid' %}✅ Оплачено{% else %}⏳ В обработке{% endif %}</td>
+            <td>{{ p[5][:16] }}</td>
+        </tr>{% endfor %}</tbody>
+    </table></div>
+</div></div>
+{% endblock %}

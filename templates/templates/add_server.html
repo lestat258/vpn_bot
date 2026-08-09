@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h2>🖥 Добавление сервера</h2>
+    <a href="/servers" class="btn btn-secondary">🔙 Назад</a>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        ➕ Новый сервер
+    </div>
+    <div class="card-body">
+        <form method="POST" action="/servers/add">
+            <div class="mb-3">
+                <label class="form-label fw-semibold">📛 Название сервера</label>
+                <input type="text" name="name" class="form-control form-control-lg" 
+                       placeholder="Например: Основной сервер" required>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-semibold">🔗 URL панели</label>
+                <input type="url" name="url" class="form-control form-control-lg" 
+                       placeholder="https://node5.vpn4us.ru:61593/path" required>
+                <div class="text-muted small">Полный URL до панели 3X-UI</div>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-semibold">🔑 API Token</label>
+                <input type="text" name="api_token" class="form-control form-control-lg" 
+                       placeholder="Введите API токен" required>
+                <div class="text-muted small">Токен для доступа к API 3X-UI</div>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-semibold">🔗 URL для подписки</label>
+                <input type="url" name="sub_url" class="form-control form-control-lg" 
+                       placeholder="https://31.77.142.143:2096/sub/">
+                <div class="text-muted small">Оставьте пустым для автоматического определения</div>
+            </div>
+
+            <div class="mt-4">
+                <button type="submit" class="btn btn-primary btn-lg px-5">✅ Добавить сервер</button>
+                <a href="/servers" class="btn btn-secondary btn-lg px-4">🔙 Отмена</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

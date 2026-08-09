@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h2>📦 Добавление тарифа</h2>
+    <a href="/tariffs" class="btn btn-secondary">🔙 Назад</a>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        ➕ Новый тариф
+    </div>
+    <div class="card-body">
+        <form method="POST" action="/tariffs/add">
+            <div class="mb-3">
+                <label class="form-label fw-semibold">📛 Название тарифа</label>
+                <input type="text" name="name" class="form-control form-control-lg" 
+                       placeholder="Например: 1 месяц" required>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-semibold">💰 Цена (₽)</label>
+                <input type="number" name="price_rub" class="form-control form-control-lg" 
+                       placeholder="150" step="0.01" required>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-semibold">📅 Дней</label>
+                <input type="number" name="duration_days" class="form-control form-control-lg" 
+                       placeholder="30" required>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-semibold">📦 Трафик (ГБ, 0 = ∞)</label>
+                <input type="number" name="traffic_gb" class="form-control form-control-lg" 
+                       placeholder="0" step="0.1" value="0">
+                <div class="text-muted small">0 означает безлимитный трафик</div>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-semibold">📱 Лимит IP</label>
+                <input type="number" name="ip_limit" class="form-control form-control-lg" 
+                       placeholder="3" value="3">
+                <div class="text-muted small">Количество устройств, которые можно подключить одновременно</div>
+            </div>
+
+            <div class="mt-4">
+                <button type="submit" class="btn btn-primary btn-lg px-5">✅ Создать тариф</button>
+                <a href="/tariffs" class="btn btn-secondary btn-lg px-4">🔙 Отмена</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

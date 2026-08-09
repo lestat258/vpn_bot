@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-key"></i> Добавить ключ</h1>
+    <a href="/users/{{ telegram_id }}" class="btn btn-secondary">← Назад к пользователю</a>
+</div>
+
+<div class="card">
+    <div class="card-header">📋 Выберите тариф</div>
+    <div class="card-body">
+        <form method="POST" action="/users/{{ telegram_id }}/add-key">
+            <div class="form-group">
+                <label>Тариф</label>
+                <select class="form-control" name="tariff_id" required>
+                    {% for tariff in tariffs %}
+                    <option value="{{ tariff[0] }}">
+                        {{ tariff[1] }} — {{ tariff[2] }}₽ / {{ tariff[3] }} дн.
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Количество дней</label>
+                <input type="number" class="form-control" name="days" value="30" min="1" max="365" required>
+            </div>
+            <button type="submit" class="btn btn-success">✅ Добавить ключ</button>
+        </form>
+    </div>
+</div>
+{% endblock %}

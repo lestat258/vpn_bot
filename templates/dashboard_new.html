@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid">
+    <h2 class="mb-4">📊 Дашборд</h2>
+
+    <!-- Карточки статистики -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card bg-primary text-white">
+                <div class="card-body">
+                    <h5 class="card-title">👤 Пользователи</h5>
+                    <h2>{{ users_count }}</h2>
+                    <small>Всего зарегистрировано</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-success text-white">
+                <div class="card-body">
+                    <h5 class="card-title">✅ Активные подписки</h5>
+                    <h2>{{ active_subs }}</h2>
+                    <small>Действующих</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-info text-white">
+                <div class="card-body">
+                    <h5 class="card-title">💰 Платежей</h5>
+                    <h2>{{ payments_count }}</h2>
+                    <small>Всего</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-warning text-white">
+                <div class="card-body">
+                    <h5 class="card-title">🖥 Серверов</h5>
+                    <h2>{{ servers_count }}</h2>
+                    <small>Активных</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Графики -->
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    📈 Платежи по дням (последние 30 дней)
+                </div>
+                <div class="card-body">
+                    <canvas id="paymentsChart" height="200"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    🏷️ Популярные тарифы
+                </div>
+                <div class="card-body">
+                    <canvas id="tariffsChart" height="200"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row mt-4">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    📅 Новые пользователи (последние 30 дней)
+                </div>
+                <div class="card-body">
+                    <canvas id="usersChart" height="200"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    💰 Доход (последние 30 дней)
+                </div>
+                <div class="card-body">
+                    <canvas id="revenueChart" height="200"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Данные для графиков из API
+    fetch('/api/charts-data')
+        .then(response => response.json())
+        .then(data => {
+            // График платежей
+            new Chart(document.getElementById('paymentsChart'), {
+                type: 'line',
+                data: {
+                    labels: data.payments_daily.map(d => d.date),
+                    datasets: [{
+                        label: 'Платежи',
+                        data: data.payments_daily.map(d => d.count),
+                        borderColor: '#007AFF',
+                        backgroundColor: 'rgba(0,122,255,0.1)',
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { display: false }
+                    }
+                }
+            });
+
+            // График тарифов
+            new Chart(document.getElementById('tariffsChart'), {
+                type: 'doughnut',
+                data: {
+                    labels: data.top_tariffs.map(d => d.name),
+                    datasets: [{
+                        data: data.top_tariffs.map(d => d.count),
+                        backgroundColor: ['#007AFF', '#34C759', '#FF9500', '#FF3B30', '#AF52DE']
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { position: 'bottom' }
+                    }
+                }
+            });
+
+            // График пользователей
+            new Chart(document.getElementById('usersChart'), {
+                type: 'bar',
+                data: {
+                    labels: data.users_daily.map(d => d.date),
+                    datasets: [{
+                        label: 'Новые пользователи',
+                        data: data.users_daily.map(d => d.count),
+                        backgroundColor: '#34C759'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { display: false }
+                    }
+                }
+            });
+
+            // График дохода
+            new Chart(document.getElementById('revenueChart'), {
+                type: 'line',
+                data: {
+                    labels: data.revenue_daily.map(d => d.date),
+                    datasets: [{
+                        label: 'Доход (₽)',
+                        data: data.revenue_daily.map(d => d.amount),
+                        borderColor: '#34C759',
+                        backgroundColor: 'rgba(52,199,89,0.1)',
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h2>💾 Бэкап</h2></div>
+<div class="stat-grid">
+    <div class="stat-card blue"><a href="/backup/download-db" class="btn btn-primary w-100">📥 Скачать базу</a><small>Пользователи, платежи, подписки</small></div>
+    <div class="stat-card green"><a href="/backup/download-settings" class="btn btn-success w-100">📥 Скачать настройки</a><small>Токены, тексты, ID</small></div>
+</div>
+<div class="card"><div class="card-header">🔄 Восстановить настройки</div><div class="card-body">
+    <form method="POST" action="/backup/restore">
+        <div class="mb-3"><label class="form-label">Вставьте JSON настроек</label><textarea name="settings_json" class="form-control" rows="4" placeholder='{"bot_token":"...","yookassa_shop_id":"..."}'></textarea></div>
+        <button type="submit" class="btn btn-warning">🔄 Восстановить</button>
+    </form>
+</div></div>
+{% endblock %}

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h2>📦 Тарифы</h2>
+    <a href="/tariffs/add" class="btn btn-primary">➕ Добавить тариф</a>
+</div>
+
+{% if deleted %}
+<div class="alert alert-success">✅ Тариф успешно удалён!</div>
+{% endif %}
+
+{% if error %}
+<div class="alert alert-danger">{{ error }}</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-header">📋 Список тарифов</div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-striped table-hover">
+                <thead>
+                    <tr>
+                        <th>Название</th>
+                        <th>Цена</th>
+                        <th>Дней</th>
+                        <th>Трафик</th>
+                        <th>IP</th>
+                        <th>Статус</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for t in tariffs %}
+                    <tr>
+                        <td><strong>{{ t[1] }}</strong></td>
+                        <td>{{ t[2] }} ₽</td>
+                        <td>{{ t[3] }} дн.</td>
+                        <td>{% if t[4] %}{{ t[4] }} ГБ{% else %}∞{% endif %}</td>
+                        <td>{{ t[5] }}</td>
+                        <td>{% if t[6] %}✅ Активен{% else %}❌ Неактивен{% endif %}</td>
+                        <td>
+                            <a href="/tariffs/edit/{{ t[0] }}" class="btn btn-sm btn-warning">✏️</a>
+                            <form method="POST" action="/tariffs/delete/{{ t[0] }}" style="display:inline;"
+                                  onsubmit="return confirm('Удалить тариф «{{ t[1] }}»? Это действие необратимо.');">
+                                <button type="submit" class="btn btn-sm btn-danger">🗑</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

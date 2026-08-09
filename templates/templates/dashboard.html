@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h2>📊 Дашборд</h2>
+</div>
+
+<div class="stat-grid">
+    <div class="stat-card blue">
+        <h3>{{ users_count }}</h3>
+        <small>👤 Пользователи</small>
+    </div>
+    <div class="stat-card green">
+        <h3>{{ active_subs }}</h3>
+        <small>✅ Активные подписки</small>
+    </div>
+    <div class="stat-card orange">
+        <h3>{{ payments_count }}</h3>
+        <small>💰 Платежей</small>
+    </div>
+    <div class="stat-card purple">
+        <h3>{{ servers_count }}</h3>
+        <small>🖥 Серверов</small>
+    </div>
+</div>
+
+<div class="card mt-4">
+    <div class="card-header">📈 Графики</div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-6 mb-4">
+                <div class="chart-container">
+                    <h6 class="text-muted mb-2">📊 Платежи по дням</h6>
+                    <canvas id="paymentsChart" height="180"></canvas>
+                </div>
+            </div>
+            <div class="col-md-6 mb-4">
+                <div class="chart-container">
+                    <h6 class="text-muted mb-2">🏷️ Популярные тарифы</h6>
+                    <div style="max-width: 280px; margin: 0 auto;">
+                        <canvas id="tariffsChart" height="180"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="row">
+            <div class="col-md-6 mb-4">
+                <div class="chart-container">
+                    <h6 class="text-muted mb-2">👤 Новые пользователи</h6>
+                    <canvas id="usersChart" height="180"></canvas>
+                </div>
+            </div>
+            <div class="col-md-6 mb-4">
+                <div class="chart-container">
+                    <h6 class="text-muted mb-2">💰 Доход по дням</h6>
+                    <canvas id="revenueChart" height="180"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    fetch('/api/charts-data')
+        .then(r => r.json())
+        .then(data => {
+            if (data.payments_daily?.length) {
+                new Chart(document.getElementById('paymentsChart'), {
+                    type: 'line',
+                    data: {
+                        labels: data.payments_daily.map(d => d.date),
+                        datasets: [{
+                            label: 'Количество платежей',
+                            data: data.payments_daily.map(d => d.count),
+                            borderColor: '#007AFF',
+                            backgroundColor: 'rgba(0,122,255,0.1)',
+                            fill: true,
+                            tension: 0.4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        plugins: {
+                            legend: { display: true, position: 'top' }
+                        }
+                    }
+                });
+            }
+
+            if (data.top_tariffs?.length) {
+                new Chart(document.getElementById('tariffsChart'), {
+                    type: 'doughnut',
+                    data: {
+                        labels: data.top_tariffs.map(d => d.name),
+                        datasets: [{
+                            data: data.top_tariffs.map(d => d.count),
+                            backgroundColor: ['#007AFF','#34C759','#FF9500','#FF3B30','#AF52DE']
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        plugins: {
+                            legend: { 
+                                position: 'bottom',
+                                labels: { boxWidth: 12, padding: 8, font: { size: 11 } }
+                            }
+                        }
+                    }
+                });
+            }
+
+            if (data.users_daily?.length) {
+                new Chart(document.getElementById('usersChart'), {
+                    type: 'bar',
+                    data: {
+                        labels: data.users_daily.map(d => d.date),
+                        datasets: [{
+                            label: 'Новые пользователи',
+                            data: data.users_daily.map(d => d.count),
+                            backgroundColor: '#34C759'
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        plugins: {
+                            legend: { display: true, position: 'top' }
+                        }
+                    }
+                });
+            }
+
+            if (data.revenue_daily?.length) {
+                new Chart(document.getElementById('revenueChart'), {
+                    type: 'line',
+                    data: {
+                        labels: data.revenue_daily.map(d => d.date),
+                        datasets: [{
+                            label: 'Выручка (₽)',
+                            data: data.revenue_daily.map(d => d.amount),
+                            borderColor: '#34C759',
+                            backgroundColor: 'rgba(52,199,89,0.1)',
+                            fill: true,
+                            tension: 0.4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        plugins: {
+                            legend: { display: true, position: 'top' }
+                        },
+                        scales: { y: { beginAtZero: true } }
+                    }
+                });
+            }
+        })
+        .catch(error => console.error('Error loading chart data:', error));
+});
+</script>
+{% endblock %}

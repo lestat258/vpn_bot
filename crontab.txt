@@ -1,0 +1,27 @@
+# ============================================
+# VPN BOT — РАСПИСАНИЕ CRON ЗАДАЧ
+# ============================================
+
+# 📦 БЭКАПЫ
+0 3 * * * /opt/vpn-bot/backup.sh
+0 */4 * * * /opt/vpn-bot/backup_cron.sh
+0 3 * * * /opt/vpn-bot/daily_backup.sh
+
+# 🧹 ОЧИСТКА
+0 3 * * * /opt/vpn-bot/cleanup_expired.sh
+0 * * * * /opt/vpn-bot/venv/bin/python3 /opt/vpn-bot/cleanup_pending_payments.py >> /opt/vpn-bot/logs/cleanup_payments.log 2>&1
+
+# 🔍 МОНИТОРИНГ
+*/5 * * * * /opt/vpn-bot/healthcheck.sh >> /var/log/vpn-bot-health.log 2>&1
+*/5 * * * * /opt/vpn-bot/monitor_servers.sh
+
+# 📨 УВЕДОМЛЕНИЯ
+0 * * * * /opt/vpn-bot/check_and_notify.sh >> /var/log/vpn-bot-notifications.log 2>&1
+
+# 🚀 АВТОЗАПУСК
+@reboot /opt/vpn-bot/start_automation.sh
+
+# 🔐 SSL СЕРТИФИКАТЫ
+58 5,11,17,23 * * * "/root/.acme.sh"/acme.sh --cron --home "/root/.acme.sh" > /dev/null
+0 */6 * * * cd /opt/vpn-bot && /opt/vpn-bot/venv/bin/python /opt/vpn-bot/run_auto_renew.py
+0 9 * * * cd /opt/vpn-bot && /opt/vpn-bot/venv/bin/python -c "import asyncio; from auto_renew import auto_renew_manager; asyncio.run(auto_renew_manager.check_expiring_soon())"

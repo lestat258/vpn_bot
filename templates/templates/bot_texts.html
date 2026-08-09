@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h2>💬 Тексты бота</h2>
+</div>
+
+<div class="alert alert-info">
+    <strong>ℹ️</strong> Одно поле = одно сообщение. Поддерживается HTML.
+    Изменения применяются сразу после сохранения.
+</div>
+
+<div class="card">
+    <div class="card-header">
+        📝 Редактирование текстов
+    </div>
+    <div class="card-body">
+        <form method="POST" action="/bot-texts">
+            {% for key, label in [
+                ('text_welcome', '🎉 Приветственное (первое сообщение)'),
+                ('text_start', '🏠 Стартовое (после Start)'),
+                ('text_about', 'ℹ️ О сервисе'),
+                ('text_support', '📞 Поддержка'),
+                ('text_payment', '💳 Текст перед оплатой'),
+                ('text_success', '✅ После успешной оплаты'),
+                ('text_instruction', '📱 Инструкция по установке'),
+                ('text_install_vpn', '📥 Установить VPN — общий текст'),
+                ('text_android_instruction', '🤖 Инструкция для Android'),
+                ('text_ios_instruction', '🍏 Инструкция для iOS'),
+                ('text_windows_instruction', '💻 Инструкция для Windows'),
+                ('text_faq', '❓ Вопросы (FAQ)')
+            ] %}
+            <div class="mb-4">
+                <label class="form-label fw-semibold fs-5">{{ label }}</label>
+                <textarea name="{{ key }}" class="form-control form-control-lg"
+                          rows="{% if key == 'text_faq' %}8{% else %}4{% endif %}" 
+                          style="font-size:1rem; padding:12px;">{{ settings.get(key, '') }}</textarea>
+                <div class="text-muted mt-1 small">Поддерживается HTML</div>
+            </div>
+            {% endfor %}
+
+            <div class="mt-4">
+                <button type="submit" class="btn btn-primary btn-lg px-5">💾 Сохранить все тексты</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

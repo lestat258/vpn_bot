@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h2>👤 Карточка пользователя</h2>
+    <a href="/users" class="btn btn-secondary">🔙 Назад</a>
+</div>
+
+{% if request.query_params.get('success') %}
+<div class="alert alert-success">{{ request.query_params.get('success') }}</div>
+{% endif %}
+
+{% if request.query_params.get('error') %}
+<div class="alert alert-danger">{{ request.query_params.get('error') }}</div>
+{% endif %}
+
+<!-- Информация о пользователе -->
+<div class="card mb-4">
+    <div class="card-header">
+        📋 Информация
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-3"><strong>ID:</strong> {{ user[1] }}</div>
+            <div class="col-md-3"><strong>Имя:</strong> {{ user[3] or 'Не указано' }}</div>
+            <div class="col-md-3"><strong>Username:</strong> @{{ user[2] or 'Нет' }}</div>
+            <div class="col-md-3"><strong>Баланс:</strong> {{ user[6] or 0 }} ₽</div>
+        </div>
+        <div class="row mt-2">
+            <div class="col-md-6"><strong>Регистрация:</strong> {{ user[4][:16] if user[4] else 'Неизвестно' }}</div>
+            <div class="col-md-6"><strong>Статус:</strong> {% if user[5] %}🔴 Заблокирован{% else %}🟢 Активен{% endif %}</div>
+        </div>
+    </div>
+</div>
+
+<!-- Добавление ключа -->
+<div class="card mb-4">
+    <div class="card-header">
+        ➕ Добавить ключ
+    </div>
+    <div class="card-body">
+        <form method="POST" action="/users/{{ user[1] }}/add-key" class="row g-3">
+            <div class="col-md-4">
+                <label class="form-label">Тариф</label>
+                <select name="tariff_id" class="form-select" required>
+                    <option value="">Выберите тариф</option>
+                    {% for t in tariffs %}
+                    <option value="{{ t[0] }}">{{ t[1] }} — {{ t[2] }}₽ / {{ t[3] }} дн.</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Дней</label>
+                <input type="number" name="days" class="form-control" value="30" min="1" required>
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+                <button type="submit" class="btn btn-primary w-100">➕ Добавить ключ</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Список ключей (ВСЕ, включая неактивные и истекшие) -->
+<div class="card mb-4">
+    <div class="card-header">
+        🔑 Все ключи пользователя ({{ subscriptions|length }})
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-striped table-hover">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Тариф</th>
+                        <th>Email</th>
+                        <th>Действует до</th>
+                        <th>Статус</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for sub in subscriptions %}
+                    <tr>
+                        <td>{{ sub[0] }}</td>
+                        <td>{{ sub[1] }}</td>
+                        <td><code>{{ sub[2] }}</code></td>
+                        <td>{{ sub[3][:16] if sub[3] else 'Бессрочно' }}</td>
+                        <td>
+                            {% if sub[4] == 1 and (not sub[3] or sub[3] > now) %}
+                                <span class="badge bg-success">✅ Активна</span>
+                            {% elif sub[4] == 1 and sub[3] and sub[3] <= now %}
+                                <span class="badge bg-warning">⏳ Истекла</span>
+                            {% else %}
+                                <span class="badge bg-danger">❌ Неактивна</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <form method="POST" action="/users/{{ user[1] }}/delete-key/{{ sub[0] }}"
+                                  onsubmit="return confirm('Удалить ключ {{ sub[2] }}?');">
+                                <button type="submit" class="btn btn-danger btn-sm">🗑 Удалить</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    {% if not subscriptions %}
+                    <tr><td colspan="6" class="text-center text-muted">📭 Нет ключей</td></tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Платежи -->
+<div class="card">
+    <div class="card-header">
+        💳 Последние платежи
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-striped table-hover">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Сумма</th>
+                        <th>Статус</th>
+                        <th>Дата</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for pay in payments %}
+                    <tr>
+                        <td>{{ pay[0] }}</td>
+                        <td>{{ pay[1] }} ₽</td>
+                        <td>{% if pay[2] == 'paid' %}✅ Оплачен{% else %}⏳ В обработке{% endif %}</td>
+                        <td>{{ pay[3][:16] }}</td>
+                    </tr>
+                    {% endfor %}
+                    {% if not payments %}
+                    <tr><td colspan="4" class="text-center text-muted">📭 Нет платежей</td></tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

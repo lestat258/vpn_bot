@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>VPN Bot — iOS Style</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <style>
+        /* ===== iOS STYLE ===== */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background: #f2f2f7;
+            font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            min-height: 100vh;
+            color: #1c1c1e;
+            padding-top: 0;
+        }
+
+        /* --- Сайдбар iOS (развёрнут по умолчанию) --- */
+        .sidebar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            width: 220px; /* всегда развёрнут */
+            background: rgba(255, 255, 255, 0.92);
+            backdrop-filter: saturate(180%) blur(20px);
+            -webkit-backdrop-filter: saturate(180%) blur(20px);
+            border-right: 0.5px solid rgba(60, 60, 67, 0.08);
+            padding: 16px 0 0 0;
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), width 0.3s;
+            overflow: hidden;
+            box-shadow: 0 0 30px rgba(0,0,0,0.04);
+            transform: translateX(0);
+        }
+        /* Скрытый сайдбар (уезжает влево) */
+        .sidebar.collapsed {
+            transform: translateX(-180px);
+            width: 220px;
+        }
+        .sidebar.collapsed .logo span,
+        .sidebar.collapsed .nav-link span {
+            opacity: 0;
+        }
+        .sidebar.collapsed:hover {
+            transform: translateX(0);
+        }
+        .sidebar.collapsed:hover .logo span,
+        .sidebar.collapsed:hover .nav-link span {
+            opacity: 1;
+        }
+
+        .sidebar .logo {
+            font-size: 22px;
+            font-weight: 700;
+            color: #1c1c1e;
+            letter-spacing: -0.5px;
+            padding: 8px 0 16px 0;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+            padding-left: 20px;
+        }
+        .sidebar .logo i {
+            font-size: 28px;
+            color: #007AFF;
+            min-width: 28px;
+        }
+        .sidebar .logo span {
+            transition: opacity 0.3s;
+        }
+
+        .sidebar .nav {
+            width: 100%;
+            padding: 0 8px;
+            flex: 1;
+            overflow-y: auto;
+        }
+        .sidebar .nav-link {
+            color: #8e8e93;
+            padding: 10px 16px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            white-space: nowrap;
+            transition: all 0.2s;
+            text-decoration: none;
+            margin-bottom: 2px;
+        }
+        .sidebar .nav-link i {
+            font-size: 20px;
+            min-width: 24px;
+            text-align: center;
+        }
+        .sidebar .nav-link span {
+            transition: opacity 0.3s;
+        }
+        .sidebar .nav-link:hover {
+            background: rgba(0, 122, 255, 0.08);
+            color: #007AFF;
+        }
+        .sidebar .nav-link.active {
+            background: #007AFF;
+            color: #fff;
+        }
+        .sidebar .nav-link.active i {
+            color: #fff;
+        }
+        .sidebar .nav-link.text-danger {
+            color: #FF3B30;
+        }
+        .sidebar .nav-link.text-danger:hover {
+            background: rgba(255, 59, 48, 0.1);
+            color: #FF3B30;
+        }
+
+        /* --- Показываем иконки всегда --- */
+        .sidebar.collapsed .nav-link span {
+            opacity: 0;
+        }
+        .sidebar.collapsed .nav-link i {
+            margin-right: 0;
+        }
+
+        /* --- Контент --- */
+        .main-content {
+            margin-left: 220px;
+            padding: 24px 32px;
+            min-height: 100vh;
+            transition: margin-left 0.3s;
+        }
+        .sidebar.collapsed ~ .main-content {
+            margin-left: 60px;
+        }
+
+        /* --- Карточки iOS --- */
+        .card {
+            border-radius: 16px;
+            border: none;
+            background: rgba(255, 255, 255, 0.92);
+            backdrop-filter: saturate(180%) blur(20px);
+            -webkit-backdrop-filter: saturate(180%) blur(20px);
+            box-shadow: 0 2px 20px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.03);
+            margin-bottom: 24px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .card:hover {
+            box-shadow: 0 8px 40px rgba(0, 0, 0, 0.06);
+        }
+        .card-header {
+            background: transparent;
+            border-bottom: 0.5px solid rgba(60, 60, 67, 0.06);
+            font-weight: 600;
+            padding: 16px 20px;
+            font-size: 15px;
+            color: #1c1c1e;
+            letter-spacing: -0.2px;
+        }
+        .card-body {
+            padding: 20px;
+        }
+        .card-body.p-0 .table {
+            margin: 0;
+        }
+
+        /* --- Таблицы --- */
+        .table {
+            font-size: 14px;
+            color: #1c1c1e;
+        }
+        .table th {
+            border-top: none;
+            font-weight: 600;
+            color: #8e8e93;
+            background: transparent;
+            padding: 12px 16px;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+        .table td {
+            padding: 12px 16px;
+            vertical-align: middle;
+            border-bottom: 0.5px solid rgba(60, 60, 67, 0.05);
+        }
+        .table-striped tbody tr:nth-of-type(odd) {
+            background: rgba(0, 0, 0, 0.01);
+        }
+        .table-hover tbody tr:hover {
+            background: rgba(0, 122, 255, 0.04);
+        }
+
+        /* --- Badges --- */
+        .badge {
+            font-size: 12px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-weight: 500;
+            letter-spacing: -0.2px;
+        }
+        .badge.bg-success { background: #34C759 !important; }
+        .badge.bg-danger { background: #FF3B30 !important; }
+        .badge.bg-warning { background: #FF9500 !important; color: #1c1c1e; }
+        .badge.bg-secondary { background: #8e8e93 !important; }
+
+        /* --- Кнопки --- */
+        .btn {
+            border-radius: 12px;
+            font-weight: 500;
+            padding: 8px 18px;
+            font-size: 14px;
+            transition: all 0.2s;
+            border: none;
+        }
+        .btn-primary {
+            background: #007AFF;
+            color: #fff;
+        }
+        .btn-primary:hover {
+            background: #0066D9;
+            transform: scale(0.97);
+        }
+        .btn-success {
+            background: #34C759;
+        }
+        .btn-danger {
+            background: #FF3B30;
+        }
+        .btn-warning {
+            background: #FF9500;
+            color: #1c1c1e;
+        }
+        .btn-info {
+            background: #5856D6;
+            color: #fff;
+        }
+        .btn-sm {
+            padding: 4px 12px;
+            font-size: 12px;
+            border-radius: 8px;
+        }
+        .btn-outline-secondary {
+            background: transparent;
+            border: 1px solid #d1d1d6;
+            color: #1c1c1e;
+        }
+
+        /* --- Stat Cards --- */
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .stat-card {
+            background: rgba(255, 255, 255, 0.92);
+            backdrop-filter: saturate(180%) blur(20px);
+            border-radius: 16px;
+            padding: 20px 16px;
+            text-align: center;
+            box-shadow: 0 2px 20px rgba(0, 0, 0, 0.04);
+            border-left: 4px solid #007AFF;
+            transition: transform 0.2s;
+        }
+        .stat-card:hover {
+            transform: translateY(-2px);
+        }
+        .stat-card h3 {
+            font-size: 28px;
+            font-weight: 700;
+            margin: 0;
+            color: #1c1c1e;
+            letter-spacing: -0.5px;
+        }
+        .stat-card small {
+            color: #8e8e93;
+            font-size: 13px;
+            font-weight: 500;
+        }
+        .stat-card i {
+            font-size: 28px;
+            opacity: 0.3;
+            margin-bottom: 4px;
+        }
+        .stat-card.blue { border-left-color: #007AFF; }
+        .stat-card.green { border-left-color: #34C759; }
+        .stat-card.orange { border-left-color: #FF9500; }
+        .stat-card.purple { border-left-color: #5856D6; }
+        .stat-card.red { border-left-color: #FF3B30; }
+
+        /* --- Alerts --- */
+        .alert {
+            border-radius: 14px;
+            border: none;
+            padding: 14px 18px;
+            font-weight: 500;
+        }
+        .alert-success { background: rgba(52, 199, 89, 0.12); color: #1c1c1e; }
+        .alert-danger { background: rgba(255, 59, 48, 0.12); color: #1c1c1e; }
+        .alert-info { background: rgba(0, 122, 255, 0.10); color: #1c1c1e; }
+        .alert-warning { background: rgba(255, 149, 0, 0.12); color: #1c1c1e; }
+
+        /* --- Page Header --- */
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+        .page-header h2 {
+            font-weight: 700;
+            font-size: 28px;
+            color: #1c1c1e;
+            letter-spacing: -0.5px;
+            margin: 0;
+        }
+        .page-header h2 i {
+            color: #007AFF;
+            margin-right: 8px;
+        }
+
+        /* --- Формы --- */
+        .form-control {
+            border-radius: 12px;
+            border: 1px solid #d1d1d6;
+            padding: 12px 16px;
+            font-size: 15px;
+            background: rgba(255, 255, 255, 0.8);
+            transition: border 0.2s;
+        }
+        .form-control:focus {
+            border-color: #007AFF;
+            box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.1);
+        }
+        .form-label {
+            font-weight: 500;
+            color: #1c1c1e;
+            font-size: 14px;
+        }
+
+        /* --- Адаптация --- */
+        @media (max-width: 768px) {
+            .sidebar {
+                width: 60px;
+                transform: translateX(0);
+            }
+            .sidebar .logo span,
+            .sidebar .nav-link span {
+                opacity: 0;
+            }
+            .sidebar:hover {
+                transform: translateX(0);
+                width: 220px;
+            }
+            .sidebar:hover .logo span,
+            .sidebar:hover .nav-link span {
+                opacity: 1;
+            }
+            .main-content {
+                margin-left: 60px;
+                padding: 16px;
+            }
+            .stat-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+            .page-header h2 {
+                font-size: 22px;
+            }
+        }
+        @media (max-width: 480px) {
+            .stat-grid {
+                grid-template-columns: 1fr;
+            }
+            .sidebar {
+                width: 0;
+                padding: 0;
+                overflow: hidden;
+                transform: translateX(-100%);
+            }
+            .sidebar.open {
+                width: 220px;
+                transform: translateX(0);
+                padding: 16px 0 0 0;
+            }
+            .sidebar.open .logo span,
+            .sidebar.open .nav-link span {
+                opacity: 1;
+            }
+            .main-content {
+                margin-left: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ===== SIDEBAR ===== -->
+    <nav class="sidebar" id="sidebar">
+        <div class="logo">
+            <i class="bi bi-shield-lock-fill"></i>
+            <span>VPN Bot</span>
+        </div>
+        <div class="nav flex-column">
+            <a class="nav-link {% if request.url.path == '/dashboard' %}active{% endif %}" href="/dashboard"><i class="bi bi-grid-fill"></i><span>Дашборд</span></a>
+            <a class="nav-link {% if request.url.path == '/users' %}active{% endif %}" href="/users"><i class="bi bi-person-fill"></i><span>Пользователи</span></a>
+            <a class="nav-link {% if request.url.path == '/servers' %}active{% endif %}" href="/servers"><i class="bi bi-server"></i><span>Серверы</span></a>
+            <a class="nav-link {% if request.url.path == '/tariffs' %}active{% endif %}" href="/tariffs"><i class="bi bi-tag-fill"></i><span>Тарифы</span></a>
+            <a class="nav-link {% if request.url.path == '/payments' %}active{% endif %}" href="/payments"><i class="bi bi-credit-card-fill"></i><span>Оплаты</span></a>
+            <a class="nav-link {% if request.url.path == '/promocodes' %}active{% endif %}" href="/promocodes"><i class="bi bi-ticket-perforated-fill"></i><span>Промокоды</span></a>
+            <a class="nav-link {% if request.url.path == '/broadcast' %}active{% endif %}" href="/broadcast"><i class="bi bi-megaphone-fill"></i><span>Рассылка</span></a>
+            <a class="nav-link {% if request.url.path == '/analytics' %}active{% endif %}" href="/analytics"><i class="bi bi-bar-chart-fill"></i><span>Аналитика</span></a>
+            <a class="nav-link {% if request.url.path == '/bot-texts' %}active{% endif %}" href="/bot-texts"><i class="bi bi-chat-dots-fill"></i><span>Тексты</span></a>
+            <a class="nav-link {% if request.url.path == '/settings' %}active{% endif %}" href="/settings"><i class="bi bi-gear-fill"></i><span>Настройки</span></a>
+            <a class="nav-link {% if request.url.path == '/backup' %}active{% endif %}" href="/backup"><i class="bi bi-archive-fill"></i><span>Бэкап</span></a>
+            <a class="nav-link {% if request.url.path == '/admin-logs' %}active{% endif %}" href="/admin-logs"><i class="bi bi-clock-history"></i><span>Логи</span></a>
+            <a class="nav-link {% if request.url.path == '/tax-settings' %}active{% endif %}" href="/tax-settings"><i class="bi bi-receipt-cutoff"></i><span>Налоги</span></a>
+            <a class="nav-link {% if request.url.path == '/change-credentials' %}active{% endif %}" href="/change-credentials"><i class="bi bi-key-fill"></i><span>Сменить логин</span></a>
+            <a class="nav-link text-danger" href="/logout"><i class="bi bi-box-arrow-right"></i><span>Выход</span></a>
+        </div>
+    </nav>
+
+    <!-- ===== MAIN ===== -->
+    <main class="main-content" id="mainContent">
+        {% block content %}{% endblock %}
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        (function() {
+            const sidebar = document.getElementById('sidebar');
+            let collapseTimeout = null;
+
+            // Функция для сворачивания сайдбара
+            function collapseSidebar() {
+                if (window.innerWidth > 768) {
+                    sidebar.classList.add('collapsed');
+                }
+            }
+
+            // Функция для разворачивания сайдбара
+            function expandSidebar() {
+                sidebar.classList.remove('collapsed');
+                clearTimeout(collapseTimeout);
+            }
+
+            // При загрузке — развёрнут (если не мобилка)
+            if (window.innerWidth > 768) {
+                sidebar.classList.remove('collapsed');
+            }
+
+            // При наведении мыши на сайдбар — разворачиваем
+            sidebar.addEventListener('mouseenter', expandSidebar);
+
+            // Когда мышь покидает сайдбар — сворачиваем через 300мс
+            sidebar.addEventListener('mouseleave', function() {
+                if (window.innerWidth > 768) {
+                    collapseTimeout = setTimeout(collapseSidebar, 300);
+                }
+            });
+
+            // При клике на пункт меню — сайдбар остаётся открытым (пока не уйдёт курсор)
+            sidebar.addEventListener('click', function() {
+                clearTimeout(collapseTimeout);
+                expandSidebar();
+            });
+
+            // При переключении вкладок — сайдбар остаётся развёрнутым
+            document.addEventListener('click', function(e) {
+                // Если клик внутри контента и не на сайдбаре — даём ему остаться открытым
+                const main = document.getElementById('mainContent');
+                if (main.contains(e.target) && !sidebar.contains(e.target)) {
+                    // Не сворачиваем сразу, даём пользователю время
+                    clearTimeout(collapseTimeout);
+                    if (window.innerWidth > 768) {
+                        collapseTimeout = setTimeout(collapseSidebar, 500);
+                    }
+                }
+            });
+
+            // Для мобильных — клик по бургеру или свайп
+            // Добавляем обработчик для открытия на мобильных
+            document.addEventListener('click', function(e) {
+                if (window.innerWidth <= 480) {
+                    const main = document.getElementById('mainContent');
+                    if (main.contains(e.target) && !sidebar.contains(e.target)) {
+                        sidebar.classList.remove('open');
+                    }
+                }
+            });
+
+            // Для мобильных — двойной клик по контенту открывает сайдбар
+            document.addEventListener('dblclick', function(e) {
+                if (window.innerWidth <= 480) {
+                    const main = document.getElementById('mainContent');
+                    if (main.contains(e.target)) {
+                        sidebar.classList.toggle('open');
+                    }
+                }
+            });
+
+            // При перезагрузке страницы сайдбар развёрнут
+            window.addEventListener('load', function() {
+                if (window.innerWidth > 768) {
+                    sidebar.classList.remove('collapsed');
+                    // Через 2 секунды сворачиваем, если курсор не на сайдбаре
+                    setTimeout(function() {
+                        if (!sidebar.matches(':hover')) {
+                            collapseSidebar();
+                        }
+                    }, 2000);
+                }
+            });
+        })();
+    </script>
+</body>
+</html>

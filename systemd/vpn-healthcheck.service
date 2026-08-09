@@ -1,0 +1,16 @@
+[Unit]
+Description=VPN Bot Health Check
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/vpn-bot
+ExecStart=/opt/vpn-bot/venv/bin/python /opt/vpn-bot/healthcheck.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

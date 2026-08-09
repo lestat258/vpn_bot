@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h2>⚙️ Настройки</h2></div>
+<div class="card"><div class="card-header">Конфигурация бота и платежей</div><div class="card-body">
+    <form method="POST" action="/settings">
+        <div class="mb-3"><label class="form-label">Токен Telegram бота</label><input name="bot_token" class="form-control" value="{{ settings.get('bot_token', '') }}"></div>
+        <div class="mb-3"><label class="form-label">Shop ID ЮKassa</label><input name="yookassa_shop_id" class="form-control" value="{{ settings.get('yookassa_shop_id', '') }}"></div>
+        <div class="mb-3"><label class="form-label">Секретный ключ ЮKassa</label><input name="yookassa_secret_key" class="form-control" value="{{ settings.get('yookassa_secret_key', '') }}"></div>
+        <div class="mb-3"><label class="form-label">Telegram ID администратора</label><input name="admin_id" class="form-control" value="{{ settings.get('admin_id', '') }}"></div>
+        <button type="submit" class="btn btn-primary">💾 Сохранить</button>
+    </form>
+</div></div>
+{% endblock %}

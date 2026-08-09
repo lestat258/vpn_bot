@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h2>👥 Пользователи</h2></div>
+<div class="stat-grid">
+    <div class="stat-card blue"><h3>{{ total_users }}</h3><small>Всего</small></div>
+    <div class="stat-card green"><h3>{{ active_users }}</h3><small>С активной подпиской</small></div>
+    <div class="stat-card orange"><h3>{{ inactive_users }}</h3><small>Без подписки</small></div>
+    <div class="stat-card red"><h3>{{ blocked_users }}</h3><small>Заблокированы</small></div>
+</div>
+<div class="card"><div class="card-header">📋 Список пользователей</div><div class="card-body p-0">
+    <div class="table-responsive"><table class="table table-striped table-hover">
+        <thead><tr><th>ID</th><th>Имя</th><th>Username</th><th>Подписка</th><th>Статус</th><th>Действия</th></tr></thead>
+        <tbody>{% for u in users %}<tr>
+            <td>{{ u[1] }}</td>
+            <td>{{ u[3] or '—' }}</td>
+            <td>@{{ u[2] or '—' }}</td>
+            <td>{% if u[4] %}✅ Активна{% else %}❌ Нет{% endif %}</td>
+            <td>{% if u[6] %}🔴 Заблокирован{% else %}🟢 Активен{% endif %}</td>
+            <td>
+                <a href="/users/{{ u[1] }}" class="btn btn-sm btn-info">👤</a>
+                <form method="POST" action="/users/toggle-block/{{ u[1] }}" style="display:inline;">
+                    <button class="btn btn-sm {% if u[6] %}btn-success{% else %}btn-warning{% endif %}">
+                        {% if u[6] %}Разблокировать{% else %}Заблокировать{% endif %}
+                    </button>
+                </form>
+            </td>
+        </tr>{% endfor %}</tbody>
+    </table></div>
+</div></div>
+{% endblock %}

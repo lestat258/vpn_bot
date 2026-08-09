@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Редактирование промокода - VPN Bot</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #f2f2f7; padding: 20px; }
+        .container { max-width: 600px; margin: 0 auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
+        .header h1 { font-size: 28px; font-weight: 700; color: #1c1c1e; margin: 0; }
+        .card { background: white; border-radius: 16px; box-shadow: 0 2px 20px rgba(0,0,0,0.04); overflow: hidden; margin-bottom: 20px; }
+        .card-header { padding: 16px 20px; border-bottom: 1px solid #e5e5ea; font-weight: 600; font-size: 16px; }
+        .card-body { padding: 20px; }
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; font-weight: 500; color: #1c1c1e; margin-bottom: 4px; font-size: 14px; }
+        .form-control { width: 100%; padding: 10px 14px; border: 1px solid #d1d1d6; border-radius: 10px; font-size: 14px; background: white; transition: border-color 0.2s; }
+        .form-control:focus { outline: none; border-color: #007aff; box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.1); }
+        .form-control[readonly] { background: #f2f2f7; cursor: not-allowed; }
+        .btn { padding: 10px 20px; border: none; border-radius: 10px; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+        .btn:hover { transform: scale(0.97); }
+        .btn-primary { background: #007aff; color: white; }
+        .btn-primary:hover { background: #0066d9; }
+        .btn-success { background: #34c759; color: white; }
+        .btn-success:hover { background: #2db84e; }
+        .btn-secondary { background: #e5e5ea; color: #1c1c1e; }
+        .btn-secondary:hover { background: #d1d1d6; }
+        .btn-danger { background: #ff3b30; color: white; }
+        .btn-danger:hover { background: #e0352b; }
+        .back-link { color: #007aff; text-decoration: none; font-weight: 500; }
+        .back-link:hover { text-decoration: underline; }
+        .alert { padding: 12px 16px; border-radius: 12px; margin-bottom: 16px; font-weight: 500; }
+        .alert-success { background: #e8f5e9; color: #2e7d32; }
+        .alert-danger { background: #ffebee; color: #c62828; }
+        .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        @media (max-width: 768px) { .row { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>✏️ Редактирование промокода</h1>
+        </div>
+
+        {% if error %}
+        <div class="alert alert-danger">❌ {{ error }}</div>
+        {% endif %}
+        {% if saved %}
+        <div class="alert alert-success">✅ Промокод обновлён!</div>
+        {% endif %}
+
+        <div class="card">
+            <div class="card-header">📋 {{ promo[1] }}</div>
+            <div class="card-body">
+                <form method="POST" action="/promocodes/edit/{{ promo[0] }}">
+                    <div class="form-group">
+                        <label>Код промокода</label>
+                        <input type="text" class="form-control" name="code" value="{{ promo[1] }}" readonly>
+                        <small style="color:#8e8e93;">Код нельзя изменить</small>
+                    </div>
+
+                    <div class="row">
+                        <div class="form-group">
+                            <label>Скидка (%)</label>
+                            <input type="number" class="form-control" name="discount_percent" value="{{ promo[2] }}" min="0" max="100">
+                        </div>
+                        <div class="form-group">
+                            <label>Скидка (₽)</label>
+                            <input type="number" class="form-control" name="discount_amount" value="{{ promo[3] }}" min="0" step="0.01">
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="form-group">
+                            <label>Максимальное использование</label>
+                            <input type="number" class="form-control" name="max_uses" value="{{ promo[5] }}" min="1">
+                        </div>
+                        <div class="form-group">
+                            <label>Действителен до</label>
+                            <input type="datetime-local" class="form-control" name="valid_until" value="{{ promo[4][:16] if promo[4] else '' }}">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Статус</label>
+                        <select class="form-control" name="is_active">
+                            <option value="1" {% if promo[8] == 1 %}selected{% endif %}>✅ Активен</option>
+                            <option value="0" {% if promo[8] == 0 %}selected{% endif %}>❌ Неактивен</option>
+                        </select>
+                    </div>
+
+                    <div style="display:flex; gap:10px; margin-top:20px;">
+                        <button type="submit" class="btn btn-success">💾 Сохранить</button>
+                        <a href="/promocodes" class="btn btn-secondary">Отмена</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">📊 Статистика</div>
+            <div class="card-body">
+                <p><strong>Использовано:</strong> {{ promo[6] }} / {{ promo[5] }}</p>
+                <p><strong>Тип:</strong> 
+                    {% if promo[7] == 'manual' %}✋ Ручной
+                    {% elif promo[7] == 'referrals' %}👥 Рефералы
+                    {% elif promo[7] == 'purchases' %}🛒 Покупки
+                    {% elif promo[7] == 'subscription_days' %}📅 Дни подписки
+                    {% elif promo[7] == 'first_payment' %}💳 Первая оплата
+                    {% else %}{{ promo[7] }}{% endif %}
+                </p>
+                <p><strong>Создан:</strong> {{ promo[9] if promo|length > 9 else 'Неизвестно' }}</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

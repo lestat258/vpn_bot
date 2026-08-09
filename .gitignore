@@ -1,0 +1,39 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# База данных
+*.db
+*.db-shm
+*.db-wal
+data-dump.sql
+
+# Логи
+*.log
+bot.pid
+
+# Бэкапы
+backups/
+*.tar.gz
+*.bak
+*.backup*
+*.save
+*.old
+*.broken
+
+# Конфиги с секретами
+.env
+config.local.py
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Системные
+.DS_Store
+Thumbs.db

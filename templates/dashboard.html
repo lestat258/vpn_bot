@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-chart-simple"></i> Дашборд</h1>
+    <span style="color: var(--text-secondary); font-size: 14px;">
+        <i class="fas fa-circle" style="color: var(--success); font-size: 8px;"></i>
+        Система работает
+    </span>
+</div>
+
+<!-- ===== СТАТИСТИКА (4 карточки) ===== -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="icon"><i class="fas fa-users"></i></div>
+        <div class="number">{{ users_count }}</div>
+        <div class="label">Пользователей</div>
+    </div>
+    <div class="stat-card">
+        <div class="icon"><i class="fas fa-key"></i></div>
+        <div class="number">{{ active_subs }}</div>
+        <div class="label">Активных подписок</div>
+    </div>
+    <div class="stat-card">
+        <div class="icon"><i class="fas fa-credit-card"></i></div>
+        <div class="number">{{ payments_count }}</div>
+        <div class="label">Всего оплат</div>
+    </div>
+    <div class="stat-card">
+        <div class="icon"><i class="fas fa-server"></i></div>
+        <div class="number">{{ servers_count }}</div>
+        <div class="label">Серверов</div>
+    </div>
+</div>
+
+<!-- ===== ДВУХКОЛОНОЧНАЯ СЕТКА (как в 3x-ui) ===== -->
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+
+    <!-- === ЛЕВАЯ КОЛОНКА === -->
+    <div>
+
+        <!-- Информация о системе -->
+        <div class="card">
+            <div class="card-header">
+                <span><i class="fas fa-server" style="color: var(--accent);"></i> Информация о системе</span>
+            </div>
+            <div class="card-body" style="padding: 16px 20px;">
+                <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">CPU</span>
+                    <span>1 Core</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">Память</span>
+                    <span>747.80 MB / 3.82 GB</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">Диск</span>
+                    <span>7.59 GB / 44.22 GB</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 6px 0;">
+                    <span style="color: var(--text-secondary);">Время работы</span>
+                    <span>30d 18h</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Доход -->
+        <div class="card">
+            <div class="card-header">
+                <span><i class="fas fa-coins" style="color: var(--success);"></i> Доход</span>
+            </div>
+            <div class="card-body" style="padding: 16px 20px;">
+                <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">Сегодня</span>
+                    <span style="font-weight: 600; color: var(--success);">{{ today_revenue }} ₽</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">За неделю</span>
+                    <span style="font-weight: 600;">{{ week_revenue }} ₽</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 6px 0;">
+                    <span style="color: var(--text-secondary);">За месяц</span>
+                    <span style="font-weight: 600; color: var(--accent);">{{ month_revenue }} ₽</span>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- === ПРАВАЯ КОЛОНКА === -->
+    <div>
+
+        <!-- Активность -->
+        <div class="card">
+            <div class="card-header">
+                <span><i class="fas fa-chart-line" style="color: var(--warning);"></i> Активность</span>
+            </div>
+            <div class="card-body" style="padding: 16px 20px;">
+                <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">Новых пользователей</span>
+                    <span style="font-weight: 600; color: var(--accent);">{{ new_users_today }}</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">Ожидают оплаты</span>
+                    <span style="font-weight: 600; color: var(--warning);">{{ pending_count }}</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 6px 0;">
+                    <span style="color: var(--text-secondary);">Всего платежей</span>
+                    <span style="font-weight: 600;">{{ payments_count }}</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Статус серверов -->
+        <div class="card">
+            <div class="card-header">
+                <span><i class="fas fa-circle-nodes" style="color: var(--success);"></i> Статус серверов</span>
+            </div>
+            <div class="card-body" style="padding: 16px 20px;">
+                <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">Всего серверов</span>
+                    <span style="font-weight: 600;">{{ servers_count }}</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 6px 0;">
+                    <span style="color: var(--text-secondary);">Активных</span>
+                    <span style="font-weight: 600; color: var(--success);">
+                        <i class="fas fa-circle" style="color: var(--success); font-size: 8px;"></i>
+                        {{ servers_count }}
+                    </span>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- ===== БЫСТРЫЕ ДЕЙСТВИЯ ===== -->
+<div class="card">
+    <div class="card-header">
+        <span><i class="fas fa-bolt" style="color: var(--warning);"></i> Быстрые действия</span>
+    </div>
+    <div class="card-body">
+        <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+            <a href="/users" class="btn btn-primary"><i class="fas fa-users"></i> Пользователи</a>
+            <a href="/servers" class="btn btn-secondary"><i class="fas fa-server"></i> Серверы</a>
+            <a href="/tariffs" class="btn btn-secondary"><i class="fas fa-tags"></i> Тарифы</a>
+            <a href="/payments" class="btn btn-secondary"><i class="fas fa-credit-card"></i> Оплаты</a>
+            <a href="/promocodes" class="btn btn-secondary"><i class="fas fa-ticket"></i> Промокоды</a>
+            <a href="/broadcast" class="btn btn-secondary"><i class="fas fa-bullhorn"></i> Рассылка</a>
+            <a href="/backup" class="btn btn-secondary"><i class="fas fa-archive"></i> Бэкап</a>
+        </div>
+    </div>
+</div>
+
+<!-- ===== ГРАФИКИ (двухколоночные) ===== -->
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;">
+
+    <div class="card">
+        <div class="card-header">
+            <span><i class="fas fa-chart-bar" style="color: var(--accent);"></i> Платежи по дням</span>
+        </div>
+        <div class="card-body" style="min-height: 200px; display: flex; align-items: flex-end; gap: 4px; padding: 16px 10px; overflow-x: auto;">
+            {% if payments_daily %}
+                {% for item in payments_daily %}
+                    <div style="flex: 1; display: flex; flex-direction: column; align-items: center; min-width: 20px;">
+                        <div style="width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; height: {{ item.count * 10 }}px; max-height: 150px; min-height: 4px;"></div>
+                        <span style="font-size: 8px; color: var(--text-muted); margin-top: 4px; transform: rotate(-45deg); white-space: nowrap;">{{ item.date[5:10] }}</span>
+                    </div>
+                {% endfor %}
+            {% else %}
+                <div style="width: 100%; text-align: center; color: var(--text-muted); padding: 40px 0;">Нет данных</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <span><i class="fas fa-chart-pie" style="color: var(--warning);"></i> Популярные тарифы</span>
+        </div>
+        <div class="card-body" style="min-height: 200px;">
+            {% if top_tariffs %}
+                {% for tariff in top_tariffs %}
+                    <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                        <span style="color: var(--text-secondary);">{{ tariff.name }}</span>
+                        <span style="font-weight: 600;">
+                            {{ tariff.count }}
+                            <span style="color: var(--text-muted); font-weight: 400;">подписок</span>
+                        </span>
+                    </div>
+                {% endfor %}
+            {% else %}
+                <div style="text-align: center; color: var(--text-muted); padding: 40px 0;">Нет данных</div>
+            {% endif %}
+        </div>
+    </div>
+
+</div>
+
+{% endblock %}

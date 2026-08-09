@@ -1,0 +1,2316 @@
+from aiogram import Router, types, F
+from aiogram.filters import Command
+import logging
+import sqlite3
+import json
+from datetime import datetime, timedelta
+from aiogram.fsm.context import FSMContext
+
+from database import get_setting, set_setting
+from keyboards import (
+    get_admin_keyboard,
+    get_user_list_keyboard,
+    get_user_action_keyboard,
+    get_back_keyboard,
+    get_main_keyboard,
+)
+from states import (
+    AddTariff,
+    AddServer,
+    EditText,
+    SendMessageToUser,
+    AdminAddKey,
+    EditTariff,
+    AdminDeposit,
+    AdminWithdraw,
+    EnterPromocode,
+)
+from utils import (
+    generate_short_email,
+    get_user_by_telegram_id,
+    get_tariff_by_id,
+    create_vpn_client,
+    get_active_subscriptions,
+    get_user_balance,
+)
+from xui_client import XUIClient
+from server_manager import server_manager
+from backup_manager import backup_manager
+
+router = Router()
+DB_PATH = '/opt/vpn-bot/data.db'
+ADMIN_ID = int(get_setting('admin_id') or 812021055)
+
+extend_temp = {}
+renew_temp = {}
+
+
+# ============ РАССЫЛКА ПРОМОКОДОВ ============
+
+@router.callback_query(F.data == "admin_broadcast_promo")
+async def admin_broadcast_promo_menu(callback: types.CallbackQuery):
+    """Меню рассылки промокодов с разделением на достижения и ручные"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute('''
+        SELECT code, discount_percent, trigger_type 
+        FROM promocodes 
+        WHERE trigger_type != 'manual' AND is_active = 1 
+        ORDER BY trigger_type, code
+    ''')
+    achievement_promos = c.fetchall()
+    
+    c.execute('''
+        SELECT code, discount_percent 
+        FROM promocodes 
+        WHERE trigger_type = 'manual' AND is_active = 1 
+        ORDER BY created_at DESC
+    ''')
+    manual_promos = c.fetchall()
+    conn.close()
+    
+    buttons = []
+    
+    if achievement_promos:
+        buttons.append([types.InlineKeyboardButton(
+            text="🏆 ДОСТИЖЕНИЯ",
+            callback_data="noop"
+        )])
+        for code, discount, trigger_type in achievement_promos:
+            icons = {
+                'referrals': '👥',
+                'purchases': '🛒',
+                'subscription_days': '📅',
+                'first_payment': '💳'
+            }
+            icon = icons.get(trigger_type, '🎯')
+            buttons.append([types.InlineKeyboardButton(
+                text=f"{icon} {code} ({discount}%)",
+                callback_data=f"broadcast_promo_{code}"
+            )])
+    
+    if achievement_promos and manual_promos:
+        buttons.append([types.InlineKeyboardButton(
+            text="─────────────",
+            callback_data="noop"
+        )])
+    
+    if manual_promos:
+        buttons.append([types.InlineKeyboardButton(
+            text="✋ РУЧНЫЕ",
+            callback_data="noop"
+        )])
+        for code, discount in manual_promos:
+            buttons.append([types.InlineKeyboardButton(
+                text=f"📌 {code} ({discount}%)",
+                callback_data=f"broadcast_promo_{code}"
+            )])
+    
+    if not achievement_promos and not manual_promos:
+        await callback.message.edit_text(
+            "📢 <b>Рассылка промокодов</b>\n\n"
+            "❌ Нет активных промокодов для рассылки.",
+            reply_markup=get_back_keyboard("admin_back_to_menu"),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    
+    buttons.append([types.InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data="admin_back_to_menu"
+    )])
+    
+    text = "📢 <b>Рассылка промокодов</b>\n\n"
+    if achievement_promos:
+        text += f"🏆 Достижения: {len(achievement_promos)}\n"
+    if manual_promos:
+        text += f"✋ Ручные: {len(manual_promos)}\n"
+    text += "\nВыберите промокод для рассылки:"
+    
+    kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+@router.callback_query(F.data.startswith("confirm_send_"))
+async def confirm_send_handler(callback: types.CallbackQuery):
+    code = callback.data.replace("confirm_send_", "")
+    logging.info(f"✅ Отправка: {code}")
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT code, discount_percent FROM promocodes WHERE upper(code) = upper(?) AND is_active = 1', (code,))
+    promo = c.fetchone()
+    conn.close()
+
+    if not promo:
+        await callback.answer("❌ Промокод не найден", show_alert=True)
+        return
+
+    code, discount = promo
+    message = f"🎉 <b>Новый промокод!</b>\n\n🏷️ <b>{code}</b> — скидка {discount}%\n\n💡 Введите код в разделе «🎫 Промокоды и достижения»"
+
+    await callback.message.edit_text("⏳ Отправка...", parse_mode="HTML")
+
+    try:
+        from broadcast import send_broadcast_with_text
+        sent = await send_broadcast_with_text(message)
+        await callback.message.edit_text(
+            f"✅ <b>Готово!</b>\n\n📨 Отправлено: {sent} пользователям\n🏷️ Промокод: {code}",
+            reply_markup=get_back_keyboard("admin_back_to_menu"),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"Ошибка: {e}")
+        await callback.message.edit_text(f"❌ Ошибка: {e}", reply_markup=get_back_keyboard("admin_back_to_menu"))
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("broadcast_promo_"))
+async def broadcast_send_promo(callback: types.CallbackQuery):
+    """Отправка рассылки с промокодом"""
+    code = callback.data.replace("broadcast_promo_", "")
+
+    logging.info(f"🚀 Отправка рассылки для промокода: {code}")
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT code, discount_percent, discount_amount, valid_until, max_uses, used_count
+        FROM promocodes
+        WHERE upper(code) = upper(?) AND is_active = 1
+    ''', (code,))
+    promo = c.fetchone()
+    conn.close()
+
+    if not promo:
+        logging.error(f"❌ Промокод {code} не найден")
+        await callback.answer("❌ Промокод не найден", show_alert=True)
+        return
+
+    code, discount_percent, discount_amount, valid_until, max_uses, used_count = promo
+    logging.info(f"✅ Промокод найден: {code}")
+
+    if discount_percent > 0:
+        discount_text = f"{discount_percent}%"
+    else:
+        discount_text = f"{discount_amount}₽"
+    valid_text = valid_until[:10] if valid_until else "бессрочно"
+    remaining = max_uses - used_count
+
+    message_text = (
+        f"🎉 <b>Новый промокод!</b>\n\n"
+        f"🏷️ <b>ПРОМОКОД: {code}</b>\n"
+        f"🎁 <b>Скидка: {discount_text}</b>\n"
+        f"📅 <b>Действует до: {valid_text}</b>\n"
+        f"📊 <b>Осталось: {remaining}</b>\n\n"
+        f"💡 Введите код в разделе «🎫 Промокоды и достижения»"
+    )
+
+    await callback.message.edit_text("⏳ Отправка рассылки...", parse_mode="HTML")
+
+    try:
+        from broadcast import send_broadcast_with_text
+        sent_count = await send_broadcast_with_text(message_text)
+
+        await callback.message.edit_text(
+            f"✅ <b>Рассылка завершена!</b>\n\n"
+            f"📨 Отправлено: {sent_count} пользователям\n"
+            f"🏷️ Промокод: {code}\n"
+            f"🎁 Скидка: {discount_text}",
+            reply_markup=get_back_keyboard("admin_back_to_menu"),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"❌ Ошибка отправки: {e}")
+        await callback.message.edit_text(
+            f"❌ <b>Ошибка отправки</b>\n\n{str(e)}",
+            reply_markup=get_back_keyboard("admin_back_to_menu"),
+            parse_mode="HTML"
+        )
+
+    await callback.answer()
+
+
+# ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
+
+def get_user_keys_admin_keyboard(user_id):
+    """Клавиатура списка ключей для админа"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT s.id, t.name, s.end_date, s.is_active
+        FROM subscriptions s
+        JOIN tariffs t ON t.id = s.tariff_id
+        WHERE s.telegram_id = ?
+        ORDER BY s.end_date DESC
+    ''', (user_id,))
+    subs = c.fetchall()
+    conn.close()
+
+    buttons = []
+    for s in subs:
+        sub_id, tariff_name, end_date, is_active = s
+        status = "✅" if is_active else "❌"
+        date_str = end_date[:10] if end_date else "∞"
+        buttons.append([types.InlineKeyboardButton(
+            text=f"{status} {tariff_name} (до {date_str})",
+            callback_data=f"admin_key_detail_{sub_id}"
+        )])
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_back_to_{user_id}")])
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_key_detail_keyboard(sub_id, user_id):
+    """Клавиатура деталей ключа"""
+    buttons = [
+        [types.InlineKeyboardButton(text="🔄 Продлить", callback_data=f"admin_extend_key_{sub_id}")],
+        [types.InlineKeyboardButton(text="🗑 Удалить ключ", callback_data=f"admin_delete_key_confirm_{sub_id}|{user_id}")],
+        [types.InlineKeyboardButton(text="🔙 Назад к ключам", callback_data=f"user_list_keys_{user_id}")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# ============ АДМИН: ГЛАВНОЕ МЕНЮ ============
+
+@router.callback_query(F.data == "admin_back_to_menu")
+async def admin_back_to_menu(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    await callback.message.edit_text(
+        "🔧 <b>Админ-панель</b>\n\nВыберите раздел для управления:",
+        reply_markup=get_admin_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_settings_menu")
+async def admin_settings_menu(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="📋 Тарифы", callback_data="admin_tariffs")],
+        [types.InlineKeyboardButton(text="🖥 Серверы", callback_data="admin_servers_menu")],
+        [types.InlineKeyboardButton(text="💬 Тексты", callback_data="admin_texts")],
+        [types.InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [types.InlineKeyboardButton(text="⚡ Автоматизация", callback_data="admin_automation")],
+        [types.InlineKeyboardButton(text="🧾 Налоги", callback_data="admin_tax")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
+    ])
+
+    await callback.message.edit_text(
+        "⚙️ <b>Настройки бота</b>\n\nВыберите раздел для управления:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+# ============ АДМИН: ПОЛЬЗОВАТЕЛИ ============
+
+@router.callback_query(F.data == "admin_users")
+async def admin_users(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    await callback.message.edit_text(
+        "👥 <b>Выберите пользователя:</b>",
+        reply_markup=get_user_list_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data.startswith("user_") and not any(c.data.startswith(x) for x in ["user_back_to_", "user_list_", "user_add_", "user_send_", "user_balance_", "user_deposit_", "user_withdraw_", "user_delete_", "user_block_"]))
+async def admin_user_card(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    telegram_id = int(callback.data.replace("user_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT first_name, username, created_at, is_blocked, balance FROM users WHERE telegram_id = ?', (telegram_id,))
+    user = c.fetchone()
+    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ? AND is_active = 1', (telegram_id,))
+    keys_count = c.fetchone()[0]
+    conn.close()
+
+    if not user:
+        await callback.message.answer("❌ Пользователь не найден")
+        await callback.answer()
+        return
+
+    first_name, username, created_at, is_blocked, balance = user
+
+    text = (
+        f"👤 <b>Карточка пользователя</b>\n\n"
+        f"📛 Имя: {first_name or 'Не указано'}\n"
+        f"🆔 ID: {telegram_id}\n"
+        f"📝 Username: @{username or 'Нет'}\n"
+        f"📅 Регистрация: {created_at[:10] if created_at else 'Неизвестно'}\n"
+        f"🔑 Ключей: {keys_count}\n"
+        f"💰 Баланс: {balance or 0:.2f} ₽\n"
+        f"🚫 Статус: {'🔴 Заблокирован' if is_blocked else '🟢 Активен'}"
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_user_action_keyboard(telegram_id),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("user_back_to_"))
+async def admin_back_to_user_card(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    telegram_id = int(callback.data.replace("user_back_to_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT first_name, username, created_at, is_blocked, balance FROM users WHERE telegram_id = ?', (telegram_id,))
+    user = c.fetchone()
+    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ? AND is_active = 1', (telegram_id,))
+    keys_count = c.fetchone()[0]
+    conn.close()
+
+    if not user:
+        await callback.message.answer("❌ Пользователь не найден")
+        await callback.answer()
+        return
+
+    first_name, username, created_at, is_blocked, balance = user
+
+    text = (
+        f"👤 <b>Карточка пользователя</b>\n\n"
+        f"📛 Имя: {first_name or 'Не указано'}\n"
+        f"🆔 ID: {telegram_id}\n"
+        f"📝 Username: @{username or 'Нет'}\n"
+        f"📅 Регистрация: {created_at[:10] if created_at else 'Неизвестно'}\n"
+        f"🔑 Ключей: {keys_count}\n"
+        f"💰 Баланс: {balance or 0:.2f} ₽\n"
+        f"🚫 Статус: {'🔴 Заблокирован' if is_blocked else '🟢 Активен'}"
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_user_action_keyboard(telegram_id),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("user_list_keys_"))
+async def admin_list_keys_for_user(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    telegram_id = int(callback.data.replace("user_list_keys_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT s.id, t.name, s.end_date, s.is_active
+        FROM subscriptions s
+        JOIN tariffs t ON t.id = s.tariff_id
+        WHERE s.telegram_id = ?
+        ORDER BY s.end_date DESC
+    ''', (telegram_id,))
+    subs = c.fetchall()
+    conn.close()
+
+    buttons = []
+
+    if not subs:
+        await callback.message.edit_text(
+            "🔑 <b>У пользователя нет ключей</b>",
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text="➕ Добавить ключ", callback_data=f"user_add_key_{telegram_id}")],
+                [types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_back_to_{telegram_id}")]
+            ]),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
+    for s in subs:
+        sub_id, tariff_name, end_date, is_active = s
+        status = "✅" if is_active else "❌"
+        date_str = end_date[:10] if end_date else "∞"
+        buttons.append([types.InlineKeyboardButton(
+            text=f"{status} {tariff_name} (до {date_str})",
+            callback_data=f"admin_key_detail_{sub_id}"
+        )])
+
+    buttons.append([types.InlineKeyboardButton(text="➕ Добавить ключ", callback_data=f"user_add_key_{telegram_id}")])
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_back_to_{telegram_id}")])
+
+    await callback.message.edit_text(
+        f"🔑 <b>Ключи пользователя</b>\n\nВыберите ключ для управления или добавьте новый:",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_key_detail_"))
+async def admin_key_detail(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    sub_id = int(callback.data.replace("admin_key_detail_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT s.id, s.xui_email, s.end_date, t.name, s.xui_client_uid,
+               s.start_date, s.traffic_used_gb, s.telegram_id
+        FROM subscriptions s
+        JOIN tariffs t ON t.id = s.tariff_id
+        WHERE s.id = ?
+    ''', (sub_id,))
+    sub = c.fetchone()
+    conn.close()
+
+    if not sub:
+        await callback.message.answer("❌ Ключ не найден")
+        await callback.answer()
+        return
+
+    sub_id, email, end_date, tariff_name, client_uid, start_date, traffic_used, user_id = sub
+    days_left = (datetime.fromisoformat(end_date) - datetime.now()).days
+
+    text = (
+        f"🔑 <b>Карточка ключа</b>\n\n"
+        f"📦 Тариф: {tariff_name}\n"
+        f"📧 Email: <code>{email}</code>\n"
+        f"📅 Создан: {start_date[:10] if start_date else 'Неизвестно'}\n"
+        f"📅 Истекает: {end_date[:10]}\n"
+        f"⏳ Осталось: {days_left} дн.\n"
+        f"📊 Трафик: {traffic_used or 0:.2f} ГБ\n"
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_key_detail_keyboard(sub_id, user_id),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("user_add_key_"))
+async def admin_add_key_for_user(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    telegram_id = int(callback.data.replace("user_add_key_", ""))
+    await state.update_data(user_id=telegram_id)
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, name, price_rub, duration_days FROM tariffs WHERE is_active = 1')
+    tariffs = c.fetchall()
+    conn.close()
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(
+            text=f"{t[1]} — {t[2]}₽ / {t[3]} дн.",
+            callback_data=f"admin_tariff_select_{t[0]}|{telegram_id}"
+        )] for t in tariffs
+    ] + [[types.InlineKeyboardButton(text="🔙 Назад к карточке", callback_data=f"user_back_to_{telegram_id}")]])
+
+    await callback.message.edit_text(
+        "Выберите тариф для добавления:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminAddKey.tariff_id)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("admin_tariff_select_"))
+async def admin_add_key_tariff(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    parts = callback.data.split("|")
+    tariff_id = int(parts[0].replace("admin_tariff_select_", ""))
+    user_id = int(parts[1]) if len(parts) > 1 else None
+
+    tariff = get_tariff_by_id(tariff_id)
+
+    if not tariff:
+        await callback.message.edit_text("❌ Тариф не найден")
+        await callback.answer()
+        return
+
+    await state.update_data(tariff_id=tariff_id)
+
+    kb = get_back_keyboard(f"user_add_key_{user_id}")
+
+    await callback.message.edit_text(
+        f"📦 Тариф: {tariff[1]}\n"
+        f"📅 Дней: {tariff[3]}\n\n"
+        "Введите количество дней подписки\n"
+        "(или отправьте /skip для стандартного):",
+        reply_markup=kb
+    )
+    await state.set_state(AdminAddKey.days)
+    await callback.answer()
+
+@router.message(AdminAddKey.days)
+async def admin_add_key_days(message: types.Message, state: FSMContext):
+    if message.text == "/skip":
+        days = None
+    else:
+        try:
+            days = int(message.text)
+            if days <= 0:
+                await message.answer("❌ Введите положительное число:")
+                return
+        except ValueError:
+            await message.answer("❌ Введите число или /skip:")
+            return
+
+    data = await state.get_data()
+    user_id = data['user_id']
+    tariff_id = data['tariff_id']
+
+    tariff = get_tariff_by_id(tariff_id)
+
+    if not tariff:
+        await message.answer("❌ Тариф не найден")
+        await state.clear()
+        return
+
+    tariff_id, tariff_name, price, default_days, traffic_gb, ip_limit = tariff
+    days = days or default_days
+
+    result = create_vpn_client(
+        user_id,
+        tariff_id,
+        days,
+        traffic_gb,
+        ip_limit
+    )
+
+    if result['success']:
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="🔙 Назад к карточке", callback_data=f"user_back_to_{user_id}")],
+            [types.InlineKeyboardButton(text="➕ Добавить еще ключ", callback_data=f"user_add_key_{user_id}")]
+        ])
+
+        await message.answer(
+            f"✅ <b>Ключ создан!</b>\n\n"
+            f"👤 Пользователь: {user_id}\n"
+            f"📦 Тариф: {tariff_name}\n"
+            f"📅 Дней: {days}\n"
+            f"📅 До: {result['end_date'].strftime('%d.%m.%Y')}\n\n"
+            f"🔗 <b>Ссылка:</b>\n"
+            f"<code>{result['link']}</code>",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+
+        try:
+            await message.bot.send_message(
+                chat_id=user_id,
+                text=f"🎉 <b>Администратор выдал вам ключ!</b>\n\n"
+                     f"📦 Тариф: {tariff_name}\n"
+                     f"📅 Действует до: {result['end_date'].strftime('%d.%m.%Y')}\n\n"
+                     f"🔗 <b>Ссылка для подключения:</b>\n"
+                     f"<code>{result['link']}</code>\n\n"
+                     f"Вставьте ссылку в приложение-клиент",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logging.error(f"Failed to notify user: {e}")
+    else:
+        kb = get_back_keyboard(f"user_back_to_{user_id}")
+        await message.answer(
+            f"❌ Не удалось создать ключ: {result.get('error', 'Неизвестная ошибка')}",
+            reply_markup=kb
+        )
+
+    await state.clear()
+
+@router.callback_query(F.data.startswith("user_send_message_"))
+async def send_message_from_user_card(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    telegram_id = int(callback.data.replace("user_send_message_", ""))
+
+    user = get_user_by_telegram_id(telegram_id)
+    user_name = user[2] or user[3] or str(telegram_id) if user else str(telegram_id)
+
+    await state.update_data(user_id=telegram_id, user_name=user_name)
+
+    kb = get_back_keyboard(f"user_{telegram_id}")
+
+    await callback.message.edit_text(
+        f"💬 <b>Отправка сообщения пользователю</b>\n\n"
+        f"👤 Пользователь: <b>{user_name}</b>\n"
+        f"🆔 ID: <code>{telegram_id}</code>\n\n"
+        f"✏️ Введите текст сообщения (поддерживается HTML):",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await state.set_state(SendMessageToUser.message_text)
+    await callback.answer()
+
+@router.message(SendMessageToUser.message_text)
+async def send_message_process(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = data.get('user_id')
+    user_name = data.get('user_name', 'Пользователь')
+
+    if not user_id:
+        await message.answer("❌ Ошибка: ID пользователя не найден")
+        await state.clear()
+        return
+
+    try:
+        if message.text:
+            await message.bot.send_message(
+                chat_id=user_id,
+                text=f"📨 <b>Сообщение от администратора</b>\n\n{message.text}",
+                parse_mode="HTML"
+            )
+            await message.answer(f"✅ Сообщение отправлено пользователю {user_name}")
+        else:
+            await message.answer("❌ Отправьте текст")
+            return
+
+        await state.clear()
+        await message.answer(
+            f"👤 <b>Карточка пользователя</b>\n\n"
+            f"📛 Имя: {user_name}\n"
+            f"🆔 ID: {user_id}",
+            reply_markup=get_user_action_keyboard(user_id),
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка отправки: {e}")
+        await state.clear()
+
+@router.callback_query(F.data.startswith("user_balance_"))
+async def admin_user_balance(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    telegram_id = int(callback.data.replace("user_balance_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT balance FROM users WHERE telegram_id = ?', (telegram_id,))
+    user = c.fetchone()
+    conn.close()
+
+    if not user:
+        await callback.message.answer("❌ Пользователь не найден")
+        await callback.answer()
+        return
+
+    balance = user[0] or 0
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="💰 Пополнить", callback_data=f"user_deposit_{telegram_id}")],
+        [types.InlineKeyboardButton(text="💸 Списать", callback_data=f"user_withdraw_{telegram_id}")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_back_to_{telegram_id}")]
+    ])
+
+    await callback.message.edit_text(
+        f"💰 <b>Баланс пользователя</b>\n\n"
+        f"Текущий баланс: <b>{balance:.2f} ₽</b>\n\n"
+        f"Выберите действие:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("user_deposit_"))
+async def admin_deposit_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    telegram_id = int(callback.data.replace("user_deposit_", ""))
+    await state.update_data(user_id=telegram_id)
+    await state.set_state(AdminDeposit.amount)
+
+    await callback.message.edit_text(
+        "💰 <b>Пополнение баланса</b>\n\n"
+        "Введите сумму пополнения (в рублях):",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.message(AdminDeposit.amount)
+async def admin_deposit_process(message: types.Message, state: FSMContext):
+    try:
+        amount = float(message.text)
+        data = await state.get_data()
+        user_id = data.get('user_id')
+
+        if not user_id:
+            await message.answer("❌ Ошибка: пользователь не найден")
+            await state.clear()
+            return
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('UPDATE users SET balance = balance + ? WHERE telegram_id = ?', (amount, user_id))
+        c.execute('SELECT balance FROM users WHERE telegram_id = ?', (user_id,))
+        new_balance = c.fetchone()[0]
+        conn.commit()
+        conn.close()
+
+        await message.answer(f"✅ Баланс пополнен на <b>{amount:.2f} ₽</b>\n\nНовый баланс: <b>{new_balance:.2f} ₽</b>", parse_mode="HTML")
+        await state.clear()
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+        await state.clear()
+
+@router.callback_query(F.data.startswith("user_withdraw_"))
+async def admin_withdraw_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    telegram_id = int(callback.data.replace("user_withdraw_", ""))
+    await state.update_data(user_id=telegram_id)
+    await state.set_state(AdminWithdraw.amount)
+
+    await callback.message.answer(
+        "💸 <b>Списание баланса</b>\n\n"
+        "Введите сумму списания (в рублях):",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.message(AdminWithdraw.amount)
+async def admin_withdraw_process(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Операция отменена")
+        return
+
+    try:
+        amount = float(message.text)
+        if amount <= 0:
+            await message.answer("❌ Сумма должна быть больше 0")
+            return
+
+        data = await state.get_data()
+        user_id = data['user_id']
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT balance FROM users WHERE telegram_id = ?', (user_id,))
+        current_balance = c.fetchone()[0] or 0
+
+        if amount > current_balance:
+            await message.answer(f"❌ Недостаточно средств!\n\nТекущий баланс: <b>{current_balance:.2f} ₽</b>", parse_mode="HTML")
+            return
+
+        c.execute('UPDATE users SET balance = balance - ? WHERE telegram_id = ?', (amount, user_id))
+        c.execute('SELECT balance FROM users WHERE telegram_id = ?', (user_id,))
+        new_balance = c.fetchone()[0]
+        conn.commit()
+        conn.close()
+
+        await message.answer(f"✅ С баланса списано <b>{amount:.2f} ₽</b>\n\nНовый баланс: <b>{new_balance:.2f} ₽</b>", parse_mode="HTML")
+        await state.clear()
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+        await state.clear()
+
+@router.callback_query(F.data.startswith("user_block_"))
+async def admin_block_user(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    telegram_id = int(callback.data.replace("user_block_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT is_blocked FROM users WHERE telegram_id = ?', (telegram_id,))
+    user = c.fetchone()
+
+    if not user:
+        await callback.answer("❌ Пользователь не найден")
+        return
+
+    new_status = 0 if user[0] else 1
+    c.execute('UPDATE users SET is_blocked = ? WHERE telegram_id = ?', (new_status, telegram_id))
+    conn.commit()
+    conn.close()
+
+    status_text = "заблокирован" if new_status else "разблокирован"
+    await callback.answer(f"✅ Пользователь {status_text}", show_alert=True)
+
+    await admin_back_to_user_card(callback)
+
+# ============ АДМИН: ТАРИФЫ ============
+
+@router.callback_query(F.data == "admin_tariffs")
+async def admin_tariffs(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, name, price_rub, duration_days, traffic_gb, ip_limit, is_active FROM tariffs')
+    tariffs = c.fetchall()
+    conn.close()
+
+    text = "📋 <b>Тарифы:</b>\n\n"
+    for t in tariffs:
+        s = "✅" if t[6] else "❌"
+        tr = f"{t[4]:.0f} ГБ" if t[4] else "∞"
+        text += f"{s} <b>{t[1]}</b> — {t[2]:.0f}₽ / {t[3]}дн / {tr} / IP:{t[5]}\n"
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="➕ Добавить тариф", callback_data="admin_add_tariff")],
+        [types.InlineKeyboardButton(text="✏️ Редактировать тариф", callback_data="admin_edit_tariff")],
+        [types.InlineKeyboardButton(text="🗑 Удалить тариф", callback_data="admin_delete_tariff")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_add_tariff")
+async def admin_add_tariff_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    await callback.message.answer("Название тарифа:", parse_mode="HTML")
+    await state.set_state(AddTariff.name)
+    await callback.answer()
+
+@router.message(AddTariff.name)
+async def tariff_name(message: types.Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await message.answer("Цена (₽):")
+    await state.set_state(AddTariff.price)
+
+@router.message(AddTariff.price)
+async def tariff_price(message: types.Message, state: FSMContext):
+    try:
+        await state.update_data(price=float(message.text))
+        await message.answer("Дней:")
+        await state.set_state(AddTariff.days)
+    except:
+        await message.answer("❌ Введите число")
+
+@router.message(AddTariff.days)
+async def tariff_days(message: types.Message, state: FSMContext):
+    try:
+        await state.update_data(days=int(message.text))
+        await message.answer("Трафик (ГБ, 0=∞):")
+        await state.set_state(AddTariff.traffic)
+    except:
+        await message.answer("❌ Введите число")
+
+@router.message(AddTariff.traffic)
+async def tariff_traffic(message: types.Message, state: FSMContext):
+    try:
+        await state.update_data(traffic=float(message.text))
+        await message.answer("Лимит IP:")
+        await state.set_state(AddTariff.ip_limit)
+    except:
+        await message.answer("❌ Введите число")
+
+@router.message(AddTariff.ip_limit)
+async def tariff_ip(message: types.Message, state: FSMContext):
+    try:
+        ip_limit = int(message.text)
+        data = await state.get_data()
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('INSERT INTO tariffs (name, price_rub, duration_days, traffic_gb, ip_limit) VALUES (?,?,?,?,?)',
+                  (data['name'], data['price'], data['days'], data['traffic'], ip_limit))
+        conn.commit()
+        conn.close()
+        await message.answer(f"✅ Тариф «{data['name']}» создан!")
+        await state.clear()
+    except:
+        await message.answer("❌ Введите число")
+
+@router.callback_query(F.data == "admin_edit_tariff")
+async def admin_edit_tariff_select(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, name, price_rub, duration_days, is_active FROM tariffs')
+    tariffs = c.fetchall()
+    conn.close()
+
+    if not tariffs:
+        await callback.message.answer("📭 Нет тарифов для редактирования")
+        await callback.answer()
+        return
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(
+            text=f"{'✅' if t[4] else '❌'} {t[1]} — {t[2]}₽ / {t[3]} дн.",
+            callback_data=f"admin_edit_tariff_select_{t[0]}"
+        )] for t in tariffs
+    ] + [[types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_tariffs")]])
+
+    await callback.message.edit_text(
+        "✏️ <b>Выберите тариф для редактирования:</b>",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await state.set_state(EditTariff.tariff_id)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("admin_edit_tariff_select_"))
+async def admin_edit_tariff_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    tariff_id = int(callback.data.replace("admin_edit_tariff_select_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, name, price_rub, duration_days, traffic_gb, ip_limit, is_active FROM tariffs WHERE id = ?', (tariff_id,))
+    tariff = c.fetchone()
+    conn.close()
+
+    if not tariff:
+        await callback.message.answer("❌ Тариф не найден")
+        await callback.answer()
+        return
+
+    await state.update_data(tariff_id=tariff_id, tariff=tariff)
+
+    text = f"✏️ <b>Редактирование тарифа</b>\n\n"
+    text += f"📛 Название: {tariff[1]}\n"
+    text += f"💰 Цена: {tariff[2]} ₽\n"
+    text += f"📅 Дней: {tariff[3]}\n"
+    text += f"📦 Трафик: {tariff[4] or '∞'} ГБ\n"
+    text += f"📱 IP: {tariff[5]}\n"
+    text += f"📊 Статус: {'✅ Активен' if tariff[6] else '❌ Неактивен'}\n\n"
+    text += "Введите <b>новое название</b> или отправьте /skip для пропуска:"
+
+    kb = get_back_keyboard("admin_tariffs")
+
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await state.set_state(EditTariff.name)
+    await callback.answer()
+
+@router.message(EditTariff.name)
+async def edit_tariff_name(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if message.text != "/skip":
+        await state.update_data(name=message.text)
+    else:
+        await state.update_data(name=data['tariff'][1])
+
+    await message.answer("💰 Введите <b>новую цену</b> (или /skip):", parse_mode="HTML")
+    await state.set_state(EditTariff.price)
+
+@router.message(EditTariff.price)
+async def edit_tariff_price(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if message.text == "/skip":
+        await state.update_data(price=data['tariff'][2])
+    else:
+        try:
+            await state.update_data(price=float(message.text))
+        except:
+            await message.answer("❌ Введите число или /skip:")
+            return
+
+    await message.answer("📅 Введите <b>новое количество дней</b> (или /skip):", parse_mode="HTML")
+    await state.set_state(EditTariff.days)
+
+@router.message(EditTariff.days)
+async def edit_tariff_days(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if message.text == "/skip":
+        await state.update_data(days=data['tariff'][3])
+    else:
+        try:
+            await state.update_data(days=int(message.text))
+        except:
+            await message.answer("❌ Введите число или /skip:")
+            return
+
+    await message.answer("📦 Введите <b>новый трафик (ГБ, 0 = ∞)</b> (или /skip):", parse_mode="HTML")
+    await state.set_state(EditTariff.traffic)
+
+@router.message(EditTariff.traffic)
+async def edit_tariff_traffic(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if message.text == "/skip":
+        await state.update_data(traffic=data['tariff'][4])
+    else:
+        try:
+            await state.update_data(traffic=float(message.text))
+        except:
+            await message.answer("❌ Введите число или /skip:")
+            return
+
+    await message.answer("📱 Введите <b>новый лимит IP</b> (или /skip):", parse_mode="HTML")
+    await state.set_state(EditTariff.ip_limit)
+
+@router.message(EditTariff.ip_limit)
+async def edit_tariff_ip_limit(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if message.text == "/skip":
+        await state.update_data(ip_limit=data['tariff'][5])
+    else:
+        try:
+            await state.update_data(ip_limit=int(message.text))
+        except:
+            await message.answer("❌ Введите число или /skip:")
+            return
+
+    tariff_id = data['tariff_id']
+    name = data.get('name', data['tariff'][1])
+    price = data.get('price', data['tariff'][2])
+    days = data.get('days', data['tariff'][3])
+    traffic = data.get('traffic', data['tariff'][4])
+    ip_limit = data.get('ip_limit', data['tariff'][5])
+    is_active = data['tariff'][6]
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''UPDATE tariffs
+                 SET name = ?, price_rub = ?, duration_days = ?, traffic_gb = ?, ip_limit = ?, is_active = ?
+                 WHERE id = ?''',
+              (name, price, days, traffic or 0, ip_limit, is_active, tariff_id))
+    conn.commit()
+    conn.close()
+
+    await message.answer(
+        f"✅ <b>Тариф обновлён!</b>\n\n"
+        f"📛 Название: {name}\n"
+        f"💰 Цена: {price} ₽\n"
+        f"📅 Дней: {days}\n"
+        f"📦 Трафик: {traffic or '∞'} ГБ\n"
+        f"📱 IP: {ip_limit}\n"
+        f"📊 Статус: {'✅ Активен' if is_active else '❌ Неактивен'}",
+        parse_mode="HTML"
+    )
+    await state.clear()
+
+@router.callback_query(F.data == "admin_delete_tariff")
+async def admin_delete_tariff_start(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, name, price_rub, duration_days, is_active FROM tariffs')
+    tariffs = c.fetchall()
+    conn.close()
+
+    if not tariffs:
+        await callback.message.answer("📭 Нет тарифов для удаления")
+        await callback.answer()
+        return
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(
+            text=f"🗑 {'✅' if t[4] else '❌'} {t[1]} — {t[2]}₽ / {t[3]} дн.",
+            callback_data=f"admin_delete_tariff_confirm_{t[0]}"
+        )] for t in tariffs
+    ] + [[types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_tariffs")]])
+
+    await callback.message.edit_text(
+        "🗑 <b>Выберите тариф для удаления:</b>",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("admin_delete_tariff_confirm_"))
+async def admin_delete_tariff_confirm(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    tariff_id = int(callback.data.replace("admin_delete_tariff_confirm_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, name FROM tariffs WHERE id = ?', (tariff_id,))
+    tariff = c.fetchone()
+    conn.close()
+
+    if not tariff:
+        await callback.message.answer("❌ Тариф не найден")
+        await callback.answer()
+        return
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"admin_delete_tariff_execute_{tariff_id}")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_tariffs")]
+    ])
+
+    await callback.message.edit_text(
+        f"⚠️ <b>Удаление тарифа</b>\n\n"
+        f"📦 Тариф: {tariff[1]}\n\n"
+        f"<b>ВНИМАНИЕ!</b> Удаление тарифа не удалит существующие подписки.\n\n"
+        f"Вы уверены?",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("admin_delete_tariff_execute_"))
+async def admin_delete_tariff_execute(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    tariff_id = int(callback.data.replace("admin_delete_tariff_execute_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM tariffs WHERE id = ?', (tariff_id,))
+    conn.commit()
+    conn.close()
+
+    await callback.answer("✅ Тариф удалён", show_alert=True)
+    await admin_tariffs(callback)
+
+# ============ АДМИН: СЕРВЕРЫ ============
+
+@router.callback_query(F.data == "admin_servers_menu")
+async def admin_servers_menu(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, name, url, api_token, is_active, status, online_count FROM servers')
+    servers = c.fetchall()
+    conn.close()
+
+    if not servers:
+        text = "📭 <b>Серверы не добавлены</b>"
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="➕ Добавить сервер", callback_data="admin_add_server")],
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
+        ])
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await callback.answer()
+        return
+
+    text = "🖥 <b>Список серверов:</b>\n\n"
+    buttons = []
+
+    for server in servers:
+        server_id, name, url, api_token, is_active, status, online_count = server
+
+        if is_active == 0:
+            status_emoji = "⛔"
+            status_text = "❌ Отключён"
+        elif status == 'online':
+            status_emoji = "🟢"
+            status_text = f"✅ Работает ({online_count or 0} клиентов)"
+        elif status == 'timeout':
+            status_emoji = "🟡"
+            status_text = "⏱️ Не отвечает"
+        else:
+            status_emoji = "🔴"
+            status_text = "❌ Недоступен"
+
+        text += f"{status_emoji} <b>{name}</b>\n"
+        text += f"   Статус: {status_text}\n"
+        text += f"   ID: {server_id}\n\n"
+
+        buttons.append([types.InlineKeyboardButton(
+            text=f"{status_emoji} {name}",
+            callback_data=f"server_detail_{server_id}"
+        )])
+
+    buttons.append([types.InlineKeyboardButton(text="🔄 Обновить", callback_data="servers_refresh")])
+    buttons.append([types.InlineKeyboardButton(text="➕ Добавить сервер", callback_data="admin_add_server")])
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")])
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "servers_refresh")
+async def servers_refresh(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    await admin_servers_menu(callback)
+
+@router.callback_query(F.data.startswith("server_detail_"))
+async def server_detail(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    server_id = int(callback.data.replace("server_detail_", ""))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, name, url, api_token, is_active, status, online_count, load_cpu, load_memory, total_traffic_gb, last_check FROM servers WHERE id = ?', (server_id,))
+    server = c.fetchone()
+    conn.close()
+
+    if not server:
+        await callback.message.answer("❌ Сервер не найден")
+        await callback.answer()
+        return
+
+    server_id, name, url, api_token, is_active, status, online_count, load_cpu, load_memory, total_traffic_gb, last_check = server
+
+    status_emoji = "🟢" if is_active and status == 'online' else "🔴"
+    status_text = "✅ Активен" if is_active else "⛔ Отключён"
+
+    text = f"🖥 <b>{name}</b>\n\n"
+    text += f"🆔 ID: {server_id}\n"
+    text += f"📡 URL: <code>{url}</code>\n"
+    text += f"📊 Статус: {status_emoji} {status_text}\n"
+    text += f"👥 Онлайн: {online_count or 0} клиентов\n"
+    text += f"💻 CPU: {load_cpu or 0}%\n"
+    text += f"🧠 Память: {load_memory or 0}%\n"
+    text += f"📦 Трафик: {total_traffic_gb or 0} GB\n"
+    text += f"🕐 Последняя проверка: {last_check[:16] if last_check else 'никогда'}\n"
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🔄 Проверить", callback_data=f"server_check_{server_id}")],
+        [types.InlineKeyboardButton(text="🗑 Удалить сервер", callback_data=f"server_delete_{server_id}")],
+        [types.InlineKeyboardButton(text="🔙 Назад к списку", callback_data="admin_servers_menu")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("server_check_"))
+async def server_check(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    server_id = int(callback.data.replace("server_check_", ""))
+
+    await callback.message.edit_text("⏳ Проверка сервера...", parse_mode="HTML")
+
+    try:
+        result = server_manager.check_server_health(server_id)
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('UPDATE servers SET status = ? WHERE id = ?', (result['status'], server_id))
+        conn.commit()
+        conn.close()
+
+        await callback.message.answer(
+            f"✅ <b>Сервер проверен</b>\n\n"
+            f"Статус: {result['status']}\n"
+            f"{result.get('message', '')}",
+            parse_mode="HTML"
+        )
+        await admin_servers_menu(callback)
+
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка: {str(e)}")
+        await admin_servers_menu(callback)
+
+@router.callback_query(F.data.startswith("server_delete_"))
+async def server_delete_handler(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    data = callback.data
+
+    if data.startswith("server_delete_execute_"):
+        server_id = int(data.replace("server_delete_execute_", ""))
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT name FROM servers WHERE id = ?', (server_id,))
+        server = c.fetchone()
+        server_name = server[0] if server else "Сервер"
+
+        c.execute('DELETE FROM servers WHERE id = ?', (server_id,))
+        conn.commit()
+        conn.close()
+
+        await callback.answer(f"✅ Сервер «{server_name}» удалён", show_alert=True)
+        await admin_servers_menu(callback)
+        return
+
+    if data.startswith("server_delete_"):
+        server_id = int(data.replace("server_delete_", ""))
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT name FROM servers WHERE id = ?', (server_id,))
+        server = c.fetchone()
+        conn.close()
+
+        if not server:
+            await callback.answer("❌ Сервер не найден", show_alert=True)
+            await admin_servers_menu(callback)
+            return
+
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"server_delete_execute_{server_id}")],
+            [types.InlineKeyboardButton(text="❌ Отмена", callback_data=f"server_detail_{server_id}")]
+        ])
+
+        await callback.message.edit_text(
+            f"⚠️ <b>Удаление сервера</b>\n\n"
+            f"Сервер: <b>{server[0]}</b>\n\n"
+            f"<b>ВНИМАНИЕ!</b> Это действие удалит сервер из базы данных.\n\n"
+            f"Вы уверены?",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
+@router.callback_query(F.data == "admin_add_server")
+async def admin_add_server_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    await callback.message.answer("Название сервера:", parse_mode="HTML")
+    await state.set_state(AddServer.name)
+    await callback.answer()
+
+@router.message(AddServer.name)
+async def server_name(message: types.Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await message.answer("URL панели:")
+    await state.set_state(AddServer.url)
+
+@router.message(AddServer.url)
+async def server_url(message: types.Message, state: FSMContext):
+    await state.update_data(url=message.text)
+    await message.answer("API Token:")
+    await state.set_state(AddServer.token)
+
+@router.message(AddServer.token)
+async def server_token(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT INTO servers (name, url, api_token, is_active, status) VALUES (?,?,?,?,?)',
+              (data['name'], data['url'], message.text, 1, 'pending'))
+    conn.commit()
+    conn.close()
+    await message.answer(f"✅ Сервер «{data['name']}» добавлен!", parse_mode="HTML")
+    await state.clear()
+
+# ============ АДМИН: СТАТИСТИКА ============
+
+@router.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM users')
+    users = c.fetchone()[0]
+    c.execute('SELECT COUNT(*), SUM(amount_rub) FROM payments WHERE status="paid"')
+    paid = c.fetchone()
+    c.execute('SELECT COUNT(*) FROM subscriptions WHERE is_active=1')
+    subs = c.fetchone()[0]
+    conn.close()
+
+    text = f"📊 <b>Статистика:</b>\n\n👤 Пользователей: {users}\n✅ Подписок: {subs}\n💰 Платежей: {paid[0] or 0} на {paid[1] or 0:.0f}₽"
+    kb = get_back_keyboard("admin_back_to_menu")
+
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+# ============ АДМИН: ТЕКСТЫ ============
+
+@router.callback_query(F.data == "admin_texts")
+async def admin_texts(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    fields = {
+        'text_welcome': '🎉 Приветственное',
+        'text_install_vpn': '📥 Установить VPN',
+        'text_android_instruction': '🤖 Android инструкция',
+        'text_ios_instruction': '🍏 iOS инструкция',
+        'text_windows_instruction': '💻 Windows инструкция',
+        'text_faq': '❓ Вопросы (FAQ)'
+    }
+
+    buttons = []
+    for key, label in fields.items():
+        val = get_setting(key) or '(пусто)'
+        short = val[:35].replace('\n',' ') + '...' if len(val) > 35 else val.replace('\n',' ')
+        buttons.append([types.InlineKeyboardButton(text=f"✏️ {label}: {short}", callback_data=f"edittext_{key}")])
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")])
+
+    await callback.message.edit_text(
+        "💬 <b>Редактирование текстов</b>\nВыберите поле:",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("edittext_"))
+async def edit_text_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    field = callback.data.replace("edittext_", "")
+    current = get_setting(field) or '(пусто)'
+    await state.update_data(field=field)
+    await state.set_state(EditText.waiting)
+    await callback.message.answer(
+        f"✏️ Поле: <b>{field}</b>\n\nТекущий текст:\n{current}\n\nОтправьте новый текст полностью.\nПоддерживается HTML.",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.message(EditText.waiting)
+async def edit_text_save(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    field = data['field']
+    set_setting(field, message.text)
+    await message.answer(f"✅ Поле <b>{field}</b> обновлено!", parse_mode="HTML")
+    await state.clear()
+
+# ============ АДМИН: АВТОМАТИЗАЦИЯ ============
+
+@router.callback_query(F.data == "admin_automation")
+async def admin_automation_menu(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key = 'auto_renew_enabled'")
+    auto_renew = c.fetchone()
+    conn.close()
+
+    status = "✅ Включено" if auto_renew and auto_renew[0] == 'true' else "❌ Выключено"
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🔄 Авто-продление", callback_data="toggle_auto_renew")],
+        [types.InlineKeyboardButton(text="📊 Статус авто-уведомлений", callback_data="auto_notify_status")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
+    ])
+
+    await callback.message.edit_text(
+        f"⚙️ <b>Настройки автоматизации</b>\n\n"
+        f"📌 Авто-продление: {status}\n"
+        f"📌 Авто-уведомления: Активны\n\n"
+        f"Выберите действие:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "toggle_auto_renew")
+async def toggle_auto_renew(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key = 'auto_renew_enabled'")
+    current = c.fetchone()
+
+    new_value = 'false' if current and current[0] == 'true' else 'true'
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('auto_renew_enabled', ?)", (new_value,))
+    conn.commit()
+    conn.close()
+
+    status = "✅ Включено" if new_value == 'true' else "❌ Выключено"
+
+    kb = get_back_keyboard("admin_automation")
+
+    await callback.message.edit_text(
+        f"🔄 Авто-продление: {status}",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "auto_notify_status")
+async def auto_notify_status(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute("SELECT COUNT(*) FROM notifications WHERE type = 'expiring_3days'")
+    expiring_3days = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM notifications WHERE type = 'expiring_1day'")
+    expiring_1day = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM notifications WHERE type = 'expiring_today'")
+    expiring_today = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM notifications WHERE type = 'expired_yesterday'")
+    expired_yesterday = c.fetchone()[0]
+
+    conn.close()
+
+    text = (
+        f"📊 <b>Статистика уведомлений</b>\n\n"
+        f"📌 За 3 дня: {expiring_3days}\n"
+        f"📌 За 1 день: {expiring_1day}\n"
+        f"📌 Сегодня: {expiring_today}\n"
+        f"📌 Истекли вчера: {expired_yesterday}\n\n"
+        f"🔄 Авто-уведомления работают каждые 6 часов"
+    )
+
+    kb = get_back_keyboard("admin_automation")
+
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+# ============ АДМИН: НАЛОГИ ============
+
+@router.callback_query(F.data == "admin_tax")
+async def admin_tax_menu(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    tax_enabled = get_setting('tax_enabled') == 'true'
+    tax_inn = get_setting('tax_inn') or 'Не настроен'
+
+    status_text = "✅ Включено" if tax_enabled else "❌ Выключено"
+    inn_display = f"ИНН: {tax_inn[:4]}****{tax_inn[-4:]}" if tax_inn != 'Не настроен' and len(tax_inn) >= 12 else "ИНН: не настроен"
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🔄 Включить/Выключить", callback_data="tax_toggle")],
+        [types.InlineKeyboardButton(text="📊 Статус", callback_data="tax_status")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
+    ])
+
+    await callback.message.edit_text(
+        f"🧾 <b>Настройки налогов</b>\n\n"
+        f"📌 Статус: {status_text}\n"
+        f"📌 {inn_display}\n\n"
+        f"Для настройки используйте веб-админку",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "tax_toggle")
+async def tax_toggle(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    current = get_setting('tax_enabled') == 'true'
+    new_value = 'false' if current else 'true'
+    set_setting('tax_enabled', new_value)
+
+    status = "✅ Включено" if new_value == 'true' else "❌ Выключено"
+
+    await callback.answer(f"Налоги: {status}", show_alert=True)
+    await admin_tax_menu(callback)
+
+@router.callback_query(F.data == "tax_status")
+async def tax_status(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    tax_enabled = get_setting('tax_enabled') == 'true'
+    tax_inn = get_setting('tax_inn') or 'Не настроен'
+    has_password = bool(get_setting('tax_password'))
+
+    text = (
+        f"📊 <b>Статус налоговой интеграции</b>\n\n"
+        f"🔹 Включено: {'✅' if tax_enabled else '❌'}\n"
+        f"🔹 ИНН: {tax_inn}\n"
+        f"🔹 Пароль: {'✅ Установлен' if has_password else '❌ Не установлен'}\n\n"
+    )
+
+    if not tax_enabled:
+        text += "⚠️ Интеграция отключена."
+    elif not has_password:
+        text += "⚠️ Не установлен пароль от «Мой налог»."
+    else:
+        text += "✅ Всё готово к работе!"
+
+    kb = get_back_keyboard("admin_tax")
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+# ============ АДМИН: БЭКАП ============
+
+@router.callback_query(F.data == "admin_backup_menu")
+async def admin_backup_menu(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="📦 Создать бэкап", callback_data="backup_create")],
+        [types.InlineKeyboardButton(text="📤 Отправить бэкап в Telegram", callback_data="manual_backup")],
+        [types.InlineKeyboardButton(text="📋 Список бэкапов", callback_data="backup_list")],
+        [types.InlineKeyboardButton(text="🔄 Восстановить", callback_data="backup_restore")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
+    ])
+
+    await callback.message.edit_text(
+        "🗄 <b>Управление бэкапами</b>\n\nВыберите действие:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "manual_backup")
+async def manual_backup_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    await callback.answer("⏳ Создание бэкапа...")
+
+    try:
+        from backup_sender import send_backup_to_admin
+        await send_backup_to_admin()
+        await callback.message.answer("✅ Бэкап отправлен в личные сообщения!", parse_mode="HTML")
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка: {e}", parse_mode="HTML")
+
+@router.callback_query(F.data == "backup_create")
+async def backup_create(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    await callback.message.edit_text("⏳ Создание бэкапа...", parse_mode="HTML")
+
+    try:
+        result = backup_manager.create_backup()
+        await callback.message.edit_text(
+            f"✅ <b>Бэкап создан!</b>\n\n"
+            f"📅 Дата: {result['timestamp']}\n"
+            f"📁 Папка: /opt/vpn-bot/backups/",
+            reply_markup=get_back_keyboard("backup_menu_back"),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await callback.message.edit_text(
+            f"❌ Ошибка создания бэкапа: {str(e)}",
+            reply_markup=get_back_keyboard("backup_menu_back")
+        )
+
+@router.callback_query(F.data == "backup_list")
+async def backup_list(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    try:
+        backups = backup_manager.get_backup_list()
+
+        if not backups:
+            await callback.message.edit_text(
+                "📭 Нет сохранённых бэкапов",
+                reply_markup=get_back_keyboard("backup_menu_back")
+            )
+            await callback.answer()
+            return
+
+        text = "📋 <b>Список бэкапов:</b>\n\n"
+        for i, b in enumerate(backups[:10]):
+            date_str = b['datetime'][:16]
+            size_kb = b.get('size', 0) / 1024
+            text += f"{i+1}. {date_str} — {size_kb:.1f} KB\n"
+
+        if len(backups) > 10:
+            text += f"\n... и ещё {len(backups) - 10} бэкапов"
+
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_back_keyboard("backup_menu_back"),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await callback.message.edit_text(
+            f"❌ Ошибка: {str(e)}",
+            reply_markup=get_back_keyboard("backup_menu_back")
+        )
+
+@router.callback_query(F.data == "backup_restore")
+async def backup_restore(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    try:
+        backups = backup_manager.get_backup_list()
+
+        if not backups:
+            await callback.message.edit_text(
+                "📭 Нет бэкапов для восстановления",
+                reply_markup=get_back_keyboard("backup_menu_back")
+            )
+            await callback.answer()
+            return
+
+        buttons = []
+        for b in backups[:5]:
+            buttons.append([types.InlineKeyboardButton(
+                text=f"🔄 {b['timestamp']}",
+                callback_data=f"backup_restore_confirm_{b['timestamp']}"
+            )])
+        buttons.append([types.InlineKeyboardButton(text="🔙 В меню бэкапов", callback_data="backup_menu_back")])
+
+        await callback.message.edit_text(
+            "🔄 <b>Выберите бэкап для восстановления:</b>\n\n"
+            "ВНИМАНИЕ! Текущие данные будут заменены!",
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await callback.message.edit_text(
+            f"❌ Ошибка: {str(e)}",
+            reply_markup=get_back_keyboard("backup_menu_back")
+        )
+
+@router.callback_query(F.data.startswith("backup_restore_confirm_"))
+async def backup_restore_confirm(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    timestamp = callback.data.replace("backup_restore_confirm_", "")
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="✅ Да, восстановить", callback_data=f"backup_restore_execute_{timestamp}")],
+        [types.InlineKeyboardButton(text="❌ Отмена", callback_data="backup_restore")]
+    ])
+
+    await callback.message.edit_text(
+        f"⚠️ <b>Восстановление бэкапа</b>\n\n"
+        f"Бэкап от: {timestamp}\n\n"
+        f"<b>ВНИМАНИЕ!</b> Текущие данные будут заменены!\n\n"
+        f"Вы уверены?",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("backup_restore_execute_"))
+async def backup_restore_execute(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    timestamp = callback.data.replace("backup_restore_execute_", "")
+
+    await callback.message.edit_text("⏳ Восстановление бэкапа...", parse_mode="HTML")
+
+    try:
+        result = backup_manager.restore_backup(timestamp)
+
+        if result['success']:
+            await callback.message.edit_text(
+                f"✅ <b>Бэкап восстановлен!</b>\n\n"
+                f"📅 Дата: {timestamp}\n"
+                f"🔄 Данные восстановлены из бэкапа.",
+                reply_markup=get_back_keyboard("backup_menu_back"),
+                parse_mode="HTML"
+            )
+        else:
+            await callback.message.edit_text(
+                f"❌ Ошибка восстановления: {result.get('error', 'Неизвестная ошибка')}",
+                reply_markup=get_back_keyboard("backup_menu_back")
+            )
+    except Exception as e:
+        await callback.message.edit_text(
+            f"❌ Ошибка: {str(e)}",
+            reply_markup=get_back_keyboard("backup_menu_back")
+        )
+
+@router.callback_query(F.data == "backup_menu_back")
+async def backup_menu_back(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    await admin_backup_menu(callback)
+
+# ============ АДМИН: ПРОДЛЕНИЕ КЛЮЧА ============
+
+@router.callback_query(F.data.startswith("admin_extend_key_"))
+async def admin_extend_key_start(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    sub_id = int(callback.data.replace("admin_extend_key_", ""))
+    extend_temp[callback.from_user.id] = sub_id
+
+    await callback.message.answer(
+        "📅 <b>Продление ключа</b>\n\n"
+        "Введите количество дней для продления (числом):\n"
+        "(или отправьте 0 для отмены)",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+    try:
+        await callback.message.delete()
+    except:
+        pass
+
+@router.message()
+async def admin_extend_key_process(message: types.Message):
+    if message.from_user.id not in extend_temp:
+        return
+
+    try:
+        days = int(message.text)
+        sub_id = extend_temp.pop(message.from_user.id)
+
+        if days <= 0:
+            await message.answer("❌ Операция отменена")
+            return
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT end_date, xui_email, telegram_id FROM subscriptions WHERE id = ?', (sub_id,))
+        sub = c.fetchone()
+
+        if not sub:
+            await message.answer("❌ Подписка не найдена")
+            conn.close()
+            return
+
+        end_date, xui_email, user_id = sub
+        new_end_date = datetime.fromisoformat(end_date) + timedelta(days=days)
+
+        c.execute('UPDATE subscriptions SET end_date = ? WHERE id = ?', (new_end_date.isoformat(), sub_id))
+        conn.commit()
+        conn.close()
+
+        best_server = server_manager.get_best_server()
+        if best_server:
+            xui = XUIClient(url=best_server['url'], api_token=best_server['api_token'])
+            xui.update_client_expiry(xui_email, int(new_end_date.timestamp() * 1000))
+
+        await message.answer(
+            f"✅ Ключ продлён на <b>{days} дн.</b>\n\n"
+            f"Новая дата: <b>{new_end_date.strftime('%d.%m.%Y')}</b>",
+            parse_mode="HTML"
+        )
+
+        await admin_list_keys_for_user_prepared(message, user_id)
+
+    except ValueError:
+        await message.answer("❌ Введите число")
+    except Exception as e:
+        logging.error(f"❌ Ошибка продления: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+async def admin_list_keys_for_user_prepared(message, user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT s.id, t.name, s.end_date, s.is_active
+        FROM subscriptions s
+        JOIN tariffs t ON t.id = s.tariff_id
+        WHERE s.telegram_id = ?
+        ORDER BY s.end_date DESC
+    ''', (user_id,))
+    subs = c.fetchall()
+    conn.close()
+
+    if not subs:
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="➕ Добавить ключ", callback_data=f"user_add_key_{user_id}")],
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_back_to_{user_id}")]
+        ])
+        await message.answer(
+            "🔑 <b>У пользователя нет ключей</b>",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+        return
+
+    await message.answer(
+        f"🔑 <b>Ключи пользователя</b>\n\nВыберите ключ для управления:",
+        reply_markup=get_user_keys_admin_keyboard(user_id),
+        parse_mode="HTML"
+    )
+
+# ============ АДМИН: УДАЛЕНИЕ КЛЮЧА ============
+
+@router.callback_query(F.data.startswith("admin_delete_key_confirm_"))
+async def admin_delete_key_confirm(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    parts = callback.data.split("|")
+    sub_id = int(parts[0].replace("admin_delete_key_confirm_", ""))
+    user_id = int(parts[1]) if len(parts) > 1 else None
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT s.id, s.telegram_id, s.xui_email, s.xui_client_uid, t.name, u.first_name
+        FROM subscriptions s
+        JOIN users u ON u.telegram_id = s.telegram_id
+        JOIN tariffs t ON t.id = s.tariff_id
+        WHERE s.id = ?
+    ''', (sub_id,))
+    sub = c.fetchone()
+    conn.close()
+
+    if not sub:
+        await callback.message.edit_text("❌ Подписка не найдена")
+        await callback.answer()
+        return
+
+    sub_id, user_id_db, email, client_uid, tariff_name, first_name = sub
+    user_id = user_id_db or user_id
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"admin_delete_execute_{sub_id}|{user_id}")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_list_keys_{user_id}")]
+    ])
+
+    await callback.message.edit_text(
+        f"⚠️ <b>Удаление подписки</b>\n\n"
+        f"👤 Пользователь: {first_name or user_id} ({user_id})\n"
+        f"📦 Тариф: {tariff_name}\n"
+        f"🔑 Email: {email}\n\n"
+        f"<b>ВНИМАНИЕ!</b> Ключ будет удалён из панели 3X-UI.\n\n"
+        f"Вы уверены?",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("admin_delete_execute_"))
+async def admin_delete_key_execute(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    parts = callback.data.split("|")
+    sub_id = int(parts[0].replace("admin_delete_execute_", ""))
+    user_id = int(parts[1]) if len(parts) > 1 else None
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT telegram_id, xui_email FROM subscriptions WHERE id = ?', (sub_id,))
+    sub = c.fetchone()
+
+    if not sub:
+        await callback.message.edit_text("❌ Подписка не найдена")
+        await callback.answer()
+        return
+
+    telegram_id, email = sub
+    telegram_id = telegram_id or user_id
+
+    best_server = server_manager.get_best_server()
+    if best_server:
+        xui = XUIClient(url=best_server['url'], api_token=best_server['api_token'])
+        xui.delete_client(email)
+
+    c.execute('UPDATE subscriptions SET is_active = 0 WHERE id = ?', (sub_id,))
+    conn.commit()
+    conn.close()
+
+    try:
+        await callback.bot.send_message(
+            chat_id=telegram_id,
+            text="⚠️ <b>Ваша подписка была удалена администратором.</b>\n\n"
+                 "Для получения нового ключа обратитесь в поддержку.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"Failed to notify user: {e}")
+
+    await callback.answer("✅ Ключ удалён", show_alert=True)
+    await admin_list_keys_for_user(callback)
+
+# ============ УПРАВЛЕНИЕ ЛИМИТАМИ ============
+
+@router.message(Command("limits"))
+async def show_limits(message: types.Message):
+    """Показывает текущие лимиты пользователя (для админа)"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещён")
+        return
+
+    from rate_limiter import rate_limiter
+
+    parts = message.text.split()
+    if len(parts) > 1:
+        try:
+            user_id = int(parts[1])
+            status = rate_limiter.get_user_status(user_id)
+            text = f"📊 <b>Статус пользователя {user_id}</b>\n\n"
+            for action_type, data in status.items():
+                text += f"📌 {action_type}:\n"
+                text += f"   Запросов: {data['count']}\n"
+                text += f"   Заблокирован: {'✅' if data['is_blocked'] else '❌'}\n"
+                if data['blocked_until']:
+                    text += f"   До: {data['blocked_until'][:16]}\n"
+                text += "\n"
+            await message.answer(text, parse_mode="HTML")
+            return
+        except:
+            pass
+
+    status = rate_limiter.get_user_status(message.from_user.id)
+    text = "📊 <b>Ваши лимиты</b>\n\n"
+    for action_type, data in status.items():
+        text += f"📌 {action_type}:\n"
+        text += f"   Запросов: {data['count']}\n"
+        text += f"   Заблокирован: {'✅' if data['is_blocked'] else '❌'}\n"
+        if data['blocked_until']:
+            text += f"   До: {data['blocked_until'][:16]}\n"
+        text += "\n"
+    await message.answer(text, parse_mode="HTML")
+
+@router.message(Command("reset_limits"))
+async def reset_limits(message: types.Message):
+    """Сбрасывает лимиты пользователя (для админа)"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещён")
+        return
+
+    from rate_limiter import rate_limiter
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("❌ Укажите ID пользователя: /reset_limits 123456789")
+        return
+
+    try:
+        user_id = int(parts[1])
+        rate_limiter.reset_limits(user_id)
+        await message.answer(f"✅ Лимиты сброшены для пользователя {user_id}")
+    except ValueError:
+        await message.answer("❌ Укажите корректный ID")
+
+# ============ УПРАВЛЕНИЕ ЗАЩИТОЙ ОТ СПАМА ============
+
+@router.callback_query(F.data == "admin_rate_limit")
+async def admin_rate_limit_menu(callback: types.CallbackQuery):
+    """Меню управления защитой от спама"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    from rate_limiter import rate_limiter
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute('SELECT COUNT(DISTINCT user_id) FROM rate_limits WHERE is_blocked = 1')
+    blocked_count = c.fetchone()[0]
+
+    c.execute('SELECT COUNT(*) FROM rate_limits')
+    total_records = c.fetchone()[0]
+
+    conn.close()
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="📊 Статистика", callback_data="rate_limit_stats")],
+        [types.InlineKeyboardButton(text="🔓 Снять блокировку", callback_data="rate_limit_unblock")],
+        [types.InlineKeyboardButton(text="⚙️ Настройки", callback_data="rate_limit_settings")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
+    ])
+
+    await callback.message.edit_text(
+        f"🛡️ <b>Защита от спама и брутфорса</b>\n\n"
+        f"📊 Заблокировано пользователей: {blocked_count}\n"
+        f"📋 Всего записей в БД: {total_records}\n\n"
+        f"Выберите действие:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "rate_limit_stats")
+async def rate_limit_stats(callback: types.CallbackQuery):
+    """Показывает статистику по лимитам"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute('''
+        SELECT action_type, COUNT(*), SUM(request_count), COUNT(CASE WHEN is_blocked = 1 THEN 1 END)
+        FROM rate_limits
+        GROUP BY action_type
+    ''')
+    stats = c.fetchall()
+
+    conn.close()
+
+    text = "📊 <b>Статистика по типам действий</b>\n\n"
+    for action_type, count, total_requests, blocked in stats:
+        text += f"📌 <b>{action_type}</b>\n"
+        text += f"   Пользователей: {count}\n"
+        text += f"   Всего запросов: {total_requests}\n"
+        text += f"   Заблокировано: {blocked}\n\n"
+
+    kb = get_back_keyboard("admin_rate_limit")
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "rate_limit_unblock")
+async def rate_limit_unblock_menu(callback: types.CallbackQuery):
+    """Меню снятия блокировки"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute('''
+        SELECT DISTINCT user_id, blocked_until
+        FROM rate_limits
+        WHERE is_blocked = 1
+        ORDER BY blocked_until DESC
+        LIMIT 20
+    ''')
+    blocked_users = c.fetchall()
+
+    conn.close()
+
+    if not blocked_users:
+        await callback.message.edit_text(
+            "✅ Нет заблокированных пользователей",
+            reply_markup=get_back_keyboard("admin_rate_limit"),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
+    buttons = []
+    for user_id, blocked_until in blocked_users:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT first_name, username FROM users WHERE telegram_id = ?', (user_id,))
+        user = c.fetchone()
+        conn.close()
+
+        name = user[0] or user[1] or str(user_id) if user else str(user_id)
+        until = blocked_until[:16] if blocked_until else "неизвестно"
+
+        buttons.append([types.InlineKeyboardButton(
+            text=f"🔓 {name} ({user_id}) — до {until}",
+            callback_data=f"rate_unblock_{user_id}"
+        )])
+
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_rate_limit")])
+
+    await callback.message.edit_text(
+        "🔓 <b>Заблокированные пользователи</b>\n\n"
+        "Выберите пользователя для снятия блокировки:",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("rate_unblock_"))
+async def rate_limit_unblock_user(callback: types.CallbackQuery):
+    """Снимает блокировку с пользователя"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    user_id = int(callback.data.replace("rate_unblock_", ""))
+
+    from rate_limiter import rate_limiter
+    rate_limiter.reset_limits(user_id)
+
+    await callback.answer(f"✅ Блокировка снята с пользователя {user_id}", show_alert=True)
+    await rate_limit_unblock_menu(callback)
+
+@router.callback_query(F.data == "rate_limit_settings")
+async def rate_limit_settings(callback: types.CallbackQuery):
+    """Настройки лимитов"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    from rate_limiter import rate_limiter
+
+    text = "⚙️ <b>Настройки лимитов</b>\n\n"
+    for action_type, limits in rate_limiter.limits.items():
+        text += f"📌 <b>{action_type}</b>\n"
+        text += f"   Макс. запросов: {limits['max_requests']}\n"
+        text += f"   Окно (сек): {limits['time_window']}\n"
+        text += f"   Блокировка (сек): {limits['block_duration']}\n\n"
+
+    text += "Для изменения настроек отредактируйте файл rate_limiter.py\n"
+    text += "и перезапустите бота."
+
+    kb = get_back_keyboard("admin_rate_limit")
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()

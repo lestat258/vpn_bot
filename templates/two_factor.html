@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-shield-halved"></i> Двухфакторная аутентификация</h1>
+</div>
+
+<div class="card">
+    <div class="card-body">
+        <div class="alert alert-info">
+            📊 Статус: {% if status.enabled %}✅ Включена{% else %}❌ Выключена{% endif %}
+        </div>
+
+        <div id="message" class="alert" style="display:none;"></div>
+
+        {% if not status.enabled %}
+        <div id="setup-section">
+            <div class="alert alert-info">
+                <h3>📱 Как настроить:</h3>
+                <ol>
+                    <li>Установите <strong>Google Authenticator</strong> или <strong>Microsoft Authenticator</strong></li>
+                    <li>Отсканируйте QR-код ниже</li>
+                    <li>Введите код из приложения</li>
+                </ol>
+            </div>
+
+            <div class="card" style="text-align:center; padding:20px;">
+                <div id="qr-loading">⏳ Загрузка QR-кода...</div>
+                <img id="qr-image" style="display:none; max-width:200px; margin:0 auto;" alt="QR Code">
+                <div class="secret-key" id="secret-display" style="display:none; margin-top:10px; font-family:monospace; font-size:14px; background:var(--bg-input); padding:10px; border-radius:6px;"></div>
+            </div>
+
+            <div class="form-group">
+                <label for="code">Код из приложения</label>
+                <input type="text" id="code" class="form-control" placeholder="Введите 6-значный код" maxlength="6" autocomplete="off" style="text-align:center; letter-spacing:4px; font-size:18px;">
+            </div>
+
+            <button class="btn btn-primary" id="enable-btn" onclick="enable2FA()">✅ Включить 2FA</button>
+        </div>
+        {% else %}
+        <div id="disable-section">
+            <p class="text-muted">Для отключения 2FA введите текущий код из приложения-аутентификатора.</p>
+
+            <div class="form-group">
+                <label for="disable-code">Код из приложения</label>
+                <input type="text" id="disable-code" class="form-control" placeholder="Введите 6-значный код" maxlength="6" autocomplete="off" style="text-align:center; letter-spacing:4px; font-size:18px;">
+            </div>
+
+            <button class="btn btn-danger" id="disable-btn" onclick="disable2FA()">❌ Отключить 2FA</button>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+async function loadQR() {
+    {% if not status.enabled %}
+    try {
+        const response = await fetch('/2fa/qr');
+        const data = await response.json();
+        if (data.qr_code) {
+            document.getElementById('qr-image').src = 'data:image/png;base64,' + data.qr_code;
+            document.getElementById('qr-image').style.display = 'block';
+            document.getElementById('qr-loading').style.display = 'none';
+            document.getElementById('secret-display').textContent = '🔑 Секретный ключ: ' + data.secret_key;
+            document.getElementById('secret-display').style.display = 'block';
+        }
+    } catch (error) {
+        document.getElementById('qr-loading').textContent = '❌ Ошибка загрузки QR-кода';
+        console.error(error);
+    }
+    {% endif %}
+}
+
+async function enable2FA() {
+    const code = document.getElementById('code').value;
+    const btn = document.getElementById('enable-btn');
+    if (!code || code.length !== 6) {
+        showMessage('Пожалуйста, введите 6-значный код', 'danger');
+        return;
+    }
+    btn.disabled = true;
+    btn.textContent = '⏳ Проверка...';
+    try {
+        const response = await fetch('/2fa/enable', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: code })
+        });
+        const data = await response.json();
+        if (data.success) {
+            showMessage('✅ ' + data.message, 'success');
+            setTimeout(() => { location.reload(); }, 1500);
+        } else {
+            showMessage('❌ ' + data.message, 'danger');
+            btn.disabled = false;
+            btn.textContent = '✅ Включить 2FA';
+        }
+    } catch (error) {
+        showMessage('❌ Ошибка: ' + error.message, 'danger');
+        btn.disabled = false;
+        btn.textContent = '✅ Включить 2FA';
+    }
+}
+
+async function disable2FA() {
+    const code = document.getElementById('disable-code').value;
+    const btn = document.getElementById('disable-btn');
+    if (!code || code.length !== 6) {
+        showMessage('Пожалуйста, введите 6-значный код', 'danger');
+        return;
+    }
+    btn.disabled = true;
+    btn.textContent = '⏳ Проверка...';
+    try {
+        const response = await fetch('/2fa/disable', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: code })
+        });
+        const data = await response.json();
+        if (data.success) {
+            showMessage('✅ ' + data.message, 'success');
+            setTimeout(() => { location.reload(); }, 1500);
+        } else {
+            showMessage('❌ ' + data.message, 'danger');
+            btn.disabled = false;
+            btn.textContent = '❌ Отключить 2FA';
+        }
+    } catch (error) {
+        showMessage('❌ Ошибка: ' + error.message, 'danger');
+        btn.disabled = false;
+        btn.textContent = '❌ Отключить 2FA';
+    }
+}
+
+function showMessage(text, type) {
+    const msg = document.getElementById('message');
+    msg.textContent = text;
+    msg.style.display = 'block';
+    msg.className = 'alert alert-' + type;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    loadQR();
+    const codeInput = document.getElementById('code');
+    if (codeInput) {
+        codeInput.focus();
+        codeInput.addEventListener('input', function(e) {
+            this.value = this.value.replace(/[^0-9]/g, '').slice(0, 6);
+        });
+    }
+    const disableInput = document.getElementById('disable-code');
+    if (disableInput) {
+        disableInput.addEventListener('input', function(e) {
+            this.value = this.value.replace(/[^0-9]/g, '').slice(0, 6);
+        });
+    }
+});
+</script>
+{% endblock %}
