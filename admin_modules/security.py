@@ -82,16 +82,16 @@ async def change_credentials(request: Request,
                              confirm_password: str = Form(...)):
     if not check_auth(request):
         return RedirectResponse("/")
-    admin_pass = get_setting('admin_password') or 'admin'
-    if current_password != admin_pass:
+    admin_pass = get_setting('admin_password')
+    if not admin_pass or current_password != admin_pass:
         return templates.TemplateResponse("change_credentials.html", {
             "request": request,
             "error": "❌ Неверный текущий пароль"
         })
-    if not new_password or len(new_password) < 4:
+    if not new_password or len(new_password) < 12:
         return templates.TemplateResponse("change_credentials.html", {
             "request": request,
-            "error": "❌ Пароль должен содержать минимум 4 символа"
+            "error": "❌ Пароль должен содержать минимум 12 символов"
         })
     if new_password != confirm_password:
         return templates.TemplateResponse("change_credentials.html", {
