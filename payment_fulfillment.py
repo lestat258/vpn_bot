@@ -10,6 +10,7 @@ import logging
 import sqlite3
 from datetime import datetime
 from html import escape
+from io import BytesIO
 from pathlib import Path
 
 from payment_ledger import PaymentLedger
@@ -57,8 +58,18 @@ def _strict_positive_int(value):
     return result
 
 
-async def _telegram_notify(telegram_id, text):
+def _subscription_qr(link):
+    import qrcode
+    image = qrcode.make(link)
+    with BytesIO() as output:
+        image.save(output, format="PNG")
+        return output.getvalue()
+
+
+async def _telegram_notify(telegram_id, text, link):
     from aiogram import Bot
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.types import BufferedInputFile
     from database import get_setting
     raw_token = get_setting('bot_token')
     if not raw_token:
@@ -70,6 +81,19 @@ async def _telegram_notify(telegram_id, text):
         token = raw_token
     bot = Bot(token=token)
     try:
+        if link:
+            try:
+                png = _subscription_qr(link)
+            except Exception:
+                LOG.warning('Could not generate subscription QR')
+            else:
+                try:
+                    await bot.send_photo(chat_id=telegram_id,
+                                         photo=BufferedInputFile(png, filename='vpn.png'),
+                                         caption=text, parse_mode="HTML")
+                    return
+                except TelegramBadRequest:
+                    LOG.warning('Telegram rejected subscription QR photo')
         await bot.send_message(chat_id=telegram_id, text=text, parse_mode="HTML")
     finally:
         await bot.session.close()
@@ -85,8 +109,6 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
     if vpn_api is None:
         from services import vpn_service
         vpn_api = vpn_service
-    if notifier is None:
-        notifier = _telegram_notify
 
     try:
         obj = verified_data['object']
@@ -197,7 +219,10 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
         if renewed and explicit_id not in (None, ''):
             text += f'\n📊 +{duration} дней добавлено к вашей подписке'
         text += f'\n\n🔗 <b>Ссылка для подключения:</b>\n<code>{escape(link or "Недоступна")}</code>'
-        await notifier(telegram_id, text)
+        if notifier is None:
+            await _telegram_notify(telegram_id, text, link)
+        else:
+            await notifier(telegram_id, text)
     except Exception:
         LOG.warning('VPN delivered but user notification failed; requires follow-up')
     return True
