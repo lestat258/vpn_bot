@@ -8,6 +8,8 @@ retries external effects whose outcomes may be uncertain.
 import asyncio
 import logging
 import sqlite3
+from datetime import datetime
+from html import escape
 from pathlib import Path
 
 from payment_ledger import PaymentLedger
@@ -68,7 +70,7 @@ async def _telegram_notify(telegram_id, text):
         token = raw_token
     bot = Bot(token=token)
     try:
-        await bot.send_message(chat_id=telegram_id, text=text)
+        await bot.send_message(chat_id=telegram_id, text=text, parse_mode="HTML")
     finally:
         await bot.session.close()
 
@@ -121,6 +123,7 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
         result = None
         sub_id = None
         link = None
+        renewed = False
 
         if action == 'new_key':
             result = await vpn_api.create_subscription(
@@ -146,6 +149,7 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
                     _active_subscription, db_path, telegram_id
                 )
             if sub_id is not None:
+                renewed = True
                 result = await vpn_api.extend_subscription(
                     subscription_id=sub_id, days_to_add=duration, tariff_id=tariff_id
                 )
@@ -177,9 +181,22 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
     try:
         if not link:
             link = await vpn_api.get_subscription_link(sub_id)
-        text = '✅ Оплата подтверждена. VPN-подписка активирована.'
-        if link:
-            text += '\n\nСсылка на подписку:\n' + str(link)
+        tariff = escape(str(details['name']))
+        if renewed:
+            title = 'Подписка продлена!'
+            date_label = 'Новая дата окончания'
+            end_date = result['new_end_date']
+        else:
+            title = 'Новая подписка активирована!'
+            date_label = 'Действует до'
+            end_date = result['end_date']
+        if isinstance(end_date, str):
+            end_date = datetime.fromisoformat(end_date)
+        text = (f'✅ <b>{title}</b>\n\n📦 Тариф: {tariff}\n'
+                f'📅 {date_label}: {end_date:%d.%m.%Y}')
+        if renewed and explicit_id not in (None, ''):
+            text += f'\n📊 +{duration} дней добавлено к вашей подписке'
+        text += f'\n\n🔗 <b>Ссылка для подключения:</b>\n<code>{escape(link or "Недоступна")}</code>'
         await notifier(telegram_id, text)
     except Exception:
         LOG.warning('VPN delivered but user notification failed; requires follow-up')
