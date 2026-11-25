@@ -1,0 +1,29 @@
+name: vpn4us VPN release regressions
+
+on:
+  push:
+    branches:
+      - automation/**
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vpn-offline:
+    name: Inbound policy and issuance safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run VPN offline regression suite
+        run: |
+          python -m unittest -q test_stage4_offline test_release_invariants
