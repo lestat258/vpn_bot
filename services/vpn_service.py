@@ -113,7 +113,7 @@ class VPNService:
 
             logger.info(f"📤 Отправляем запрос в /panel/api/clients/add")
             # vpn4us stage7c: single create attempt, fail closed
-            _stage7c_snapshot = await asyncio.to_thread(xui.get_inbounds)
+            _stage7c_snapshot = await asyncio.to_thread(xui.get_inbounds, use_cache=False)
             assert_absent_on_all_inbounds(_stage7c_snapshot, email)
             # vpn4us stage7d: persist issue BEFORE first network write
             from vpn_issue_journal import start_issue
