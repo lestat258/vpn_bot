@@ -979,7 +979,7 @@ async def admin_extend_key_start(callback: types.CallbackQuery):
     except:
         pass
 
-@router.message()
+@router.message(lambda message: bool(message.from_user) and message.from_user.id == ADMIN_ID and message.from_user.id in extend_temp)
 async def admin_extend_key_process(message: types.Message):
     if message.from_user.id not in extend_temp:
         return
@@ -2101,6 +2101,28 @@ async def admin_rate_limit_menu(callback: types.CallbackQuery):
     )
     await callback.answer()
 
+@router.callback_query(F.data == "rate_limit_stats")
+async def rate_limit_stats(callback: types.CallbackQuery):
+    """Read-only summary for the statistics button in spam protection."""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        total = conn.execute("SELECT COUNT(*) FROM rate_limits").fetchone()[0]
+        blocked = conn.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM rate_limits WHERE is_blocked = 1"
+        ).fetchone()[0]
+    await callback.message.edit_text(
+        "📊 <b>Статистика защиты от спама</b>\\n\\n"
+        f"Записей лимитов: {total}\\n"
+        f"Заблокировано пользователей: {blocked}\\n\\n"
+        "Для просмотра списка и снятия блокировок вернитесь в меню защиты.",
+        reply_markup=get_back_keyboard("admin_rate_limit"),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "rate_limit_settings")
 async def rate_limit_settings(callback: types.CallbackQuery):
     """Настройки защиты от спама"""
@@ -2216,27 +2238,6 @@ async def rate_limit_unblock_user(callback: types.CallbackQuery):
 
     await callback.answer(f"✅ Блокировка снята с пользователя {user_id}", show_alert=True)
     await rate_limit_unblock_menu(callback)
-
-@router.callback_query(F.data == "rate_limit_settings")
-async def rate_limit_settings(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Доступ запрещён")
-        return
-
-    from rate_limiter import rate_limiter
-
-    text = "⚙️ <b>Настройки лимитов</b>\n\n"
-    for action_type, limits in rate_limiter.limits.items():
-        text += f"📌 <b>{action_type}</b>\n"
-        text += f"   Макс. запросов: {limits['max_requests']}\n"
-        text += f"   Окно (сек): {limits['time_window']}\n"
-        text += f"   Блокировка (сек): {limits['block_duration']}\n\n"
-
-    text += "Для изменения настроек отредактируйте файл rate_limiter.py"
-
-    kb = get_back_keyboard("admin_rate_limit")
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    await callback.answer()
 
 # ============================================================
 # ВОЗВРАТ В АДМИН-МЕНЮ
