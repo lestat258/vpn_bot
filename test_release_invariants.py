@@ -96,6 +96,41 @@ class ReleaseSafety(unittest.TestCase):
             with self.assertRaises(IssueJournalError):
                 start_issue(db, 12345, 16, 'another@example.invalid', 15)
 
+    def test_release_plan_source_allowlist(self):
+        from deploy.release_plan import allowed_source
+        for permitted in ('services/vpn_service.py', 'handlers/connect.py',
+                          'admin_modules/servers.py', 'bot.py',
+                          'templates/index.html', 'static/app.js'):
+            with self.subTest(permitted=permitted):
+                self.assertTrue(allowed_source(permitted))
+        for forbidden in ('.env', 'data.db', 'secrets/key.pem',
+                          'services/../data.db', 'services/secret.key',
+                          'test_release_invariants.py', 'apply_patch.py',
+                          'deploy/staging_pull.py', '/opt/vpn-bot/app.py',
+                          'templates/../../.env', 'static/private.p12',
+                          'services\\\\vpn_service.py'):
+            with self.subTest(forbidden=forbidden):
+                self.assertFalse(allowed_source(forbidden))
+
+    def test_release_plan_rejects_symlinks_and_accepts_missing(self):
+        from deploy.release_plan import read_regular_file, PlanBlocked
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'services').mkdir()
+            (root / 'services' / 'module.py').write_text('value = 1')
+            self.assertEqual(read_regular_file(root, 'services/module.py'), b'value = 1')
+            self.assertIsNone(read_regular_file(root, 'services/new.py'))
+            (root / 'services' / 'redirect.py').symlink_to(root / 'services' / 'module.py')
+            with self.assertRaises(PlanBlocked):
+                read_regular_file(root, 'services/redirect.py')
+
+    def test_release_plan_git_blob_hash(self):
+        from deploy.release_plan import git_blob_sha
+        import hashlib
+        data = b'print(1)\\n'
+        expected = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\\0' + data).hexdigest()
+        self.assertEqual(git_blob_sha(data), expected)
+
 
 if __name__ == '__main__':
     unittest.main()
