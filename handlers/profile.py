@@ -320,52 +320,24 @@ async def renew_from_key(callback: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("delete_key_"))
 async def user_delete_key(callback: types.CallbackQuery):
-    sub_id = int(callback.data.replace("delete_key_", ""))
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT telegram_id, xui_email FROM subscriptions WHERE id = ?', (sub_id,))
-    sub = c.fetchone()
-    conn.close()
-
-    if not sub or sub[0] != callback.from_user.id:
-        await callback.answer("⛔ Доступ запрещён")
-        return
-
-    kb = get_confirmation_keyboard(f"confirm_delete_key_{sub_id}", "my_keys")
+    # Deliberate safety guard: a shared 3x-ui panel must not be modified
+    # until precise per-client ownership and inbound scoping are implemented.
     await callback.message.answer(
-        "⚠️ <b>Удаление ключа</b>\n\n"
-        "Вы уверены, что хотите удалить этот ключ?\n"
-        "После удаления доступ к VPN будет потерян.",
-        reply_markup=kb,
-        parse_mode="HTML"
+        "⚠️ Удаление ключа пока недоступно. Ваш доступ сохранится. "
+        "Для отключения обратитесь в службу поддержки.",
+        reply_markup=get_back_keyboard("my_keys"),
     )
     await callback.answer()
 
+
 @router.callback_query(F.data.startswith("confirm_delete_key_"))
 async def user_confirm_delete_key(callback: types.CallbackQuery):
-    sub_id = int(callback.data.replace("confirm_delete_key_", ""))
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT telegram_id, xui_email FROM subscriptions WHERE id = ?', (sub_id,))
-    sub = c.fetchone()
+    # Historic confirmation buttons must also be safe after this release.
+    await callback.answer(
+        "Удаление временно отключено для защиты действующих подключений.",
+        show_alert=True,
+    )
 
-    if not sub or sub[0] != callback.from_user.id:
-        await callback.answer("⛔ Доступ запрещён")
-        return
-
-    telegram_id, xui_email = sub
-    best_server = server_manager.get_best_server()
-    if best_server:
-        xui = XUIClient(url=best_server['url'], api_token=best_server['api_token'])
-        xui.delete_client(xui_email)
-
-    c.execute('DELETE FROM subscriptions WHERE id = ?', (sub_id,))
-    conn.commit()
-    conn.close()
-
-    await callback.message.answer("✅ Ключ удалён")
-    await callback.answer()
-    await show_my_keys(callback)
 
 # ============ ПОПОЛНЕНИЕ БАЛАНСА ============
 
