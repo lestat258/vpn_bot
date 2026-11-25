@@ -4,6 +4,8 @@ import json
 import sqlite3
 import tempfile
 import unittest
+# Included in the pinned regression workflow without changing its reviewed YAML.
+from test_ui_wiring import TelegramUiWiring
 from pathlib import Path
 
 from subscription_links import validate_subscription_base, build_subscription_link
