@@ -220,41 +220,10 @@ async def show_key_detail(callback: types.CallbackQuery):
     traffic_used_gb = traffic_used or 0
     traffic_limit_str = f"{traffic_limit:.0f} ГБ" if traffic_limit > 0 else "∞"
 
-    subid = find_subid_by_email(email)
-    if not subid:
-        subid = xui_client_uid
-
-    best_server = server_manager.get_best_server()
-    if best_server:
-        # Получаем ссылку из БД
-
-        link = await vpn_service.get_subscription_link(sub_id)
-
-        if not link:
-
-            # Если ссылки нет в БД - формируем заново
-
-            import re
-
-            base_url = best_server["url"]
-
-            match = re.match(r"(https?://[^/:]+(?::d+)?)", base_url)
-
-            if match:
-
-                domain_part = match.group(1)
-
-                domain_part = re.sub(r":\d+$", ":2096", domain_part)
-
-            else:
-
-                domain_part = base_url.split("/panel")[0].split("/api")[0].rstrip("/")
-
-                domain_part = re.sub(r":\d+$", ":2096", domain_part)
-
-            link = f"{domain_part}/pod/{subid}"
-    else:
-        link = f"https://node5.vpn4us.ru:2096/sub/{subid}"
+    # Never query the shared panel or invent a link from an unrelated server.
+    link = await vpn_service.get_subscription_link(sub_id)
+    if not isinstance(link, str) or not link.startswith("https://"):
+        link = "Ссылка недоступна — обратитесь в поддержку"
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -268,7 +237,7 @@ async def show_key_detail(callback: types.CallbackQuery):
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="🔄 Продлить", callback_data=f"renew_from_key_{sub_id}")],
         [types.InlineKeyboardButton(text=f"🔄 Авто-продление {auto_renew_text}", callback_data=f"toggle_auto_renew_{sub_id}")],
-        [types.InlineKeyboardButton(text="🗑 Удалить ключ", callback_data=f"delete_key_{sub_id}")],
+        [types.InlineKeyboardButton(text="🛟 Запросить отключение", callback_data=f"delete_key_{sub_id}")],
         [types.InlineKeyboardButton(text="🔙 Назад к ключам", callback_data="my_keys")],
         [types.InlineKeyboardButton(text="🏠 На главную", callback_data="back_to_main")]
     ])
