@@ -154,6 +154,12 @@ async def start_menu(callback: types.CallbackQuery):
 
 # ============ ОСНОВНЫЕ КНОПКИ ============
 
+@router.callback_query(F.data == "paid_key_guide")
+async def paid_key_guide(callback: types.CallbackQuery):
+    await callback.answer()
+    await install_vpn(callback.message)
+
+
 @router.message(Command("install"))
 @router.message(F.text == "📥 Установить VPN")
 async def install_vpn(message: types.Message):
