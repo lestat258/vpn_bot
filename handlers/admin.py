@@ -1073,92 +1073,25 @@ async def admin_delete_key_confirm(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-
-    parts = callback.data.split("|")
-    sub_id = int(parts[0].replace("admin_delete_key_confirm_", ""))
-    user_id = int(parts[1]) if len(parts) > 1 else None
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-        SELECT s.id, s.telegram_id, s.xui_email, s.xui_client_uid, t.name, u.first_name
-        FROM subscriptions s
-        JOIN users u ON u.telegram_id = s.telegram_id
-        JOIN tariffs t ON t.id = s.tariff_id
-        WHERE s.id = ?
-    ''', (sub_id,))
-    sub = c.fetchone()
-    conn.close()
-
-    if not sub:
-        await callback.message.edit_text("❌ Подписка не найдена")
-        await callback.answer()
-        return
-
-    sub_id, user_id_db, email, client_uid, tariff_name, first_name = sub
-    user_id = user_id_db or user_id
-
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"admin_delete_execute_{sub_id}|{user_id}")],
-        [types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_list_keys_{user_id}")]
-    ])
-
-    await callback.message.edit_text(
-        f"⚠️ <b>Удаление подписки</b>\n\n"
-        f"👤 Пользователь: {first_name or user_id} ({user_id})\n"
-        f"📦 Тариф: {tariff_name}\n"
-        f"🔑 Email: {email}\n\n"
-        f"<b>ВНИМАНИЕ!</b> Ключ будет удалён из панели 3X-UI.\n\n"
-        f"Вы уверены?",
-        reply_markup=kb,
-        parse_mode="HTML"
+    await callback.message.answer(
+        "⚠️ Удаление через Telegram-админку временно отключено. "
+        "Сначала требуется проверка принадлежности клиента vpn4us и точного "
+        "сервера/inbound, чтобы не затронуть пользователей другой системы."
     )
     await callback.answer()
 
+
 @router.callback_query(F.data.startswith("admin_delete_execute_"))
 async def admin_delete_key_execute(callback: types.CallbackQuery):
+    # Historic confirmation callbacks must remain fail-closed.
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
+    await callback.answer(
+        "Удаление отключено до внедрения проверки принадлежности клиента.",
+        show_alert=True,
+    )
 
-    parts = callback.data.split("|")
-    sub_id = int(parts[0].replace("admin_delete_execute_", ""))
-    user_id = int(parts[1]) if len(parts) > 1 else None
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT telegram_id, xui_email FROM subscriptions WHERE id = ?', (sub_id,))
-    sub = c.fetchone()
-
-    if not sub:
-        await callback.message.edit_text("❌ Подписка не найдена")
-        await callback.answer()
-        return
-
-    telegram_id, email = sub
-    telegram_id = telegram_id or user_id
-
-    best_server = server_manager.get_best_server()
-    if best_server:
-        xui = XUIClient(url=best_server['url'], api_token=best_server['api_token'])
-        xui.delete_client(email)
-
-    c.execute('UPDATE subscriptions SET is_active = 0 WHERE id = ?', (sub_id,))
-    conn.commit()
-    conn.close()
-
-    try:
-        await callback.bot.send_message(
-            chat_id=telegram_id,
-            text="⚠️ <b>Ваша подписка была удалена администратором.</b>\n\n"
-                 "Для получения нового ключа обратитесь в поддержку.",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logging.error(f"Failed to notify user: {e}")
-
-    await callback.answer("✅ Ключ удалён", show_alert=True)
-    await admin_list_keys_for_user(callback)
 
 # ============================================================
 # АДМИН: СЕРВЕРЫ
