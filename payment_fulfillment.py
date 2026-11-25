@@ -8,6 +8,9 @@ retries external effects whose outcomes may be uncertain.
 import asyncio
 import logging
 import sqlite3
+from datetime import datetime
+from html import escape
+from io import BytesIO
 from pathlib import Path
 
 from payment_ledger import PaymentLedger
@@ -55,8 +58,18 @@ def _strict_positive_int(value):
     return result
 
 
-async def _telegram_notify(telegram_id, text):
+def _subscription_qr(link):
+    import qrcode
+    image = qrcode.make(link)
+    with BytesIO() as output:
+        image.save(output, format="PNG")
+        return output.getvalue()
+
+
+async def _telegram_notify(telegram_id, text, link):
     from aiogram import Bot
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
     from database import get_setting
     raw_token = get_setting('bot_token')
     if not raw_token:
@@ -66,9 +79,25 @@ async def _telegram_notify(telegram_id, text):
         token = decrypt(raw_token)
     except Exception:
         token = raw_token
+    markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📖 Инструкция по подключению", callback_data="paid_key_guide")
+    ]])
     bot = Bot(token=token)
     try:
-        await bot.send_message(chat_id=telegram_id, text=text)
+        if link:
+            try:
+                png = _subscription_qr(link)
+            except Exception:
+                LOG.warning('Could not generate subscription QR')
+            else:
+                try:
+                    await bot.send_photo(chat_id=telegram_id,
+                                         photo=BufferedInputFile(png, filename='vpn.png'),
+                                         caption=text, parse_mode="HTML", reply_markup=markup)
+                    return
+                except TelegramBadRequest:
+                    LOG.warning('Telegram rejected subscription QR photo')
+        await bot.send_message(chat_id=telegram_id, text=text, parse_mode="HTML", reply_markup=markup)
     finally:
         await bot.session.close()
 
@@ -83,8 +112,6 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
     if vpn_api is None:
         from services import vpn_service
         vpn_api = vpn_service
-    if notifier is None:
-        notifier = _telegram_notify
 
     try:
         obj = verified_data['object']
@@ -121,6 +148,7 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
         result = None
         sub_id = None
         link = None
+        renewed = False
 
         if action == 'new_key':
             result = await vpn_api.create_subscription(
@@ -146,6 +174,7 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
                     _active_subscription, db_path, telegram_id
                 )
             if sub_id is not None:
+                renewed = True
                 result = await vpn_api.extend_subscription(
                     subscription_id=sub_id, days_to_add=duration, tariff_id=tariff_id
                 )
@@ -177,10 +206,35 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
     try:
         if not link:
             link = await vpn_api.get_subscription_link(sub_id)
-        text = '✅ Оплата подтверждена. VPN-подписка активирована.'
+        tariff = escape(str(details['name']))
+        if renewed:
+            title = 'Подписка продлена!'
+            date_label = 'Новая дата окончания'
+            end_date = result['new_end_date']
+        else:
+            title = 'Ваш VPN-ключ!'
+            date_label = 'Действует до'
+            end_date = result['end_date']
+        if isinstance(end_date, str):
+            end_date = datetime.fromisoformat(end_date)
+        text = f'✅ <b>{title}</b>'
         if link:
-            text += '\n\nСсылка на подписку:\n' + str(link)
-        await notifier(telegram_id, text)
+            text += (f'\n\n<code>{escape(link)}</code>\n☝️ Нажмите, чтобы скопировать.'
+                     '\n\n📱 <b>Инструкция</b>\n1. Установите Incy на ваше устройство:'
+                     '\n🍎 <a href="https://apps.apple.com/ru/app/incy/id6756943388">Apple</a>'
+                     '\n🤖 <a href="https://play.google.com/store/apps/details?id=llc.itdev.incy">Android</a>'
+                     '\n💻 <a href="https://github.com/INCY-DEV/incy-platforms">Windows</a>'
+                     '\n2. Скопируйте ссылку выше.'
+                     '\n3. Откройте Incy и нажмите «Вставить».'
+                     '\n4. После импорта выберите подключение.'
+                     '\n5. Нажмите «Подключиться».')
+        text += f'\n\n📦 Тариф: {tariff}\n📅 {date_label}: {end_date:%d.%m.%Y}'
+        if renewed and explicit_id not in (None, ''):
+            text += f'\n📊 +{duration} дней добавлено к вашей подписке'
+        if notifier is None:
+            await _telegram_notify(telegram_id, text, link)
+        else:
+            await notifier(telegram_id, text)
     except Exception:
         LOG.warning('VPN delivered but user notification failed; requires follow-up')
     return True
