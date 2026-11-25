@@ -128,7 +128,7 @@ class ReleaseSafety(unittest.TestCase):
         from deploy.release_plan import git_blob_sha
         import hashlib
         data = b'print(1)\\n'
-        expected = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\\0' + data).hexdigest()
+        expected = hashlib.sha1(b'blob ' + str(len(data)).encode() + bytes([0]) + data).hexdigest()
         self.assertEqual(git_blob_sha(data), expected)
 
 
