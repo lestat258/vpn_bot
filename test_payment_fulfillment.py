@@ -17,6 +17,7 @@ class FakeVpn:
 
     async def create_subscription(self, **kwargs):
         self.create_count += 1
+        self.allow_additional_key = kwargs.get("allow_additional_key", False)
         if self.raise_error:
             raise TimeoutError('Unknown remote result')
         if self.fail:
@@ -94,9 +95,10 @@ class PaymentFulfillmentTests(unittest.IsolatedAsyncioTestCase):
                   ON p.payment_id=l.payment_id WHERE p.payment_id=?''', (pid,)).fetchone()
 
     async def test_new_and_duplicate_webhook(self):
-        vpn = FakeVpn()
+        vpn = FakeVpn(existing_id=8)
         self.assertTrue(await self.run_payment('new1', self.payload('new1'), vpn))
-        self.assertEqual(self.row('new1'), ('paid', 'done', 7))
+        self.assertTrue(vpn.allow_additional_key)
+        self.assertEqual(self.row('new1'), ('paid', 'done', 8))
         self.assertTrue(await self.run_payment('new1', self.payload('new1'), vpn))
         self.assertEqual(vpn.create_count, 1)
         self.assertEqual(len(self.messages), 1)
