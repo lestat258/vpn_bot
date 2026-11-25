@@ -21,6 +21,9 @@ BRANCH = "automation/bootstrap-2026-11-25"
 WORKFLOW = ".github/workflows/source-checks.yml"
 WORKFLOW_ID = 430228354
 WORKFLOW_BLOB = "2c9e86ffe85fc58f6d614bf5e32edc6d407479d5"
+REGRESSION_WORKFLOW = ".github/workflows/vpn-regressions.yml"
+REGRESSION_WORKFLOW_ID = 430273074
+REGRESSION_WORKFLOW_BLOB = "786e99ffe04ac4a934ea6c748fa0337f19b116a7"
 API = "https://api.github.com/repos/lestat258/vpn_bot/actions/runs"
 
 
@@ -60,21 +63,25 @@ def verified_ci(sha):
             data = json.load(response)
     except (OSError, ValueError, urllib.error.HTTPError) as exc:
         raise SyncError("Unable to verify GitHub Actions: " + type(exc).__name__) from exc
-    runs = [
-        run for run in data.get("workflow_runs", [])
-        if run.get("head_sha") == sha
-        and run.get("workflow_id") == WORKFLOW_ID
-        and run.get("path") == WORKFLOW
-        and run.get("event") == "push"
-    ]
-    if not runs:
-        raise SyncError("No matching GitHub Actions push run for target commit; refusing to sync")
-    if not any(
-        run.get("status") == "completed" and run.get("conclusion") == "success"
-        for run in runs
+    for workflow_id, workflow_path in (
+        (WORKFLOW_ID, WORKFLOW),
+        (REGRESSION_WORKFLOW_ID, REGRESSION_WORKFLOW),
     ):
-        raise SyncError("GitHub Actions has not passed for target commit; refusing to sync")
-    print("GitHub Actions: SUCCESS for selected commit")
+        runs = [
+            run for run in data.get("workflow_runs", [])
+            if run.get("head_sha") == sha
+            and run.get("workflow_id") == workflow_id
+            and run.get("path") == workflow_path
+            and run.get("event") == "push"
+        ]
+        if not runs:
+            raise SyncError("Required GitHub Actions run missing: " + workflow_path)
+        if not any(
+            run.get("status") == "completed" and run.get("conclusion") == "success"
+            for run in runs
+        ):
+            raise SyncError("Required GitHub Actions did not pass: " + workflow_path)
+        print("GitHub Actions: SUCCESS for " + workflow_path)
 
 
 def main():
@@ -102,9 +109,13 @@ def main():
     target = git("rev-parse", "FETCH_HEAD").stdout.strip()
     if not git("merge-base", "--is-ancestor", current, target, expect_success=False).returncode == 0:
         raise SyncError("Remote branch is not a fast-forward from staging; refusing")
-    target_workflow_blob = git("rev-parse", f"{target}:{WORKFLOW}").stdout.strip()
-    if target_workflow_blob != WORKFLOW_BLOB:
-        raise SyncError("Verification workflow changed; manual reapproval required")
+    for workflow_path, expected_blob in (
+        (WORKFLOW, WORKFLOW_BLOB),
+        (REGRESSION_WORKFLOW, REGRESSION_WORKFLOW_BLOB),
+    ):
+        target_workflow_blob = git("rev-parse", f"{target}:{workflow_path}").stdout.strip()
+        if target_workflow_blob != expected_blob:
+            raise SyncError("Verification workflow changed; manual reapproval required: " + workflow_path)
 
     print("Current staging:", current[:12])
     print("Remote candidate:", target[:12])
