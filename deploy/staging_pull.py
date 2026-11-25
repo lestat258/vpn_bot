@@ -108,11 +108,11 @@ def main():
 
     print("Current staging:", current[:12])
     print("Remote candidate:", target[:12])
+    verified_ci(target)
+
     if target == current:
         print("Already current; no staging changes")
         return
-
-    verified_ci(target)
 
     if args.check:
         print("CHECK OK: candidate eligible. Staging worktree NOT changed.")
