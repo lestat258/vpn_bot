@@ -1,0 +1,70 @@
+name: vpn4us source checks
+
+on:
+  push:
+    branches:
+      - automation/**
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Syntax, source hygiene and offline smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: ''
+      - name: Reject committed runtime secrets and databases
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pathlib
+          import subprocess
+          files = subprocess.check_output(["git", "ls-files", "-z"]).split(b"\0")
+          prohibited = []
+          for raw in files:
+              if not raw:
+                  continue
+              p = pathlib.PurePosixPath(raw.decode())
+              if (p.suffix in {".db", ".sqlite", ".sqlite3", ".pem", ".key", ".p12", ".pfx"}
+                  or p.name == ".env" or p.name.startswith(".env.")
+                  or "venv" in p.parts or "__pycache__" in p.parts):
+                  prohibited.append(str(p))
+          if prohibited:
+              raise SystemExit("Forbidden tracked files:\n" + "\n".join(prohibited))
+          print("OK: no tracked databases or credential files")
+          PY
+      - name: Compile Python source
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pathlib
+          import py_compile
+          import subprocess
+          paths = [pathlib.Path(p.decode()) for p in
+                   subprocess.check_output(["git", "ls-files", "-z"]).split(b"\0") if p]
+          count = 0
+          for path in paths:
+              if path.suffix == ".py":
+                  py_compile.compile(str(path), doraise=True)
+                  count += 1
+          print(f"OK: compiled {count} Python files")
+          PY
+      - name: Run offline payment smoke tests (when present)
+        shell: bash
+        run: |
+          if [ -f payment_ledger.py ] && [ -f payment_fulfillment.py ] &&
+             [ -f test_payment_ledger.py ] && [ -f test_payment_fulfillment.py ]; then
+            python -m unittest -q test_payment_ledger test_payment_fulfillment
+          else
+            echo "Payment smoke tests not present in this branch yet"
+          fi
