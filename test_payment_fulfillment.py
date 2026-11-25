@@ -23,7 +23,7 @@ class FakeVpn:
         if self.fail:
             return {'success': False, 'error': 'remote error'}
         return {'success': True, 'subscription_id': self.existing_id,
-                'link': 'https://example.invalid/sub/test'}
+                'end_date': '2026-12-24', 'link': 'https://example.invalid/sub/test'}
 
     async def extend_subscription(self, **kwargs):
         self.extend_count += 1
@@ -102,6 +102,10 @@ class PaymentFulfillmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.run_payment('new1', self.payload('new1'), vpn))
         self.assertEqual(vpn.create_count, 1)
         self.assertEqual(len(self.messages), 1)
+        self.assertIn('<b>Новая подписка активирована!</b>', self.messages[0][1])
+        self.assertIn('📦 Тариф: 120 руб', self.messages[0][1])
+        self.assertIn('Действует до: 24.12.2026', self.messages[0][1])
+        self.assertIn('<code>https://example.invalid/sub/test</code>', self.messages[0][1])
 
     async def test_renewal_with_known_subscription(self):
         vpn = FakeVpn()
@@ -109,6 +113,9 @@ class PaymentFulfillmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vpn.extend_count, 1)
         self.assertEqual(vpn.create_count, 0)
         self.assertEqual(self.row('renew1'), ('paid', 'done', 7))
+        self.assertIn('<b>Подписка продлена!</b>', self.messages[0][1])
+        self.assertIn('Новая дата окончания: 24.12.2026', self.messages[0][1])
+        self.assertIn('+30 дней', self.messages[0][1])
 
     async def test_renewal_without_explicit_sub_uses_active(self):
         vpn = FakeVpn()
