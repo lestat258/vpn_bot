@@ -223,7 +223,7 @@ async def handle_renew_choose(callback: types.CallbackQuery):
         ip_limit,
         action='renew',
         subscription_id=subscription_id,
-        back_to='back_to_renew_select'
+        back_to=f'renew_select_{tariff_id}'
     )
 
 # ============================================================
@@ -352,9 +352,12 @@ async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip
     logging.info(f"💰 Цена: {price}, Скидка: {discount_percent}% / {discount_amount}₽, Итог: {final_price:.2f}")
 
     try:
+        bot_username = (await callback.bot.get_me()).username
+        if not bot_username:
+            raise RuntimeError("Telegram bot username unavailable for payment return URL")
         payment = Payment.create({
             "amount": {"value": f"{final_price:.2f}", "currency": "RUB"},
-            "confirmation": {"type": "redirect", "return_url": "https://t.me/lestat258_bot"},
+            "confirmation": {"type": "redirect", "return_url": f"https://t.me/{bot_username}"},
             "capture": True,
             "description": f"VPN {name}" + (f" (скидка {applied_discount:.2f}₽)" if applied_discount > 0 else ""),
             "metadata": {
@@ -433,7 +436,7 @@ async def handle_renew(callback: types.CallbackQuery):
         ip_limit,
         action='renew',
         subscription_id=subscription_id,
-        back_to='back_to_renew_select'
+        back_to=f'renew_select_{tariff_id}'
     )
 
 # ============================================================
@@ -467,7 +470,7 @@ async def back_to_renew_select(callback: types.CallbackQuery):
     """Возврат к выбору ключа для продления"""
     await callback.message.delete()
     await callback.message.answer(
-        "Выберите подписку для продления:",
+        "Выберите тариф, затем подписку для продления:",
         reply_markup=get_tariffs_keyboard(),
         parse_mode="HTML"
     )
