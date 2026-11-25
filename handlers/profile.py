@@ -40,6 +40,7 @@ renew_temp = {}
 
 # ============ ПРОФИЛЬ ============
 
+@router.message(Command("profile"))
 @router.message(F.text == "👤 Профиль")
 async def profile(message: types.Message):
     conn = sqlite3.connect(DB_PATH)
