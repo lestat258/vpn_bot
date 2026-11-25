@@ -132,5 +132,131 @@ class ReleaseSafety(unittest.TestCase):
         self.assertEqual(git_blob_sha(data), expected)
 
 
+
+class MultiFileDeploymentSandboxTests(unittest.TestCase):
+    """Exercise deployment on throwaway temporary folders only."""
+
+    def setUp(self):
+        import os
+        self.owner = os.getuid()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.prod = self.base / 'production'
+        self.folder = self.base / 'backup'
+        (self.prod / 'services').mkdir(parents=True)
+        self.folder.mkdir()
+
+    def target(self, filename='services/vpn_service.py'):
+        return self.prod / filename
+
+    def prepare(self, current=b'OLD SOURCE', updated=b'NEW SOURCE'):
+        from deploy.release_apply import make_plan, write_backups
+        self.target().write_bytes(current)
+        files = {'services/vpn_service.py': updated}
+        plan, fingerprint, same = make_plan('a' * 40, files, self.prod, owner=self.owner)
+        self.assertEqual(same, 0)
+        self.assertEqual(len(plan['changes']), 1)
+        write_backups(self.folder, plan['changes'], self.prod, owner=self.owner)
+        return plan, files, fingerprint
+
+    def test_multi_replace_backup_and_rollback(self):
+        from deploy.release_apply import apply_to_root, rollback_root
+        plan, files, fp = self.prepare()
+        self.assertEqual((self.folder / 'services/vpn_service.py').read_bytes(), b'OLD SOURCE')
+        apply_to_root(self.prod, plan['changes'], files, self.folder, owner=self.owner)
+        self.assertEqual(self.target().read_bytes(), b'NEW SOURCE')
+        rollback_root(self.prod, plan['changes'], self.folder, owner=self.owner)
+        self.assertEqual(self.target().read_bytes(), b'OLD SOURCE')
+
+    def test_new_file_is_removed_on_rollback(self):
+        from deploy.release_apply import make_plan, write_backups, apply_to_root, rollback_root
+        name = 'services/new_module.py'
+        files = {name: b'new module'}
+        plan, _, _ = make_plan('b' * 40, files, self.prod, owner=self.owner)
+        self.assertEqual(plan['changes'][0]['action'], 'new')
+        write_backups(self.folder, plan['changes'], self.prod, owner=self.owner)
+        apply_to_root(self.prod, plan['changes'], files, self.folder, owner=self.owner)
+        self.assertEqual(self.target(name).read_bytes(), b'new module')
+        rollback_root(self.prod, plan['changes'], self.folder, owner=self.owner)
+        self.assertFalse(self.target(name).exists())
+
+    def test_reject_external_modification_before_apply(self):
+        from deploy.release_apply import apply_to_root, Blocked
+        plan, files, _ = self.prepare()
+        self.target().write_bytes(b'OTHER CHANGE')
+        with self.assertRaises(Blocked):
+            apply_to_root(self.prod, plan['changes'], files, self.folder, owner=self.owner)
+        self.assertEqual(self.target().read_bytes(), b'OTHER CHANGE')
+
+    def test_reject_external_modification_before_rollback(self):
+        from deploy.release_apply import apply_to_root, rollback_root, Blocked
+        plan, files, _ = self.prepare()
+        apply_to_root(self.prod, plan['changes'], files, self.folder, owner=self.owner)
+        self.target().write_bytes(b'CHANGED AFTER DEPLOYMENT')
+        with self.assertRaises(Blocked):
+            rollback_root(self.prod, plan['changes'], self.folder, owner=self.owner)
+        self.assertEqual(self.target().read_bytes(), b'CHANGED AFTER DEPLOYMENT')
+
+    def test_no_partial_update_on_preflight_mismatch(self):
+        from deploy.release_apply import make_plan, apply_to_root, Blocked
+        self.target().write_bytes(b'A')
+        other = self.target('services/second.py')
+        other.write_bytes(b'B')
+        files = {'services/vpn_service.py': b'AA', 'services/second.py': b'BB'}
+        plan, _, _ = make_plan('a' * 40, files, self.prod, owner=self.owner)
+        other.write_bytes(b'C')
+        with self.assertRaises(Blocked):
+            apply_to_root(self.prod, plan['changes'], files, self.folder, owner=self.owner)
+        self.assertEqual(self.target().read_bytes(), b'A')
+        self.assertEqual(other.read_bytes(), b'C')
+
+    def test_existing_symlink_rejected(self):
+        from deploy.release_apply import make_plan, Blocked
+        self.target().symlink_to(self.base / 'arbitrary')
+        with self.assertRaises(Blocked):
+            make_plan('a' * 40, {'services/vpn_service.py': b'value'},
+                      self.prod, owner=self.owner)
+
+    def test_prohibited_paths(self):
+        from deploy.release_apply import allow_path
+        from deploy.release_plan import allowed_source
+        for name in ('.env', 'data.db', 'secrets/key.pem', 'static/pwd.key',
+                     'deploy/release_apply.py', 'test_release_invariants.py',
+                     '/etc/passwd', 'services/../data.db', 'services\\\\x.py',
+                     '.github/workflows/source-checks.yml'):
+            with self.subTest(name=name):
+                self.assertFalse(allow_path(name))
+                self.assertFalse(allowed_source(name))
+        for name in ('bot.py', 'admin_modules/servers.py', 'handlers/start.py',
+                     'templates/edit_server_safe.html', 'static/app.js'):
+            with self.subTest(name=name):
+                self.assertTrue(allow_path(name))
+                self.assertTrue(allowed_source(name))
+
+    def test_plan_fingerprint_matches_read_only_planner(self):
+        from deploy.release_apply import make_plan
+        from deploy.release_plan import digest
+        import json
+        self.target().write_bytes(b'OLD SOURCE')
+        files = {'services/vpn_service.py': b'NEW SOURCE'}
+        plan, fp, _ = make_plan('a' * 40, files, self.prod, owner=self.owner)
+        self.assertEqual(fp, digest(json.dumps(plan, sort_keys=True,
+                             separators=(',', ':'), ensure_ascii=True).encode()))
+
+    def test_manifest_is_root_private_in_real_deployment(self):
+        from deploy.release_apply import write_manifest
+        manifest = {'schema': 1, 'status': 'prepared', 'changes': []}
+        write_manifest(self.folder, manifest)
+        self.assertEqual(json.loads((self.folder / 'manifest.json').read_text()), manifest)
+        self.assertEqual((self.folder / 'manifest.json').stat().st_mode & 0o777, 0o600)
+
+    def test_git_blob_verifier(self):
+        from deploy.release_apply import git_sha
+        from deploy.release_plan import git_blob_sha
+        sample = b'unchanged source'
+        self.assertEqual(git_sha(sample), git_blob_sha(sample))
+
+
 if __name__ == '__main__':
     unittest.main()
