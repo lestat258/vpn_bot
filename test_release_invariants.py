@@ -169,6 +169,22 @@ class MultiFileDeploymentSandboxTests(unittest.TestCase):
         rollback_root(self.prod, plan['changes'], self.folder, owner=self.owner)
         self.assertEqual(self.target().read_bytes(), b'OLD SOURCE')
 
+    def test_two_existing_files_are_updated_and_restored(self):
+        from deploy.release_apply import make_plan, write_backups, apply_to_root, rollback_root
+        self.target().write_bytes(b'OLD A')
+        other_name = 'services/second.py'
+        self.target(other_name).write_bytes(b'OLD B')
+        files = {'services/vpn_service.py': b'NEW A', other_name: b'NEW B'}
+        plan, _, _ = make_plan('c' * 40, files, self.prod, owner=self.owner)
+        self.assertEqual(len(plan['changes']), 2)
+        write_backups(self.folder, plan['changes'], self.prod, owner=self.owner)
+        apply_to_root(self.prod, plan['changes'], files, self.folder, owner=self.owner)
+        self.assertEqual(self.target().read_bytes(), b'NEW A')
+        self.assertEqual(self.target(other_name).read_bytes(), b'NEW B')
+        rollback_root(self.prod, plan['changes'], self.folder, owner=self.owner)
+        self.assertEqual(self.target().read_bytes(), b'OLD A')
+        self.assertEqual(self.target(other_name).read_bytes(), b'OLD B')
+
     def test_new_file_is_removed_on_rollback(self):
         from deploy.release_apply import make_plan, write_backups, apply_to_root, rollback_root
         name = 'services/new_module.py'
