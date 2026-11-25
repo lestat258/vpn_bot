@@ -2278,3 +2278,25 @@ async def admin_settings_menu(callback: types.CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer()
+
+
+# Final navigation safety-net. Registered last to avoid shadowing real actions.
+@router.callback_query()
+async def unknown_callback_help(callback: types.CallbackQuery):
+    await callback.answer(
+        "Эта кнопка устарела. Откройте главное меню командой /menu.",
+        show_alert=True,
+    )
+
+
+@router.message(F.text)
+async def unknown_message_help(message: types.Message):
+    if message.text and message.text.startswith("/"):
+        await message.answer(
+            "Неизвестная команда. Используйте /menu или /help."
+        )
+    else:
+        await message.answer(
+            "Не поняла сообщение. Выберите нужный раздел на клавиатуре "
+            "или отправьте /help."
+        )
