@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>Редактирование сервера — VPN Admin</title>
+<style>
+:root{font:16px system-ui,-apple-system,sans-serif;color:#15253d;background:#f5f7fb}
+body{margin:0;padding:1.5rem}main{max-width:700px;margin:0 auto;background:white;border:1px solid #dfe5ee;border-radius:16px;padding:2rem;box-shadow:0 12px 28px #16243b0b}
+h1{font-size:1.4rem;margin-top:0}a{color:#285dc4}label{display:block;margin:1rem 0 .35rem;font-weight:600}
+input{box-sizing:border-box;width:100%;font:inherit;padding:.75rem;border:1px solid #bac6d7;border-radius:9px}
+small{color:#59697e;display:block;margin-top:.4rem;line-height:1.45}
+button{background:#195ac5;border:0;color:white;font:inherit;font-weight:650;padding:.85rem 1.2rem;border-radius:9px;margin-top:1.4rem;cursor:pointer}
+footer{margin-top:1.25rem}
+</style>
+</head>
+<body><main>
+<p><a href="/servers">← Вернуться к серверам</a></p>
+<h1>Редактирование сервера №{{ server.id }}</h1>
+<form action="/servers/edit/{{ server.id }}" method="post" autocomplete="off">
+<input type="hidden" name="csrf" value="{{ csrf | e }}">
+<label for="name">Название</label>
+<input id="name" name="name" type="text" maxlength="120" required value="{{ server.name | e }}">
+<label for="url">URL панели 3x-ui (HTTPS)</label>
+<input id="url" name="url" type="url" maxlength="2048" required value="{{ server.url | e }}">
+<label for="api_token">Новый API-токен</label>
+<input id="api_token" name="api_token" type="password" maxlength="4096" autocomplete="new-password" placeholder="Оставить текущий токен">
+<small>Если оставить поле пустым, действующий токен сохранится. Текущий токен не отображается.</small>
+<label for="sub_url">Ссылка на подписку (HTTPS), если используется</label>
+<input id="sub_url" name="sub_url" type="url" maxlength="2048" value="{{ (server.sub_url or '') | e }}">
+<button type="submit">Сохранить сервер</button>
+</form>
+<footer><small>Проверка API и выбор inbound будут добавлены отдельным этапом. Сохранение настроек не изменяет клиентов на VPN-сервере.</small></footer>
+
+<p><a href="/servers/inbounds/{{ server.id }}">Настроить выбор inbound для этого сервера</a></p>
+</main></body></html>

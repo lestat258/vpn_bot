@@ -55,6 +55,15 @@ class VPNService:
                 if not best_server:
                     return {'success': False, 'error': 'Нет доступных серверов'}
 
+            # vpn4us stage5: explicit subscription base (or legacy auto)
+            from subscription_links import validate_subscription_base, build_subscription_link
+            with sqlite3.connect(DB_PATH) as _stage5_db:
+                _stage5_row = _stage5_db.execute(
+                    "SELECT sub_url FROM servers WHERE id = ?", (best_server['id'],)
+                ).fetchone()
+            _stage5_base = (_stage5_row[0] or '').strip() if _stage5_row else ''
+            if _stage5_base:
+                validate_subscription_base(_stage5_base)  # before writing to 3x-ui
             xui = XUIClient(url=best_server['url'], api_token=best_server['api_token'])
 
             # Получаем все инбаунды
@@ -66,12 +75,9 @@ class VPNService:
             expiry_timestamp = int(end_date.timestamp() * 1000)
 
             # Получаем ВСЕ активные инбаунды
-            inbound_ids = []
-            for inbound in inbounds:
-                if inbound.get('enable', True):
-                    inbound_id = inbound.get('id')
-                    if inbound_id:
-                        inbound_ids.append(inbound_id)
+            # vpn4us stage4b: configured inbound policy (fail closed)
+            from inbound_policy import select_for_server
+            inbound_ids = select_for_server(DB_PATH, best_server["id"], inbounds)
 
             if not inbound_ids:
                 return {'success': False, 'error': 'Нет активных инбаундов'}
@@ -93,10 +99,11 @@ class VPNService:
                 logger.info(f"   subPort: {sub_port}")
 
             # ============ СОЗДАЕМ КЛИЕНТА ============
+            from vpn_creation_guard import gb_to_bytes, assert_absent_on_all_inbounds
             client_data = {
                 "client": {
                     "email": email,
-                    "totalGB": int(traffic_gb or 0),
+                    "totalGB": gb_to_bytes(traffic_gb),
                     "expiryTime": expiry_timestamp,
                     "limitIp": int(ip_limit or 3),
                     "enable": True
@@ -105,53 +112,40 @@ class VPNService:
             }
 
             logger.info(f"📤 Отправляем запрос в /panel/api/clients/add")
+            # vpn4us stage7c: single create attempt, fail closed
+            _stage7c_snapshot = await asyncio.to_thread(xui.get_inbounds)
+            assert_absent_on_all_inbounds(_stage7c_snapshot, email)
+            # vpn4us stage7d: persist issue BEFORE first network write
+            from vpn_issue_journal import start_issue
+            _vpn4us_issue_id = start_issue(DB_PATH, telegram_id, int(best_server['id']), email, tariff_id)
             result = await asyncio.to_thread(xui._request, 'POST', '/panel/api/clients/add', client_data)
 
-            if not result or not result.get('success'):
-                logger.warning("⚠️ Метод /clients/add не сработал, пробуем альтернативный")
-                result = await asyncio.to_thread(
-                    xui.add_client,
-                    inbound_ids[0], email, traffic_gb or 0, expiry_timestamp, ip_limit or 3
+            # stage7c: no fallback, no whole-inbound writes, never auto-retry
+            from vpn_client_verify import confirm_vless_client
+            try:
+                _stage7c_verified = await asyncio.to_thread(
+                    confirm_vless_client, xui, DB_PATH, best_server['id'], inbound_ids, email,
+                    minimum_expiry_ms=expiry_timestamp,
                 )
-                if result and len(inbound_ids) > 1:
-                    await asyncio.to_thread(xui.attach_client_to_inbounds, email, inbound_ids[1:])
-                
-                if not result:
-                    return {'success': False, 'error': 'Не удалось создать клиента'}
-                
-                subid = result.get('subId')
-                real_uuid = result.get('id')
-            else:
-                # Получаем информацию о созданном клиенте
-                logger.info(f"📤 Получаем информацию о клиенте {email}")
-                client_info = await asyncio.to_thread(xui._request, 'GET', f'/panel/api/clients/get/{email}')
-                
-                if client_info and client_info.get('success'):
-                    obj = client_info.get('obj', {})
-                    client = obj.get('client', {})
-                    
-                    subid = client.get('subId')
-                    real_uuid = client.get('uuid')
-                    
-                    logger.info(f"✅ Клиент создан: subId={subid}, uuid={real_uuid}")
-                else:
-                    subid = str(uuid.uuid4())
-                    real_uuid = str(uuid.uuid4())
-                    logger.warning(f"⚠️ Не удалось получить информацию о клиенте, генерируем UUID")
+            except Exception as _stage7c_exc:
+                raise RuntimeError(
+                    '3x-ui не подтвердила выдачу; повторно НЕ создавать, требуется сверка'
+                ) from _stage7c_exc
+            real_uuid = _stage7c_verified['uuid']
+            subid = _stage7c_verified['subid']
 
             if not subid:
-                subid = str(uuid.uuid4())
+                raise RuntimeError("3x-ui не подтвердила SubID клиента")
                 logger.warning(f"⚠️ subId не найден, генерируем: {subid}")
 
             logger.info(f"✅ Клиент {email} создан на {len(inbound_ids)} инбаундах")
-            logger.info(f"📌 subId: {subid}")
 
             # ============ ФОРМИРУЕМ ПРАВИЛЬНУЮ ССЫЛКУ ============
             # Берем базовый домен из URL сервера
             base_url = best_server['url']
             
             # Извлекаем протокол и домен с портом
-            # Пример: https://panel2.vpn4us.ru:31363/0F25PelLC9wnVflbcB
+            # Пример: https://panel.example.invalid:443/admin-path
             match = re.match(r'(https?://[^/:]+(?::\d+)?)', base_url)
             if match:
                 domain_part = match.group(1)
@@ -171,17 +165,53 @@ class VPNService:
                 sub_path = sub_path + '/'
             
             # Собираем полную ссылку
-            sub_url = f"{domain_part}{sub_path}{subid}"
-            logger.info(f"📌 Сформирована ссылка подписки: {sub_url}")
+            if _stage5_base:
+                sub_url = build_subscription_link(_stage5_base, subid)
+            else:
+                sub_url = f"{domain_part}{sub_path}{subid}"
+            logger.info("📌 Сформирована HTTPS-ссылка подписки")
 
             # Сохраняем подписку в БД
+            # vpn4us stage4c: verify actual client on every selected inbound
+            from vpn_client_verify import confirm_vless_client
+            confirmed = await asyncio.to_thread(
+                confirm_vless_client, xui, DB_PATH, best_server['id'], inbound_ids, email,
+                expected_uuid=real_uuid, expected_subid=subid,
+                minimum_expiry_ms=expiry_timestamp,
+            )
+            real_uuid, subid = confirmed['uuid'], confirmed['subid']
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute('''
                 INSERT INTO subscriptions (telegram_id, tariff_id, xui_client_uid, xui_email, end_date, is_active, sub_url)
                 VALUES (?, ?, ?, ?, ?, 1, ?)
             ''', (telegram_id, tariff_id, real_uuid or subid, email, end_date.isoformat(), sub_url))
-            subscription_id = c.lastrowid
+            # vpn4us stage6a: mark new subscription as product-owned
+            _vpn4us_sub_pk = c.lastrowid
+            if not isinstance(_vpn4us_sub_pk, int) or _vpn4us_sub_pk <= 0:
+                raise RuntimeError('Subscription insert did not return a valid row ID')
+            _vpn4us_sid = int(best_server['id'])
+            if _vpn4us_sid <= 0 or not isinstance(subid, str) or not subid:
+                raise RuntimeError('Subscription ownership metadata unavailable')
+            _vpn4us_initial = sorted(set(int(_iid) for _iid in inbound_ids))
+            if not _vpn4us_initial or any(_iid <= 0 for _iid in _vpn4us_initial):
+                raise RuntimeError('Initial managed inbound list invalid')
+            c.execute(
+                'UPDATE subscriptions SET server_id=?, managed_by_vpn4us=1, xui_subid=? WHERE id=?',
+                (_vpn4us_sid, subid, _vpn4us_sub_pk)
+            )
+            if c.rowcount != 1:
+                raise RuntimeError('Could not persist subscription ownership')
+            c.executemany(
+                'INSERT INTO subscription_inbound_memberships '
+                '(subscription_id, server_id, inbound_id) VALUES (?,?,?)',
+                [(_vpn4us_sub_pk, _vpn4us_sid, _iid) for _iid in _vpn4us_initial]
+            )
+            subscription_id = _vpn4us_sub_pk
+            # vpn4us stage7d: finalize in same subscription transaction
+            from vpn_issue_journal import finalize_issue
+            finalize_issue(c, _vpn4us_issue_id, int(best_server['id']), telegram_id,
+                           email, _vpn4us_sub_pk, real_uuid, subid)
             conn.commit()
             conn.close()
 

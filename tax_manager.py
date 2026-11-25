@@ -89,29 +89,9 @@ class TaxManager:
                     logger.error("❌ Не удалось получить UUID чека")
                     return {'success': False, 'error': 'Не удалось получить UUID чека'}
                     
-            except ImportError:
-                # Если nalogo не установлена — создаём тестовый чек
-                logger.warning("⚠️ Библиотека nalogo не установлена, создаю тестовый чек")
-                receipt_uuid = f"receipt_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{user_id}"
-                # Используем правильный URL для печатной формы
-                receipt_url = f"https://lknpd.nalog.ru/receipt/{receipt_uuid}"
-                
-                if payment_id:
-                    conn = sqlite3.connect('/opt/vpn-bot/data.db')
-                    c = conn.cursor()
-                    c.execute('''
-                        INSERT INTO tax_receipts (payment_id, receipt_uuid, receipt_url, amount, description, user_id)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (payment_id, receipt_uuid, receipt_url, amount, description, user_id))
-                    conn.commit()
-                    conn.close()
-                
-                logger.info(f"✅ Тестовый чек создан: {receipt_uuid}")
-                return {
-                    'success': True,
-                    'receipt_uuid': receipt_uuid,
-                    'receipt_url': receipt_url
-                }
+            except ImportError as e:
+                logger.error('nalogo недоступна: %s', e)
+                return {'success': False, 'error': 'Библиотека nalogo недоступна'}
                 
             except Exception as e:
                 logger.error(f"❌ Ошибка создания чека: {e}")

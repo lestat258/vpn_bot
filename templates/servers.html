@@ -73,4 +73,14 @@
         </div>
     </div>
 </div>
+
+<!-- vpn4us stage3: links to edit existing servers -->
+{% if servers %}
+<section style="margin:1.3rem 0;padding:1rem;border:1px solid #d3dae5;border-radius:12px">
+  <h3>Редактировать сервер</h3>
+  {% for server in servers %}
+  <div><a href="/servers/edit/{{ server[0] }}">{{ server[1] | e }}</a></div>
+  {% endfor %}
+</section>
+{% endif %}
 {% endblock %}

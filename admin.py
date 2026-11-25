@@ -34,16 +34,16 @@ templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://bot.vpn4us.ru", "http://localhost:8000", "http://127.0.0.1:8000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Trusted Hosts — разрешаем все хосты
+# Trusted Hosts
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["*"]
+    allowed_hosts=["bot.vpn4us.ru", "admin.vpn4us.ru", "node1.vpn4us.ru", "localhost", "127.0.0.1", "31.77.142.92"]
 )
 
 # ============================================================

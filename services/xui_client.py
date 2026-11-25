@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class XUIClient:
     """Клиент для взаимодействия с 3X-UI панелью"""
     
-    def __init__(self, url: str, api_token: str, verify_ssl: bool = False):
+    def __init__(self, url: str, api_token: str, verify_ssl: bool = True):
         self.url = url.rstrip('/')
         self.api_token = api_token
         self.verify_ssl = verify_ssl
@@ -25,6 +25,28 @@ class XUIClient:
         })
         if not verify_ssl:
             self.session.verify = False
+
+        # vpn4us stage3: allow encrypted tokens saved by admin
+        try:
+            from encryption import decrypt as _decrypt_server_token
+            _clear_server_token = _decrypt_server_token(api_token)
+            if not isinstance(_clear_server_token, str) or not _clear_server_token:
+                _clear_server_token = api_token
+        except Exception:
+            # Older installations saved unencrypted Bearer tokens.
+            # Encrypted-looking tokens must fail closed if decryption fails.
+            if str(api_token).startswith(('gAAAA', 'ENC:', 'enc:')):
+                raise ValueError('Unable to decrypt stored 3x-ui API token')
+            _clear_server_token = api_token
+        if not isinstance(_clear_server_token, str):
+            raise ValueError('Invalid API token type')
+        _clear_server_token = _clear_server_token.strip()
+        if _clear_server_token.lower().startswith('bearer '):
+            _clear_server_token = _clear_server_token[7:].strip()
+        if not _clear_server_token:
+            raise ValueError('Empty 3x-ui API token')
+        self.api_token = _clear_server_token
+        self.session.headers['Authorization'] = 'Bearer ' + _clear_server_token
     
     def _request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Optional[Dict]:
         """Выполняет запрос к API"""
@@ -35,7 +57,7 @@ class XUIClient:
             if data:
                 logger.debug(f"Request data: {json.dumps(data, indent=2)}")
             
-            response = self.session.request(method, url, json=data)
+            response = self.session.request(method, url, json=data, timeout=12)
             
             if response.status_code == 200:
                 result = response.json()
@@ -53,10 +75,18 @@ class XUIClient:
             return None
     
     def get_inbounds(self) -> List[Dict]:
-        """Получает список всех инбаундов"""
         result = self._request('GET', '/panel/api/inbounds/list')
-        if result and isinstance(result, dict):
-            return result.get('inbounds', [])
+
+        if isinstance(result, list):
+            return result
+
+        if isinstance(result, dict):
+            items = result.get("inbounds")
+            if items is None:
+                items = result.get("obj")
+            if isinstance(items, list):
+                return items
+
         return []
     
     def add_client_to_all_inbounds(

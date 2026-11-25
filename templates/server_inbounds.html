@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>Правила inbound — VPN Admin</title>
+<style>
+body{font:16px system-ui,-apple-system,sans-serif;margin:0;background:#f5f7fb;color:#16253c;padding:1.5rem}
+main{max-width:850px;margin:auto;background:#fff;border:1px solid #dae0e8;border-radius:15px;padding:1.6rem}
+fieldset{border:1px solid #cad3df;border-radius:10px;margin:1rem 0;padding:1rem}legend{font-weight:650}
+label{display:block;margin:.65rem 0}input,select{font:inherit;padding:.5rem;border:1px solid #bbc6d5;border-radius:8px}
+input[type=checkbox],input[type=radio]{width:auto}button{background:#225fc3;color:white;border:0;border-radius:8px;padding:.8rem 1.2rem;font:inherit}
+small,.hint{color:#576779}code{background:#edf1f5;padding:.1rem .25rem} .err{color:#9c2424}.row{padding:.55rem 0;border-bottom:1px solid #ecf0f4}
+</style></head><body><main>
+<p><a href="/servers/edit/{{ server.id }}">← Назад к серверу</a></p>
+<h1>Выбор inbound: {{ server.name | e }}</h1>
+<p>Только указанные здесь inbound будут разрешены после подключения правил к выдаче VPN. Пока этот экран сохраняет настройки, но не изменяет клиентов 3x-ui.</p>
+{% if error %}<p class="err">{{ error | e }}</p>{% endif %}
+{% if success %}<p>Настройки сохранены.</p>{% endif %}
+<form method="post" action="/servers/inbounds/{{ server.id }}" autocomplete="off">
+<input type="hidden" name="csrf" value="{{ csrf | e }}">
+<fieldset><legend>Режим</legend>
+<label><input type="radio" name="mode" value="group" {% if policy.mode=='group' %}checked{% endif %}> По маркеру группы в теге (например <code>--1</code>)</label>
+<label>Номер группы: <input type="number" name="group_number" min="1" max="9999" value="{{ policy.group_number or 1 }}"></label>
+<label><input type="radio" name="mode" value="manual" {% if policy.mode=='manual' %}checked{% endif %}> Выбрать inbound вручную</label>
+<label><input type="radio" name="mode" value="all" {% if policy.mode=='all' %}checked{% endif %}> Все активные inbound — может включить служебные</label>
+<label>Минимальное количество inbound: <input type="number" name="minimum_count" min="1" max="50" value="{{ policy.minimum_count or 1 }}"></label>
+<label><input type="checkbox" name="allow_all" value="yes"> Подтверждаю, что режим «все» может выдать доступ к служебным inbound</label>
+</fieldset>
+<fieldset><legend>Доступные inbound</legend>
+{% if inbounds %}
+  {% for i in inbounds %}
+  <div class="row"><label>
+    <input type="checkbox" name="selected_ids" value="{{ i.id }}" {% if i.id in policy.inbound_ids %}checked{% endif %} {% if not i.enabled %}disabled{% endif %}>
+    <strong>ID {{ i.id }}</strong> — {{ i.tag | e }}
+    <small>Протокол: {{ i.protocol | e }} · {% if i.enabled %}активен{% else %}отключён{% endif %}</small>
+  </label></div>
+  {% endfor %}
+{% else %}
+<p class="err">Список inbound недоступен. Сохранение изменений заблокировано до восстановления API.</p>
+{% endif %}
+</fieldset>
+<button type="submit" {% if not inbounds %}disabled{% endif %}>Сохранить правило</button>
+</form>
+<p class="hint">Если задан минимум 2, выдача остановится при наличии только одного подходящего inbound. Режим без сохранённого правила запрещает выдачу.</p>
+</main></body></html>
