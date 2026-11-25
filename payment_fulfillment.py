@@ -69,7 +69,7 @@ def _subscription_qr(link):
 async def _telegram_notify(telegram_id, text, link):
     from aiogram import Bot
     from aiogram.exceptions import TelegramBadRequest
-    from aiogram.types import BufferedInputFile
+    from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
     from database import get_setting
     raw_token = get_setting('bot_token')
     if not raw_token:
@@ -79,6 +79,9 @@ async def _telegram_notify(telegram_id, text, link):
         token = decrypt(raw_token)
     except Exception:
         token = raw_token
+    markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📖 Инструкция по подключению", callback_data="paid_key_guide")
+    ]])
     bot = Bot(token=token)
     try:
         if link:
@@ -90,11 +93,11 @@ async def _telegram_notify(telegram_id, text, link):
                 try:
                     await bot.send_photo(chat_id=telegram_id,
                                          photo=BufferedInputFile(png, filename='vpn.png'),
-                                         caption=text, parse_mode="HTML")
+                                         caption=text, parse_mode="HTML", reply_markup=markup)
                     return
                 except TelegramBadRequest:
                     LOG.warning('Telegram rejected subscription QR photo')
-        await bot.send_message(chat_id=telegram_id, text=text, parse_mode="HTML")
+        await bot.send_message(chat_id=telegram_id, text=text, parse_mode="HTML", reply_markup=markup)
     finally:
         await bot.session.close()
 
@@ -209,16 +212,25 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
             date_label = 'Новая дата окончания'
             end_date = result['new_end_date']
         else:
-            title = 'Новая подписка активирована!'
+            title = 'Ваш VPN-ключ!'
             date_label = 'Действует до'
             end_date = result['end_date']
         if isinstance(end_date, str):
             end_date = datetime.fromisoformat(end_date)
-        text = (f'✅ <b>{title}</b>\n\n📦 Тариф: {tariff}\n'
-                f'📅 {date_label}: {end_date:%d.%m.%Y}')
+        text = f'✅ <b>{title}</b>'
+        if link:
+            text += (f'\n\n<code>{escape(link)}</code>\n☝️ Нажмите, чтобы скопировать.'
+                     '\n\n📱 <b>Инструкция</b>\n1. Установите Incy на ваше устройство:'
+                     '\n🍎 <a href="https://apps.apple.com/ru/app/incy/id6756943388">Apple</a>'
+                     '\n🤖 <a href="https://play.google.com/store/apps/details?id=llc.itdev.incy">Android</a>'
+                     '\n💻 <a href="https://github.com/INCY-DEV/incy-platforms">Windows</a>'
+                     '\n2. Скопируйте ссылку выше.'
+                     '\n3. Откройте Incy и нажмите «Вставить».'
+                     '\n4. После импорта выберите подключение.'
+                     '\n5. Нажмите «Подключиться».')
+        text += f'\n\n📦 Тариф: {tariff}\n📅 {date_label}: {end_date:%d.%m.%Y}'
         if renewed and explicit_id not in (None, ''):
             text += f'\n📊 +{duration} дней добавлено к вашей подписке'
-        text += f'\n\n🔗 <b>Ссылка для подключения:</b>\n<code>{escape(link or "Недоступна")}</code>'
         if notifier is None:
             await _telegram_notify(telegram_id, text, link)
         else:
