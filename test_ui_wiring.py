@@ -178,6 +178,21 @@ class TelegramUiWiring(unittest.TestCase):
         self.assertNotIn('/2fa/status', constants)
         self.assertNotIn("admin_pass = get_setting('admin_password') or 'admin'", source)
 
+    def test_unsafe_deletion_paths_remain_disabled(self):
+        # Until we can prove server/inbound ownership, user-facing paths must
+        # not invoke the broad legacy deletion API on a shared 3x-ui panel.
+        for file in ('handlers/profile.py', 'handlers/admin.py',
+                     'admin_modules/users.py'):
+            with self.subTest(file=file):
+                text = (ROOT / file).read_text(encoding='utf-8')
+                self.assertNotIn('.delete_client(', text)
+                self.assertNotIn('DELETE FROM subscriptions', text)
+
+    def test_new_database_has_no_default_admin_password(self):
+        source = (ROOT / 'database.py').read_text(encoding='utf-8')
+        self.assertNotIn("('admin_password', 'admin')", source)
+        self.assertNotIn("('auto_renew_enabled', 'true')", source)
+
     def test_no_admin_unconditional_message_catchall(self):
         tree = source_tree('handlers/admin.py')
         dangerous = []
