@@ -3,7 +3,6 @@ import unittest
 from unittest.mock import patch
 import uuid
 from vpn_client_verify import inspect_vless_client, confirm_vless_client, VerificationError
-from apply_stage4c import patch_source, PatchMismatch
 
 U = str(uuid.uuid4())
 SID = 'a1b2c3d4e5'
@@ -75,8 +74,8 @@ class VerifyTests(unittest.TestCase):
 
     def test_no_network_with_mock(self):
         class FakeXui:
-            def get_inbounds(self):
-                return snapshot()
+            def get_inbounds(self, *, use_cache=True):
+                return [] if use_cache else snapshot()
         with patch('vpn_client_verify.select_for_server', return_value=[92,100]) as f:
             out = confirm_vless_client(FakeXui(), '/unused/test.db',16,[92,100],EMAIL, expected_uuid=U)
             self.assertEqual(out['uuid'],U)
@@ -84,8 +83,8 @@ class VerifyTests(unittest.TestCase):
 
     def test_policy_changed_denies(self):
         class FakeXui:
-            def get_inbounds(self):
-                return snapshot()
+            def get_inbounds(self, *, use_cache=True):
+                return [] if use_cache else snapshot()
         with patch('vpn_client_verify.select_for_server', return_value=[92]):
             with self.assertRaises(VerificationError):
                 confirm_vless_client(FakeXui(),'/unused/test.db',16,[92,100],EMAIL)
@@ -120,11 +119,15 @@ class VPNService:
 '''
 
     def test_patch_is_before_db_insert(self):
+        from apply_stage4c import patch_source
+
         result, lineno = patch_source(self.fixture())
         self.assertLess(result.find('confirm_vless_client'), result.find('sqlite3.connect(DB_PATH)'))
         self.assertIn('expected_subid=subid', result)
 
     def test_patch_repeat_denied(self):
+        from apply_stage4c import patch_source, PatchMismatch
+
         updated, _ = patch_source(self.fixture())
         with self.assertRaises(PatchMismatch):
             patch_source(updated)
