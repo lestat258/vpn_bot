@@ -124,7 +124,7 @@ def confirm_vless_client(xui, db_path, server_id, inbound_ids, email, *,
                          expected_uuid=None, expected_subid=None,
                          minimum_expiry_ms=None):
     """One READ of the panel after writing. No automated retry or modifications."""
-    fresh = xui.get_inbounds()
+    fresh = xui.get_inbounds(use_cache=False)
     if not fresh:
         raise VerificationError('Не удалось повторно получить inbound из 3x-ui')
     selected_now = select_for_server(db_path, server_id, fresh)
