@@ -126,6 +126,7 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
             result = await vpn_api.create_subscription(
                 telegram_id=telegram_id, tariff_id=tariff_id,
                 days=duration, traffic_gb=traffic, ip_limit=ip_limit,
+                allow_additional_key=metadata.get("action") == "new_key",
             )
             if not isinstance(result, dict) or result.get('success') is not True:
                 raise RuntimeError('VPN create returned failure or unknown result')

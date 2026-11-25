@@ -27,7 +27,7 @@ class VPNService:
         days: int,
         traffic_gb: float = 0,
         ip_limit: int = 3,
-        server_id: Optional[int] = None
+        server_id: Optional[int] = None, *, allow_additional_key: bool = False
     ) -> Dict[str, Any]:
         """Создает новую VPN подписку на ВСЕХ активных инбаундах сервера"""
         try:
@@ -117,7 +117,8 @@ class VPNService:
             assert_absent_on_all_inbounds(_stage7c_snapshot, email)
             # vpn4us stage7d: persist issue BEFORE first network write
             from vpn_issue_journal import start_issue
-            _vpn4us_issue_id = start_issue(DB_PATH, telegram_id, int(best_server['id']), email, tariff_id)
+            _vpn4us_issue_id = start_issue(DB_PATH, telegram_id, int(best_server['id']), email, tariff_id,
+                                            allow_additional_key=allow_additional_key)
             result = await asyncio.to_thread(xui._request, 'POST', '/panel/api/clients/add', client_data)
 
             # stage7c: no fallback, no whole-inbound writes, never auto-retry

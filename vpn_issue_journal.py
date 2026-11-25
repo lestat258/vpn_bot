@@ -57,7 +57,7 @@ def _integer(value, name):
     return result
 
 
-def start_issue(db_path, telegram_id, server_id, email, tariff_id):
+def start_issue(db_path, telegram_id, server_id, email, tariff_id, *, allow_additional_key=False):
     """Commit journal BEFORE the one allowed /clients/add POST.
 
     A pending entry deliberately survives all API/DB failures until reviewed.
@@ -80,7 +80,7 @@ def start_issue(db_path, telegram_id, server_id, email, tariff_id):
         if db.execute('''SELECT 1 FROM vpn4us_issue_journal WHERE server_id=? AND email=? LIMIT 1''',
                       (server_id,email)).fetchone():
             raise IssueJournalError('Client email already used in issue journal')
-        if db.execute('''SELECT 1 FROM subscriptions WHERE telegram_id=? AND managed_by_vpn4us=1
+        if not allow_additional_key and db.execute('''SELECT 1 FROM subscriptions WHERE telegram_id=? AND managed_by_vpn4us=1
                          AND is_active=1 LIMIT 1''', (telegram_id,)).fetchone():
             raise IssueJournalError('Active subscription already exists: use renewal/recovery')
         if not db.execute('SELECT 1 FROM users WHERE telegram_id=?', (telegram_id,)).fetchone():

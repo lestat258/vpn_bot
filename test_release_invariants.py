@@ -91,12 +91,15 @@ class ReleaseSafety(unittest.TestCase):
                     INSERT INTO servers VALUES (16, 1);
                 ''')
                 ensure_schema(con)
-            issue = start_issue(db, 12345, 16, EMAIL, 15)
+                con.execute('INSERT INTO subscriptions VALUES (12345,1,1)')
+            with self.assertRaises(IssueJournalError):
+                start_issue(db, 12345, 16, EMAIL, 15)
+            issue = start_issue(db, 12345, 16, EMAIL, 15, allow_additional_key=True)
             with sqlite3.connect(db) as con:
                 self.assertEqual(con.execute('SELECT state FROM vpn4us_issue_journal WHERE id=?',
                                              (issue,)).fetchone(), ('prepared',))
             with self.assertRaises(IssueJournalError):
-                start_issue(db, 12345, 16, 'another@example.invalid', 15)
+                start_issue(db, 12345, 16, 'another@example.invalid', 15, allow_additional_key=True)
 
     def test_release_plan_source_allowlist(self):
         from deploy.release_plan import allowed_source
