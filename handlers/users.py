@@ -71,55 +71,62 @@ async def cmd_start(message: types.Message):
     c.execute('SELECT telegram_id FROM users WHERE telegram_id = ?', (user.id,))
     existing = c.fetchone()
 
-    if not existing:
-        # Новый пользователь - добавляем с рефералом
-        c.execute('INSERT INTO users (telegram_id, username, first_name) VALUES (?, ?, ?)',
-                  (user.id, user.username, user.first_name))
+    is_new = not existing
+    try:
+        if is_new:
+            c.execute(
+                "INSERT INTO users (telegram_id, username, first_name) VALUES (?, ?, ?)",
+                (user.id, user.username, user.first_name)
+            )
+        else:
+            c.execute(
+                "UPDATE users SET username = ?, first_name = ? WHERE telegram_id = ?",
+                (user.username, user.first_name, user.id)
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
-        # Если есть реферал - добавляем связь
-        if ref_id and ref_id != user.id:
-            from referral import referral_manager
-            referral_manager.add_referral(user.id, ref_id)
+    # Do not call referral_manager on a second SQLite connection while the
+    # registration transaction is still uncommitted.
+    if is_new and ref_id and ref_id != user.id:
+        from referral import referral_manager
+        try:
+            referral_added = referral_manager.add_referral(user.id, ref_id)
+        except Exception as exc:
+            logging.exception("Failed to register referral for %s: %s", user.id, exc)
+            referral_added = False
 
-            # Проверяем триггеры для рефералов
-            from trigger_manager import trigger_manager
-            activated = trigger_manager.check_and_apply_triggers(ref_id, 'referrals')
-            if activated:
-                for act in activated:
-                    promo = act['promocode']
-                    try:
-                        await message.bot.send_message(
-                            chat_id=ref_id,
-                            text=f"🎉 <b>Достижение выполнено!</b>\n\n"
-                                 f"Вы пригласили {act['current_value']} друзей!\n"
-                                 f"Активирован промокод: <b>{promo['code']}</b>\n"
-                                 f"🎁 Скидка: {promo['discount_percent']}%\n\n"
-                                 f"Промокод уже применён к вашему аккаунту!",
-                            parse_mode="HTML"
-                        )
-                        logger.info(f"✅ Уведомление о триггере отправлено {ref_id}")
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка отправки уведомления о триггере: {e}")
-
-            # Уведомляем реферала (если он есть и это не бот)
+        if referral_added:
             try:
-                bot = message.bot
-                await bot.send_message(
+                from trigger_manager import trigger_manager
+                activated = trigger_manager.check_and_apply_triggers(ref_id, 'referrals')
+                for act in (activated or []):
+                    promo = act.get('promocode', {})
+                    await message.bot.send_message(
+                        chat_id=ref_id,
+                        text=(
+                            "🎉 <b>Достижение выполнено!</b>\\n\\n"
+                            f"Вы пригласили {act.get('current_value', 0)} друзей!\\n"
+                            f"Активирован промокод: <b>{promo.get('code', '')}</b>"
+                        ),
+                        parse_mode="HTML"
+                    )
+            except Exception as exc:
+                logging.warning("Unable to process referral bonus notification: %s", exc)
+
+            try:
+                await message.bot.send_message(
                     chat_id=ref_id,
-                    text=f"🎉 <b>Новый реферал!</b>\n\n"
-                         f"Пользователь @{user.username or user.first_name} зарегистрировался по вашей ссылке!\n"
-                         f"Вы получите бонусные дни, когда он купит подписку.",
+                    text=(
+                        "🎉 <b>Новый реферал!</b>\\n\\n"
+                        "По вашей ссылке зарегистрировался новый пользователь.\\n"
+                        "Бонусы начисляются согласно условиям реферальной программы."
+                    ),
                     parse_mode="HTML"
                 )
-            except Exception as e:
-                logging.error(f"Не удалось уведомить реферала {ref_id}: {e}")
-    else:
-        # Обновляем существующего пользователя
-        c.execute('UPDATE users SET username = ?, first_name = ? WHERE telegram_id = ?',
-                  (user.username, user.first_name, user.id))
-
-    conn.commit()
-    conn.close()
+            except Exception as exc:
+                logging.info("Referral notification was not delivered: %s", exc)
 
     welcome_text = get_setting('text_welcome') or (
         "🎉 <b>Добро пожаловать в VPN Bot!</b>\n\n"
