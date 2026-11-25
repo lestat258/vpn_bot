@@ -517,9 +517,9 @@ def _init_default_settings():
         if c.fetchone()[0] == 0:
             defaults = [
                 ('admin_username', 'admin'),
-                ('admin_password', 'admin'),
+                ('admin_password', ''),
                 ('first_login', 'true'),
-                ('auto_renew_enabled', 'true'),
+                ('auto_renew_enabled', 'false'),
                 ('tax_enabled', 'false'),
             ]
             for key, value in defaults:
