@@ -20,7 +20,7 @@ sessions = {}
 
 def check_auth(request: Request):
     """Проверка аутентификации"""
-    public_paths = ['/', '/login', '/2fa/status', '/2fa/qr', '/favicon.ico', '/health']
+    public_paths = ['/', '/login', '/favicon.ico', '/health']
     if request.url.path in public_paths:
         return True
     session_id = request.cookies.get("session_id")
@@ -47,10 +47,10 @@ async def login_page(request: Request):
 @auth_router.post("/login")
 async def login(request: Request, username: str = Form(...), password: str = Form(...)):
     """Обработка входа"""
-    admin_user = get_setting('admin_username') or 'admin'
-    admin_pass = get_setting('admin_password') or 'admin'
+    admin_user = get_setting('admin_username')
+    admin_pass = get_setting('admin_password')
 
-    if username == admin_user and password == admin_pass:
+    if admin_user and admin_pass and username == admin_user and password == admin_pass:
         if two_factor_auth.is_enabled:
             form_data = await request.form()
             twofa_code = form_data.get('twofa_code', '')
@@ -91,10 +91,10 @@ async def change_password(request: Request, new_password: str = Form(...)):
     """Смена пароля"""
     if not check_auth(request):
         return RedirectResponse("/")
-    if len(new_password) < 4:
+    if len(new_password) < 12:
         return templates.TemplateResponse("change_password.html", {
             "request": request,
-            "error": "Пароль должен содержать минимум 4 символа"
+            "error": "Пароль должен содержать минимум 12 символов"
         })
     set_setting('admin_password', new_password)
     set_setting('first_login', 'false')
