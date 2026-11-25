@@ -212,7 +212,8 @@ def atomic_write(path, data, info=None):
             out.flush()
             os.fsync(out.fileno())
             if info is None:
-                os.fchown(out.fileno(), 0, 0)
+                # mkstemp already gives caller ownership; the production CLI
+                # runs as root and therefore creates root-owned files.
                 os.fchmod(out.fileno(), 0o644)
             else:
                 os.fchown(out.fileno(), info.st_uid, info.st_gid)
