@@ -321,6 +321,7 @@ async def device_key_selected(callback: types.CallbackQuery):
         FROM subscriptions s
         JOIN tariffs t ON t.id = s.tariff_id
         WHERE s.id = ? AND s.telegram_id = ?
+          AND s.is_active = 1 AND datetime(s.end_date) > datetime('now')
     ''', (sub_id, callback.from_user.id))
     sub = c.fetchone()
     conn.close()
@@ -362,41 +363,17 @@ async def show_instruction_for_key(callback, device, device_name, sub_id, email,
         )
     }
 
-    subid = find_subid_by_email(email)
-    if not subid:
-        subid = xui_client_uid
-
-    best_server = server_manager.get_best_server()
-    if best_server:
-        # Получаем ссылку из БД
-
-        link = await vpn_service.get_subscription_link(sub_id)
-
-        if not link:
-
-            # Если ссылки нет в БД - формируем заново
-
-            import re
-
-            base_url = best_server["url"]
-
-            match = re.match(r"(https?://[^/:]+(?::d+)?)", base_url)
-
-            if match:
-
-                domain_part = match.group(1)
-
-                domain_part = re.sub(r":\d+$", ":2096", domain_part)
-
-            else:
-
-                domain_part = base_url.split("/panel")[0].split("/api")[0].rstrip("/")
-
-                domain_part = re.sub(r":\d+$", ":2096", domain_part)
-
-            link = f"{domain_part}/pod/{subid}"
-    else:
-        link = f"https://node5.vpn4us.ru:2096/sub/{subid}"
+    # The source of truth is the subscription's stored URL, not a random
+    # "best" server. Never invent or reconstruct links on a shared panel.
+    link = await vpn_service.get_subscription_link(sub_id)
+    if not isinstance(link, str) or not link.startswith("https://"):
+        await callback.message.answer(
+            "Не удалось получить ссылку подписки. Откройте «Мои ключи» "
+            "или обратитесь в поддержку — новый ключ создавать не нужно.",
+            reply_markup=get_back_keyboard("back_to_keys_from_install"),
+        )
+        await callback.answer()
+        return
 
     text = instructions.get(device, instructions['android'])
     text = f"📦 <b>Тариф: {tariff_name}</b>\n\n" + text
@@ -450,7 +427,6 @@ async def back_to_keys_from_install(callback: types.CallbackQuery):
     # Показываем список ключей
     from handlers.profile import show_my_keys
     await show_my_keys(callback)
-    await callback.answer()
 
 @router.callback_query(F.data == "back_to_main")
 async def back_to_main(callback: types.CallbackQuery):
