@@ -168,35 +168,14 @@ async def add_key_submit(request: Request, telegram_id: int,
 
 @users_router.post("/users/{telegram_id}/delete-key/{sub_id}")
 async def user_delete_key(request: Request, telegram_id: int, sub_id: int):
+    """Fail closed until deletion can be scoped to verified vpn4us ownership.
+
+    The old implementation could target the wrong server, silently fail on
+    3x-ui and still delete the subscription database record.
+    """
     if not check_auth(request):
         return RedirectResponse("/")
-    
-    from xui_client import XUIClient
-    from server_manager import server_manager
-    
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
-    c = conn.cursor()
-    c.execute('SELECT xui_email FROM subscriptions WHERE id = ? AND telegram_id = ?', (sub_id, telegram_id))
-    sub = c.fetchone()
-    
-    if not sub:
-        conn.close()
-        return RedirectResponse(f"/users/{telegram_id}?error=Ключ не найден", status_code=302)
-    
-    xui_email = sub[0]
-    
-    try:
-        servers = server_manager.get_active_servers()
-        for server in servers:
-            xui = XUIClient(url=server['url'], api_token=server['api_token'])
-            xui.delete_client(xui_email)
-            break
-    except Exception as e:
-        print(f"Ошибка удаления из 3X-UI: {e}")
-    
-    c.execute('DELETE FROM subscriptions WHERE id = ? AND telegram_id = ?', (sub_id, telegram_id))
-    conn.commit()
-    conn.close()
-    
-    log_admin_action(812021055, 'delete_key', f'Удалён ключ {sub_id} у пользователя {telegram_id}')
-    return RedirectResponse(f"/users/{telegram_id}?success=Ключ удалён", status_code=302)
+    return RedirectResponse(
+        f"/users/{telegram_id}?error=Удаление+через+панель+временно+недоступно",
+        status_code=302,
+    )
