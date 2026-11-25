@@ -28,6 +28,26 @@ backups/
 .env
 config.local.py
 
+# Production state / credentials — do not publish
+.env.*
+!.env.example
+*.env
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite
+*.sqlite3
+*.db-journal
+*credentials*.json
+*secrets*.json
+secrets/
+private/
+state/
+runtime/
+stage*_candidate/
+vpn4us-admin-stage*.zip
+
 # IDE
 .vscode/
 .idea/
