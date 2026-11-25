@@ -102,7 +102,10 @@ class PaymentFulfillmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.run_payment('new1', self.payload('new1'), vpn))
         self.assertEqual(vpn.create_count, 1)
         self.assertEqual(len(self.messages), 1)
-        self.assertIn('<b>Новая подписка активирована!</b>', self.messages[0][1])
+        self.assertIn('<b>Ваш VPN-ключ!</b>', self.messages[0][1])
+        for platform in ('Apple', 'Android', 'Windows'):
+            self.assertIn(f'>{platform}</a>', self.messages[0][1])
+        self.assertIn('«Вставить»', self.messages[0][1])
         self.assertIn('📦 Тариф: 120 руб', self.messages[0][1])
         self.assertIn('Действует до: 24.12.2026', self.messages[0][1])
         self.assertIn('<code>https://example.invalid/sub/test</code>', self.messages[0][1])
