@@ -1,5 +1,6 @@
 """Read-only local payment journal for the authenticated admin page."""
 import re
+from datetime import datetime, timezone, timedelta
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -24,7 +25,7 @@ WHERE = {
     "review": "needs_review=1",
 }
 LABELS = {
-    "payment": {"paid":"Оплачен", "pending":"Ожидает", "canceled":"Отменён"},
+    "payment": {"returned":"Возвращён", "paid":"Оплачен", "pending":"Ожидает", "canceled":"Отменён"},
     "provider": {"verified":"Подтверждён", "pending":"Ожидает", "canceled":"Отменён"},
     "vpn": {"done":"Выполнено","not_started":"Не начато","processing":"В обработке","needs_review":"Требует сверки"},
     "tax": {"done":"Выдан","canceled":"Аннулирован","queued":"В очереди","processing":"В обработке",
@@ -52,6 +53,20 @@ def safe_receipt_link(url, uid):
     if re.fullmatch(r"https://lknpd\.nalog\.ru/api/v1/receipt/[0-9]{12}/" + re.escape(uid) + r"/print", url):
         return url
     return None
+
+
+def display_date(value, is_new):
+    if not value:
+        return "—"
+    if not is_new:
+        return str(value) + " (из базы)"
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone(timedelta(hours=3))).strftime("%d.%m.%Y %H:%M:%S МСК")
+    except (ValueError, TypeError):
+        return str(value) + " (из базы)"
 
 
 def load_journal(path, selected="all", page=1):
@@ -99,6 +114,9 @@ def load_journal(path, selected="all", page=1):
             for group,key in (("payment","status"),("provider","payment_state"),("vpn","vpn_state"),
                               ("tax","tax_state"),("refund","refund_state")):
                 row[group+"_display"]=status_display(group,row[key])
+            if row["refund_state"] == "full_done":
+                row["payment_display"] = status_display("payment", "returned")
+            row["display_date"] = display_date(row["created_at"], row["is_new"])
             items.append(row)
     return {"payments":items,"stats":stats,"filters":FILTERS,"selected":selected,
             "page":page,"pages":pages,"count":count}
