@@ -724,6 +724,70 @@
             .stats-grid { grid-template-columns: 1fr 1fr; }
         }
 
+        /* Keep the dashboard compact on phones, without changing other pages. */
+        @media (max-width: 768px) {
+            .dashboard-stats.stats-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 12px;
+                margin-bottom: 16px;
+            }
+
+            .dashboard-stats .stat-card {
+                min-width: 0;
+                padding: 14px 8px;
+            }
+
+            .dashboard-stats .number,
+            .dashboard-stats .label {
+                overflow-wrap: anywhere;
+            }
+
+            .dashboard-detail-grid,
+            .dashboard-chart-grid {
+                grid-template-columns: minmax(0, 1fr) !important;
+                gap: 0 !important;
+            }
+
+            .dashboard-detail-grid > div,
+            .dashboard-chart-grid > .card {
+                min-width: 0;
+            }
+
+            .dashboard-metric {
+                gap: 12px;
+                align-items: baseline;
+            }
+
+            .dashboard-metric > span {
+                min-width: 0;
+                overflow-wrap: anywhere;
+            }
+
+            .dashboard-metric > span:last-child {
+                text-align: right;
+                flex: 0 1 auto;
+            }
+
+            .dashboard-actions .btn {
+                min-height: 44px;
+                white-space: normal;
+                max-width: 100%;
+            }
+
+            .sidebar {
+                padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+                overscroll-behavior-y: contain;
+            }
+
+            .sidebar .sidebar-footer {
+                flex-shrink: 0;
+            }
+
+            .main-content {
+                padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+            }
+        }
+
         @media (prefers-reduced-motion: reduce) {
             .sidebar { transition: none; }
         }
@@ -840,7 +904,7 @@
         <div class="logo">
             <i class="fas fa-shield-halved"></i>
             <div>
-                <span>VPN Bot</span>
+                <span>VPN4US</span>
                 <small>Admin Panel</small>
             </div>
         </div>
