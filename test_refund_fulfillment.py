@@ -2,11 +2,12 @@ import asyncio
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, Mock
 from pathlib import Path
 from decimal import Decimal
 from refund_fulfillment import (
     record_canceled, record_refund, scope, claim_cancel, drain_refunds,
-    confirm_cancel_response
+    receipt_cancellation, cancel_and_confirm
 )
 import test_tax_fulfillment
 
@@ -97,11 +98,46 @@ class RefundTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state(),("full_processing","done"))
         self.assertEqual(self.cancels,0)
 
+    def receipt_data(self, cancellation=None):
+        return {"receiptId":"receipt-1","inn":"123456789012",
+                "totalAmount":1,"cancellationInfo":cancellation}
+
+    def mock_client(self, before, after):
+        client = Mock()
+        client.receipt.return_value.json = AsyncMock(side_effect=[before,after])
+        client.income.return_value.cancel = AsyncMock(return_value={"unrelated":True})
+        client.income.return_value.http._handle_401_response = AsyncMock()
+        return client
+
     async def test_confirmation_requires_uuid_and_reason(self):
-        good = {"incomeInfo":{"approvedReceiptUuid":"receipt-1","cancellationInfo":{"comment":"Возврат средств"}}}
-        self.assertTrue(confirm_cancel_response(good,"receipt-1"))
-        self.assertFalse(confirm_cancel_response(good,"receipt-2"))
-        self.assertFalse(confirm_cancel_response({"ok":True},"receipt-1"))
+        good = self.receipt_data({"comment":"Возврат средств"})
+        self.assertEqual(receipt_cancellation(good,"receipt-1",Decimal("1"),"123456789012"),
+                         {"comment":"Возврат средств"})
+        for bad in ({**good,"receiptId":"other"}, {**good,"totalAmount":2},
+                    {**good,"inn":"999999999999"}, {"receiptId":"receipt-1"}):
+            with self.assertRaises((RuntimeError, ValueError)):
+                receipt_cancellation(bad,"receipt-1",Decimal("1"),"123456789012")
+
+    async def test_authenticated_read_before_and_after(self):
+        client = self.mock_client(self.receipt_data(),
+                                  self.receipt_data({"comment":"Возврат средств"}))
+        await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund")
+        self.assertEqual(client.receipt.return_value.json.await_count,2)
+        client.income.return_value.cancel.assert_awaited_once_with("receipt-1","refund")
+        self.assertIsNone(await client.income.return_value.http._handle_401_response())
+
+    async def test_previously_canceled_never_posted(self):
+        client = self.mock_client(self.receipt_data({"comment":"Возврат средств"}), self.receipt_data())
+        with self.assertRaises(RuntimeError):
+            await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund")
+        client.income.return_value.cancel.assert_not_awaited()
+
+    async def test_missing_or_wrong_confirmation_never_reposted(self):
+        for result in (None, {}, {"comment":"Чек сформирован ошибочно"}, {"unknown":"value"}):
+            client = self.mock_client(self.receipt_data(),self.receipt_data(result))
+            with self.assertRaises(RuntimeError):
+                await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund")
+            client.income.return_value.cancel.assert_awaited_once()
 
     async def test_date_boundary(self):
         with sqlite3.connect(self.path) as db:

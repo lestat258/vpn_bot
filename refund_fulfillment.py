@@ -152,42 +152,46 @@ def finish_cancel(path, payment_id, success):
         return result.rowcount == 1
 
 
-def confirm_cancel_response(response, receipt_uuid):
-    if not isinstance(response, dict):
-        return False
-    info = response.get("incomeInfo")
-    if not isinstance(info, dict) or info.get("approvedReceiptUuid") != receipt_uuid:
-        return False
-    cancellation = info.get("cancellationInfo")
-    return isinstance(cancellation, dict) and cancellation.get("comment") == "Возврат средств"
+def receipt_cancellation(data, receipt_uuid, amount, inn):
+    """Read the authenticated receipt, not the unreliable POST response."""
+    if (not isinstance(data, dict) or data.get("receiptId") != receipt_uuid
+            or str(data.get("inn")) != inn
+            or money(data.get("totalAmount")) != amount
+            or "cancellationInfo" not in data):
+        raise RuntimeError("Receipt identity or cancellation state mismatch")
+    return data["cancellationInfo"]
+
+
+async def cancel_and_confirm(client, receipt_uuid, amount, inn, reason):
+    receipt = client.receipt()
+    before = await receipt.json(receipt_uuid)
+    if receipt_cancellation(before, receipt_uuid, amount, inn) is not None:
+        raise RuntimeError("Receipt previously canceled; reconcile manually")
+    income = client.income()
+    disable_income_retry(income.http)
+    # Do not repeat the POST, even if its response is lost.
+    await income.cancel(receipt_uuid, reason)
+    after = await receipt.json(receipt_uuid)
+    cancellation = receipt_cancellation(after, receipt_uuid, amount, inn)
+    if not isinstance(cancellation, dict) or not cancellation:
+        raise RuntimeError("Unconfirmed cancellation result")
+    # Unknown or conflicting reasons remain for manual reconciliation.
+    if cancellation.get("comment") not in ("Возврат средств", "Возврат денежных средств"):
+        raise RuntimeError("Cancellation reason requires reconciliation")
 
 
 async def cancel_receipt(path, receipt_uuid, amount):
-    """Confirm identity and amount before sending a single cancellation POST."""
-    import httpx
+    """Authenticate, verify the receipt, cancel once and verify by a fresh GET."""
     from nalogo import Client
     from nalogo.dto.income import CancelCommentType
     inn, password = await asyncio.to_thread(credentials, path)
-    url = public_receipt_url(inn, receipt_uuid).rsplit("/", 1)[0] + "/json"
-    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as http:
-        response = await http.get(url)
-        response.raise_for_status()
-        data = response.json()
-    if (not isinstance(data, dict) or data.get("receiptId") != receipt_uuid
-            or money(data.get("totalAmount")) != amount):
-        raise RuntimeError("Receipt identity mismatch")
-    if data.get("cancellationInfo") is not None:
-        raise RuntimeError("Receipt previously canceled; reconcile manually")
+    public_receipt_url(inn, receipt_uuid)  # validate path components
     with tempfile.TemporaryDirectory(prefix="vpn4us-refund-") as tmp:
         client = Client(storage_path=str(Path(tmp) / "session.json"),
                         device_id=uuid.uuid4().hex, timeout=15.0)
         token = await client.create_new_access_token(inn, password)
         await client.authenticate(token)
-        income = client.income()
-        disable_income_retry(income.http)
-        result = await income.cancel(receipt_uuid, CancelCommentType.REFUND)
-        if not confirm_cancel_response(result, receipt_uuid):
-            raise RuntimeError("Unconfirmed cancellation result")
+        await cancel_and_confirm(client, receipt_uuid, amount, inn, CancelCommentType.REFUND)
 
 
 async def drain_refunds(path, verifier, *, canceler=None):
