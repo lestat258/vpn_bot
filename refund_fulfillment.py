@@ -162,36 +162,145 @@ def receipt_cancellation(data, receipt_uuid, amount, inn):
     return data["cancellationInfo"]
 
 
-async def cancel_and_confirm(client, receipt_uuid, amount, inn, reason):
+def refund_confirmed(cancellation):
+    return isinstance(cancellation, dict) and cancellation.get("comment") in (
+        "Возврат средств", "Возврат денежных средств"
+    )
+
+
+async def read_confirmation(receipt, receipt_uuid, amount, inn, *, delays=(0, 2, 5)):
+    """Retry only the authenticated GET, never a mutation."""
+    for delay in delays:
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            data = await asyncio.wait_for(receipt.json(receipt_uuid), timeout=35)
+            cancellation = receipt_cancellation(data, receipt_uuid, amount, inn)
+        except Exception as exc:
+            LOG.warning("Refund stage=confirm_get error=%s", type(exc).__name__)
+            continue
+        if refund_confirmed(cancellation):
+            LOG.info("Refund stage=confirm_get result=confirmed")
+            return True
+        if cancellation is not None:
+            LOG.warning("Refund stage=confirm_get result=unknown_reason")
+            return False
+        LOG.info("Refund stage=confirm_get result=active")
+    return False
+
+
+async def cancel_and_confirm(client, receipt_uuid, amount, inn, reason, *, delays=(0, 2, 5)):
+    LOG.info("Refund stage=precheck_get started")
     receipt = client.receipt()
-    before = await receipt.json(receipt_uuid)
-    if receipt_cancellation(before, receipt_uuid, amount, inn) is not None:
-        raise RuntimeError("Receipt previously canceled; reconcile manually")
+    try:
+        before = await asyncio.wait_for(receipt.json(receipt_uuid), timeout=35)
+        if receipt_cancellation(before, receipt_uuid, amount, inn) is not None:
+            raise RuntimeError("Receipt previously canceled; reconcile manually")
+    except Exception as exc:
+        LOG.warning("Refund stage=precheck_get error=%s", type(exc).__name__)
+        raise
+    LOG.info("Refund stage=precheck_get result=active")
     income = client.income()
     disable_income_retry(income.http)
-    # Do not repeat the POST, even if its response is lost.
-    await income.cancel(receipt_uuid, reason)
-    after = await receipt.json(receipt_uuid)
-    cancellation = receipt_cancellation(after, receipt_uuid, amount, inn)
-    if not isinstance(cancellation, dict) or not cancellation:
+    # nalogo 1.0.0 passes this per-request timeout into httpx.
+    # The outer deadline also bounds the complete POST.
+    income.http.timeout = 90.0
+    LOG.info("Refund stage=cancel_post started")
+    try:
+        await asyncio.wait_for(income.cancel(receipt_uuid, reason), timeout=95)
+        LOG.info("Refund stage=cancel_post response_received")
+    except Exception as exc:
+        # A failed response is not proof that the server did not mutate.
+        LOG.warning("Refund stage=cancel_post error=%s; read-only reconciliation", type(exc).__name__)
+    if not await read_confirmation(receipt, receipt_uuid, amount, inn, delays=delays):
         raise RuntimeError("Unconfirmed cancellation result")
-    # Unknown or conflicting reasons remain for manual reconciliation.
-    if cancellation.get("comment") not in ("Возврат средств", "Возврат денежных средств"):
-        raise RuntimeError("Cancellation reason requires reconciliation")
+
+
+async def with_authenticated_client(path, receipt_uuid, action):
+    from nalogo import Client
+    inn, password = await asyncio.to_thread(credentials, path)
+    public_receipt_url(inn, receipt_uuid)
+    with tempfile.TemporaryDirectory(prefix="vpn4us-refund-") as tmp:
+        client = Client(storage_path=str(Path(tmp) / "session.json"),
+                        device_id=uuid.uuid4().hex, timeout=30.0)
+        stage = "token"
+        try:
+            LOG.info("Refund stage=token started")
+            token = await asyncio.wait_for(client.create_new_access_token(inn, password), timeout=35)
+            LOG.info("Refund stage=token result=ok")
+            stage = "authenticate"
+            await asyncio.wait_for(client.authenticate(token), timeout=35)
+            LOG.info("Refund stage=authenticate result=ok")
+        except Exception as exc:
+            LOG.warning("Refund stage=%s error=%s", stage, type(exc).__name__)
+            raise
+        return await action(client, inn)
 
 
 async def cancel_receipt(path, receipt_uuid, amount):
-    """Authenticate, verify the receipt, cancel once and verify by a fresh GET."""
-    from nalogo import Client
     from nalogo.dto.income import CancelCommentType
-    inn, password = await asyncio.to_thread(credentials, path)
-    public_receipt_url(inn, receipt_uuid)  # validate path components
-    with tempfile.TemporaryDirectory(prefix="vpn4us-refund-") as tmp:
-        client = Client(storage_path=str(Path(tmp) / "session.json"),
-                        device_id=uuid.uuid4().hex, timeout=15.0)
-        token = await client.create_new_access_token(inn, password)
-        await client.authenticate(token)
+
+    async def action(client, inn):
         await cancel_and_confirm(client, receipt_uuid, amount, inn, CancelCommentType.REFUND)
+
+    await with_authenticated_client(path, receipt_uuid, action)
+
+
+async def check_receipt_canceled(path, receipt_uuid, amount):
+    """Read-only reconciliation, including after worker restart."""
+    async def action(client, inn):
+        return await read_confirmation(client.receipt(), receipt_uuid, amount, inn, delays=(0,))
+
+    return await with_authenticated_client(path, receipt_uuid, action)
+
+
+def review_receipt(path, payment_id):
+    """Only eligible, fully refunded review/processing rows with one matching receipt."""
+    with sqlite3.connect(f"file:{Path(path).resolve()}?mode=ro", uri=True) as db:
+        db.row_factory = sqlite3.Row
+        p = eligible_row(db, payment_id)
+        if not p:
+            return None
+        j = db.execute("SELECT * FROM payment_processing WHERE payment_id=?", (payment_id,)).fetchone()
+        if (not j or j["refund_state"] not in ("full_review", "full_processing")
+                or j["tax_state"] != "done" or j["payment_state"] != "verified"
+                or j["is_legacy"] or not j["receipt_uuid"]):
+            return None
+        rows = db.execute("SELECT receipt_uuid,amount,user_id FROM tax_receipts WHERE payment_id=?",
+                          (payment_id,)).fetchall()
+        if (len(rows) != 1 or rows[0]["receipt_uuid"] != j["receipt_uuid"]
+                or money(rows[0]["amount"]) != money(p["amount_rub"])
+                or rows[0]["user_id"] != p["telegram_id"]):
+            return None
+        return j["receipt_uuid"], money(p["amount_rub"])
+
+
+def finish_reconciliation(path, payment_id, receipt_uuid):
+    with transaction(path) as db:
+        if not eligible_row(db, payment_id):
+            return False
+        cur = db.execute("""
+            UPDATE payment_processing SET refund_state='full_done',tax_state='canceled',
+                updated_at=CURRENT_TIMESTAMP
+            WHERE payment_id=? AND receipt_uuid=? AND tax_state='done'
+              AND payment_state='verified' AND is_legacy=0
+              AND refund_state IN ('full_review','full_processing')
+        """, (payment_id, receipt_uuid))
+        return cur.rowcount == 1
+
+
+async def reconcile_refund(path, payment_id, verifier, *, checker=None):
+    """Never sends POST, never queues a refund for another attempt."""
+    try:
+        claimed = await asyncio.to_thread(review_receipt, path, payment_id)
+        if not claimed or not await verifier(payment_id):
+            return False
+        if not await asyncio.wait_for((checker or check_receipt_canceled)(path, *claimed), timeout=120):
+            return False
+        return await asyncio.to_thread(finish_reconciliation, path, payment_id, claimed[0])
+    except Exception as exc:
+        LOG.warning("Refund stage=reconcile error=%s", type(exc).__name__)
+        return False
 
 
 async def drain_refunds(path, verifier, *, canceler=None):
@@ -207,7 +316,7 @@ async def drain_refunds(path, verifier, *, canceler=None):
             LOG.warning("Refund verification deferred: %s", type(exc).__name__)
             continue
         try:
-            await asyncio.wait_for((canceler or cancel_receipt)(path, *claimed), 60)
+            await asyncio.wait_for((canceler or cancel_receipt)(path, *claimed), 330)
             if not await asyncio.to_thread(finish_cancel, path, payment_id, True):
                 raise RuntimeError("Refund claim lost")
         except (Exception, asyncio.CancelledError) as exc:

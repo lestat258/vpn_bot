@@ -7,7 +7,7 @@ from pathlib import Path
 from decimal import Decimal
 from refund_fulfillment import (
     record_canceled, record_refund, scope, claim_cancel, drain_refunds,
-    receipt_cancellation, cancel_and_confirm
+    receipt_cancellation, cancel_and_confirm, reconcile_refund
 )
 import test_tax_fulfillment
 
@@ -121,7 +121,7 @@ class RefundTests(unittest.IsolatedAsyncioTestCase):
     async def test_authenticated_read_before_and_after(self):
         client = self.mock_client(self.receipt_data(),
                                   self.receipt_data({"comment":"Возврат средств"}))
-        await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund")
+        await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund",delays=(0,))
         self.assertEqual(client.receipt.return_value.json.await_count,2)
         client.income.return_value.cancel.assert_awaited_once_with("receipt-1","refund")
         self.assertIsNone(await client.income.return_value.http._handle_401_response())
@@ -129,15 +129,60 @@ class RefundTests(unittest.IsolatedAsyncioTestCase):
     async def test_previously_canceled_never_posted(self):
         client = self.mock_client(self.receipt_data({"comment":"Возврат средств"}), self.receipt_data())
         with self.assertRaises(RuntimeError):
-            await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund")
+            await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund",delays=(0,))
         client.income.return_value.cancel.assert_not_awaited()
 
     async def test_missing_or_wrong_confirmation_never_reposted(self):
         for result in (None, {}, {"comment":"Чек сформирован ошибочно"}, {"unknown":"value"}):
             client = self.mock_client(self.receipt_data(),self.receipt_data(result))
             with self.assertRaises(RuntimeError):
-                await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund")
+                await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund",delays=(0,))
             client.income.return_value.cancel.assert_awaited_once()
+
+    async def test_post_timeout_then_confirmed_by_get(self):
+        client = self.mock_client(self.receipt_data(),
+                                  self.receipt_data({"comment":"Возврат средств"}))
+        client.income.return_value.cancel.side_effect = TimeoutError()
+        await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund",delays=(0,))
+        self.assertEqual(client.receipt.return_value.json.await_count,2)
+        self.assertEqual(client.income.return_value.http.timeout,90.0)
+        client.income.return_value.cancel.assert_awaited_once()
+
+    async def test_post_timeout_get_retries_only(self):
+        client = self.mock_client(self.receipt_data(),self.receipt_data())
+        client.income.return_value.cancel.side_effect = TimeoutError()
+        client.receipt.return_value.json.side_effect = [
+            self.receipt_data(), TimeoutError(), self.receipt_data(),
+            self.receipt_data({"comment":"Возврат средств"})]
+        await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund",delays=(0,0,0))
+        self.assertEqual(client.receipt.return_value.json.await_count,4)
+        client.income.return_value.cancel.assert_awaited_once()
+
+    async def test_post_timeout_active_no_replay(self):
+        client = self.mock_client(self.receipt_data(),self.receipt_data())
+        client.income.return_value.cancel.side_effect = TimeoutError()
+        with self.assertRaises(RuntimeError):
+            await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund",delays=(0,))
+        client.income.return_value.cancel.assert_awaited_once()
+
+    async def test_precheck_timeout_never_posts(self):
+        client = self.mock_client(TimeoutError(), self.receipt_data())
+        with self.assertRaises(TimeoutError):
+            await cancel_and_confirm(client,"receipt-1",Decimal("1"),"123456789012","refund",delays=(0,))
+        client.income.return_value.cancel.assert_not_awaited()
+
+    async def test_read_only_reconciliation(self):
+        self.paid()
+        record_refund(self.path,"new",1)
+        self.assertIsNotNone(claim_cancel(self.path,"new"))
+        checker = AsyncMock(return_value=False)
+        self.assertFalse(await reconcile_refund(self.path,"new",self.verifier,checker=checker))
+        self.assertEqual(self.state(),("full_processing","done"))
+        checker.return_value = True
+        self.assertTrue(await reconcile_refund(self.path,"new",self.verifier,checker=checker))
+        self.assertEqual(self.state(),("full_done","canceled"))
+        self.assertFalse(await reconcile_refund(self.path,"old",self.verifier,checker=checker))
+        self.assertEqual(checker.await_count,2)
 
     async def test_date_boundary(self):
         with sqlite3.connect(self.path) as db:
