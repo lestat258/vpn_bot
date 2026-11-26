@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from tax_fulfillment import process_tax_receipt
+from tax_fulfillment import process_tax_receipt, queue_verified, disable_income_retry, validated_operation_time
 from payment_ledger import PaymentLedger
 
 
@@ -105,6 +105,44 @@ class TaxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state(), "done")
         self.assertFalse(await self.run_tax())
         self.assertEqual(self.calls, 1)
+
+    async def test_vpn_failure_does_not_block_receipt(self):
+        queue_verified(self.path, "new")
+        ledger = PaymentLedger(self.path)
+        self.assertEqual(ledger.claim("new"), "claimed")
+        ledger.mark_review("new", "VpnTimeout")
+        self.assertTrue(await self.run_tax())
+        self.assertEqual(self.state(), "done")
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT vpn_state,last_error FROM payment_processing WHERE payment_id='new'").fetchone()
+            self.assertEqual(row, ("needs_review", "VpnTimeout"))
+
+    async def test_historical_queue_is_ignored(self):
+        queue_verified(self.path, "old")
+        self.assertEqual(self.state("old"), "not_started")
+
+    async def test_refund_blocks_receipt(self):
+        self.queue()
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE payment_processing SET refund_state='pending'")
+        self.assertFalse(await self.run_tax())
+        self.assertEqual(self.calls, 0)
+
+    async def test_401_retry_disabled(self):
+        class Http:
+            async def _handle_401_response(self, *args):
+                raise AssertionError("Would retry")
+        http = Http()
+        disable_income_retry(http)
+        self.assertIsNone(await http._handle_401_response(None, None))
+        with self.assertRaises(RuntimeError):
+            disable_income_retry(object())
+
+    async def test_capture_timestamp_requires_timezone(self):
+        self.assertEqual(validated_operation_time("2026-11-26T12:30:00Z").utcoffset().total_seconds(), 0)
+        for value in (None, "2026-11-26T12:30:00"):
+            with self.assertRaises(ValueError):
+                validated_operation_time(value)
 
     async def test_existing_receipt_held(self):
         self.queue()

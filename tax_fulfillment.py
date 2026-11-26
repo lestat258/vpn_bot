@@ -1,4 +1,4 @@
-"""Independent fiscal state machine for new, completed VPN payments.
+"""Independent fiscal state machine for new, independently verified payments.
 Never repeat an ambiguous external income registration. Historical not_started
 rows are deliberately not eligible; reconcile those with FNS separately.
 """
@@ -7,6 +7,8 @@ import base64
 import logging
 import sqlite3
 import tempfile
+import uuid
+from datetime import datetime
 from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
@@ -29,16 +31,27 @@ def transaction(path):
         db.close()
 
 
+def queue_verified(path, payment_id):
+    """Only call following independent provider verification; never queue history."""
+    with transaction(path) as db:
+        db.execute("""
+            INSERT OR IGNORE INTO payment_processing
+              (payment_id, payment_state, vpn_state, tax_state)
+            SELECT payment_id, 'verified', 'not_started', 'queued'
+            FROM payments WHERE payment_id=? AND status='pending' AND amount_rub>0
+        """, (payment_id,))
+
+
 def claim(path, payment_id):
     with transaction(path) as db:
         row = db.execute("""
             SELECT p.telegram_id, p.amount_rub, p.status,
-                   j.tax_state, j.receipt_uuid, j.vpn_state,
+                   j.tax_state, j.receipt_uuid, j.payment_state,
                    j.refund_state, j.is_legacy
             FROM payments p JOIN payment_processing j USING(payment_id)
             WHERE p.payment_id=?
         """, (payment_id,)).fetchone()
-        if (not row or row["status"] != "paid" or row["vpn_state"] != "done"
+        if (not row or row["status"] not in ("paid", "pending") or row["payment_state"] != "verified"
                 or row["tax_state"] != "queued" or row["is_legacy"]
                 or row["refund_state"] != "none" or row["amount_rub"] <= 0):
             return None
@@ -47,18 +60,17 @@ def claim(path, payment_id):
               ('tax_enabled','tax_description_template')
         """))
         state = "processing"
-        reason = None
         if row["receipt_uuid"] or db.execute(
             "SELECT 1 FROM tax_receipts WHERE payment_id=? LIMIT 1",
             (payment_id,)
         ).fetchone():
-            state, reason = "needs_review", "tax: existing receipt"
+            state = "needs_review"
         elif settings.get("tax_enabled") != "true":
             state = "skipped"
         db.execute("""
-            UPDATE payment_processing SET tax_state=?, last_error=?,
+            UPDATE payment_processing SET tax_state=?,
                 updated_at=CURRENT_TIMESTAMP WHERE payment_id=?
-        """, (state, reason, payment_id))
+        """, (state, payment_id))
         if state != "processing":
             return None
         return (int(row["telegram_id"]), Decimal(str(row["amount_rub"])),
@@ -69,7 +81,7 @@ def complete(path, payment_id, user_id, amount, description, receipt_uuid, url):
     with transaction(path) as db:
         cur = db.execute("""
             UPDATE payment_processing SET tax_state='done', receipt_uuid=?,
-                receipt_url=?, last_error=NULL, updated_at=CURRENT_TIMESTAMP
+                receipt_url=?, updated_at=CURRENT_TIMESTAMP
             WHERE payment_id=? AND tax_state='processing'
         """, (receipt_uuid, url, payment_id))
         if cur.rowcount != 1:
@@ -84,10 +96,10 @@ def complete(path, payment_id, user_id, amount, description, receipt_uuid, url):
 def review(path, payment_id, error_name):
     with transaction(path) as db:
         db.execute("""
-            UPDATE payment_processing SET tax_state='needs_review', last_error=?,
+            UPDATE payment_processing SET tax_state='needs_review',
                 updated_at=CURRENT_TIMESTAMP
             WHERE payment_id=? AND tax_state='processing'
-        """, ("tax: " + error_name[:100], payment_id))
+        """, (payment_id,))
 
 
 def credentials(path):
@@ -105,15 +117,37 @@ def credentials(path):
     return inn, password
 
 
-async def issue(path, amount, description):
+def disable_income_retry(http):
+    """nalogo 1.0.0 retries HTTP 401; never replay an income POST."""
+    if not callable(getattr(http, "_handle_401_response", None)):
+        raise RuntimeError("Unreviewed nalogo HTTP client")
+
+    async def no_retry(*args, **kwargs):
+        return None
+
+    http._handle_401_response = no_retry
+
+
+def validated_operation_time(value):
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if not isinstance(value, datetime) or value.utcoffset() is None:
+        raise ValueError("Missing verified capture timestamp")
+    return value
+
+
+async def issue(path, amount, description, operation_time):
     from nalogo import Client
     inn, password = await asyncio.to_thread(credentials, path)
     with tempfile.TemporaryDirectory(prefix="vpn4us-tax-") as tmp:
         client = Client(storage_path=str(Path(tmp) / "session.json"),
-                        device_id="vpn4us-tax-receipts", timeout=15.0)
+                        device_id=uuid.uuid4().hex, timeout=15.0)
         token = await client.create_new_access_token(inn, password)
         await client.authenticate(token)
-        result = await client.income().create(name=description, amount=amount, quantity=1)
+        income = client.income()
+        disable_income_retry(income.http)
+        result = await income.create(name=description, amount=amount, quantity=1,
+                                     operation_time=validated_operation_time(operation_time))
         receipt_uuid = result.get("approvedReceiptUuid")
         if not isinstance(receipt_uuid, str) or not receipt_uuid:
             raise RuntimeError("Missing receipt UUID")
@@ -133,14 +167,15 @@ async def notify(user_id, url):
 
 
 async def process_tax_receipt(payment_id, *, db_path="/opt/vpn-bot/data.db",
-                              issuer=None, notifier=None):
+                              issuer=None, notifier=None, operation_time=None):
     claimed = await asyncio.to_thread(claim, db_path, payment_id)
     if claimed is None:
         return False
     user_id, amount, description = claimed
     try:
-        receipt_uuid, url = await asyncio.wait_for(
-            (issuer or issue)(db_path, amount, description), timeout=60)
+        call = (issuer(db_path, amount, description) if issuer else
+                issue(db_path, amount, description, operation_time))
+        receipt_uuid, url = await asyncio.wait_for(call, timeout=60)
         await asyncio.to_thread(complete, db_path, payment_id, user_id,
                                 amount, description, receipt_uuid, url)
     except (Exception, asyncio.CancelledError) as exc:

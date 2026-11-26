@@ -110,14 +110,20 @@ async def get_tariff_info(tariff_id: int) -> Optional[Dict]:
 async def process_payment_success(payment_id, data):
     """Fulfill a payment previously verified through YooKassa API."""
     from payment_fulfillment import process_verified_payment
-    success = await process_verified_payment(payment_id, data)
-    if success:
+    from tax_fulfillment import queue_verified, process_tax_receipt
+    try:
+        await asyncio.to_thread(queue_verified, DB_PATH, payment_id)
+    except Exception as exc:
+        logger.error('Receipt queue requires review: %s', type(exc).__name__)
+    try:
+        return await process_verified_payment(payment_id, data)
+    finally:
         try:
-            from tax_fulfillment import process_tax_receipt
-            await process_tax_receipt(payment_id, db_path=DB_PATH)
+            await process_tax_receipt(
+                payment_id, db_path=DB_PATH,
+                operation_time=data['object'].get('captured_at'))
         except Exception as exc:
             logger.error('Receipt workflow requires review: %s', type(exc).__name__)
-    return success
 
 
 # ============================================================
@@ -218,7 +224,8 @@ async def handle_webhook(request):
         verified_data = {
             "object": {
                 "id": payment_id,
-                "metadata": metadata
+                "metadata": metadata,
+                "captured_at": getattr(verified, "captured_at", None)
             }
         }
 

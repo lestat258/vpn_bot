@@ -51,7 +51,7 @@ class PaymentLedger:
             db.execute('''
                 INSERT OR IGNORE INTO payment_processing
                   (payment_id, payment_state, vpn_state, tax_state)
-                VALUES (?, 'verified', 'not_started', 'not_started')
+                VALUES (?, 'verified', 'not_started', 'queued')
             ''', (payment_id,))
             state = db.execute('''
                 SELECT is_legacy, vpn_state
@@ -84,7 +84,6 @@ class PaymentLedger:
             cur = db.execute('''
                 UPDATE payment_processing
                    SET vpn_state='done', subscription_id=?, last_error=NULL,
-                       tax_state=CASE WHEN tax_state='not_started' THEN 'queued' ELSE tax_state END,
                        updated_at=CURRENT_TIMESTAMP
                  WHERE payment_id=? AND is_legacy=0 AND vpn_state='processing'
             ''', (subscription_id, payment_id))
