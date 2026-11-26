@@ -1,81 +1,69 @@
 {% extends "base.html" %}
-
+{% macro state(value) -%}
+<span class="badge badge-{{ value.style }}">{{ value.label }}</span>
+{%- endmacro %}
 {% block content %}
 <div class="page-header">
-    <h1><i class="fas fa-credit-card"></i> Оплаты</h1>
-    <span style="color: var(--text-secondary); font-size: 14px;">
-        Всего: {{ total_payments }}
-    </span>
+    <h1><i class="fas fa-credit-card"></i> Оплаты и возвраты</h1>
+    <span style="color:var(--text-secondary)">Записей: {{ stats.total }}</span>
 </div>
-
-<!-- Статистика в 2 колонки -->
-<div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px;">
-    <div class="stat-card">
-        <div class="number">{{ total_payments }}</div>
-        <div class="label">Всего платежей</div>
-    </div>
-    <div class="stat-card">
-        <div class="number">{{ total_amount }} ₽</div>
-        <div class="label">Общая сумма</div>
-    </div>
-    <div class="stat-card">
-        <div class="number">{{ paid_count }}</div>
-        <div class="label">Успешных</div>
-    </div>
-    <div class="stat-card">
-        <div class="number">{{ pending_count }}</div>
-        <div class="label">В обработке</div>
-    </div>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px">
+    {% for value,label in [
+      ('%.2f ₽'|format(stats.gross),'Оплачено · до возвратов'),
+      ('%.2f ₽'|format(stats.completed_refunds),'Полные возвраты · завершены'),
+      (stats.pending,'Ожидают оплаты'),(stats.canceled,'Отменены'),
+      (stats.review,'Новые · требуют проверки')] %}
+    <div class="stat-card"><div class="number">{{ value }}</div><div class="label">{{ label }}</div></div>
+    {% endfor %}
 </div>
-
-<!-- История платежей -->
+<p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">
+    Данные локального журнала, не банковская выписка. Старые и частичные возвраты могут быть не учтены.
+    Исторические заказы доступны только для просмотра. Новые — после установленной границы 26.11.2026 15:15 МСК.
+</p>
 <div class="card">
-    <div class="card-header">
-        <span><i class="fas fa-clock-rotate-left"></i> История платежей</span>
-        <span style="color: var(--text-muted); font-size: 12px;">{{ total_payments }} записей</span>
+    <div class="card-header" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+        <span><i class="fas fa-clock-rotate-left"></i> Журнал операций</span>
+        <form method="get" action="/payments" style="display:flex;gap:8px;align-items:center">
+            <label for="filter">Фильтр</label>
+            <select id="filter" class="form-control" name="filter">
+                {% for key,label in filters.items() %}
+                <option value="{{ key }}"{% if selected == key %} selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+            <button class="btn btn-secondary btn-sm" type="submit">Показать</button>
+        </form>
     </div>
-    <div class="card-body" style="padding: 0;">
-        <div class="table-wrapper">
-            <table class="table">
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>Пользователь</th>
-                        <th>Тариф</th>
-                        <th>Сумма</th>
-                        <th>Статус</th>
-                        <th>Дата</th>
-                    </tr>
-                </thead>
+    <div class="card-body" style="padding:0">
+        <div class="table-wrapper" style="overflow-x:auto">
+            <table class="table" style="min-width:940px">
+                <thead><tr><th>Заказ</th><th>Пользователь / тариф</th><th>Сумма</th>
+                    <th>Оплата / ЮKassa</th><th>VPN</th><th>Чек ФНС</th><th>Возврат</th><th>Создан (UTC*)</th></tr></thead>
                 <tbody>
-                    {% for payment in payments %}
-                    <tr>
-                        <td><code style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px;">#{{ payment[0] }}</code></td>
-                        <td>{{ payment[1] or 'Неизвестно' }}</td>
-                        <td>{{ payment[2] or '—' }}</td>
-                        <td><strong>{{ payment[3] }} ₽</strong></td>
-                        <td>
-                            {% if payment[4] == 'paid' %}
-                            <span class="badge badge-success">✅ Оплачено</span>
-                            {% elif payment[4] == 'pending' %}
-                            <span class="badge badge-warning">⏳ Ожидает</span>
-                            {% else %}
-                            <span class="badge badge-secondary">{{ payment[4] }}</span>
-                            {% endif %}
-                        </td>
-                        <td style="color: var(--text-muted); font-size: 13px;">{{ payment[5][:16] if payment[5] else '—' }}</td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 40px 0;">
-                            <i class="fas fa-credit-card" style="font-size: 32px; display: block; margin-bottom: 8px;"></i>
-                            Платежей не найдено
-                        </td>
-                    </tr>
-                    {% endfor %}
+                {% for p in payments %}
+                <tr>
+                    <td><strong>#{{ p.id }}</strong><br>
+                        {% if not p.is_new %}<span class="badge badge-secondary">История / вне контура</span>{% endif %}
+                    </td>
+                    <td>{{ p.customer or 'Неизвестно' }}<br><small>{{ p.tariff or '—' }}</small></td>
+                    <td><strong>{{ '%.2f'|format(p.amount_rub) }} ₽</strong></td>
+                    <td>{{ state(p.payment_display) }}<br>{{ state(p.provider_display) }}</td>
+                    <td>{{ state(p.vpn_display) }}{% if p.subscription_id %}<br><small>Подписка #{{ p.subscription_id }}</small>{% endif %}</td>
+                    <td>{{ state(p.tax_display) }}{% if p.receipt_link %}<br><a href="{{ p.receipt_link }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Открыть чек</a>{% endif %}</td>
+                    <td>{{ state(p.refund_display) }}</td>
+                    <td>{{ p.created_at or '—' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="8" style="text-align:center;padding:32px">Платежей не найдено</td></tr>
+                {% endfor %}
                 </tbody>
             </table>
         </div>
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:16px">
+            <span>Найдено: {{ count }} · Страница {{ page }} из {{ pages }}</span>
+            {% if page > 1 %}<a class="btn btn-secondary btn-sm" href="/payments?filter={{ selected }}&page={{ page-1 }}">Назад</a>{% endif %}
+            {% if page < pages %}<a class="btn btn-secondary btn-sm" href="/payments?filter={{ selected }}&page={{ page+1 }}">Далее</a>{% endif %}
+        </div>
     </div>
 </div>
+<p style="color:var(--text-muted);font-size:12px;margin-top:12px">* Дата создания из базы; для старых и бесплатных заказов часовой пояс может отличаться. Статусы отражают локальный журнал, а не живой запрос к ЮKassa или ФНС. «В обработке» может означать незавершённую операцию.</p>
 {% endblock %}
