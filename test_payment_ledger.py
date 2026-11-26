@@ -13,7 +13,13 @@ class PaymentLedgerTests(unittest.TestCase):
         with sqlite3.connect(self.db) as con:
             con.executescript('''
                 CREATE TABLE payments (
-                    payment_id TEXT PRIMARY KEY, status TEXT, amount_rub REAL
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    payment_id TEXT UNIQUE NOT NULL,
+                    telegram_id INTEGER NOT NULL,
+                    tariff_id INTEGER NOT NULL,
+                    amount_rub REAL NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE payment_processing (
                     payment_id TEXT PRIMARY KEY,
@@ -21,12 +27,17 @@ class PaymentLedgerTests(unittest.TestCase):
                     payment_state TEXT NOT NULL DEFAULT 'pending',
                     vpn_state TEXT NOT NULL DEFAULT 'not_started',
                     tax_state TEXT NOT NULL DEFAULT 'not_started',
+                    refund_state TEXT NOT NULL DEFAULT 'none',
                     subscription_id INTEGER,
+                    receipt_uuid TEXT UNIQUE,
+                    receipt_url TEXT,
                     last_error TEXT,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(payment_id) REFERENCES payments(payment_id)
                 );
-                INSERT INTO payments VALUES ('p1', 'pending', 120);
-                INSERT INTO payments VALUES ('free1', 'paid', 0);
+                INSERT INTO payments(payment_id,telegram_id,tariff_id,amount_rub,status)
+                    VALUES ('p1',100,1,120,'pending'), ('free1',100,1,0,'paid');
             ''')
         self.ledger = PaymentLedger(self.db)
 
