@@ -47,6 +47,15 @@ async def payments_page(request: Request):
                                 request.query_params.get("page","1"))
 
 
+@payments_router.get("/payments/{order_id}/check", include_in_schema=False)
+@payments_router.get("/payments/{order_id}/resend", include_in_schema=False)
+async def payment_action_bookmark(request: Request, order_id: int):
+    # A bookmark or refresh must never execute a check or resend.
+    response = RedirectResponse("/payments" if check_auth(request) else "/", status_code=303)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @payments_router.post("/payments/{order_id}/check", response_class=HTMLResponse)
 async def check_payment(request: Request, order_id: int):
     if not check_auth(request):

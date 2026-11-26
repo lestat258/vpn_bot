@@ -166,6 +166,13 @@ async def issue(path, amount, description, operation_time):
         return receipt_uuid, url
 
 
+def auto_receipt_enabled(path):
+    """Safe default: continue sending unless explicitly disabled."""
+    with sqlite3.connect(Path(path).resolve().as_uri()+"?mode=ro", uri=True) as db:
+        row = db.execute("SELECT value FROM settings WHERE key='auto_receipt_delivery'").fetchone()
+    return not (row and row[0] == "off")
+
+
 async def notify(user_id, url):
     from html import escape
     from payment_fulfillment import _telegram_notify
@@ -196,7 +203,8 @@ async def process_tax_receipt(payment_id, *, db_path="/opt/vpn-bot/data.db",
             raise
         return False
     try:
-        await (notifier or notify)(user_id, url)
+        if await asyncio.to_thread(auto_receipt_enabled, db_path):
+            await (notifier or notify)(user_id, url)
     except Exception as exc:
         LOG.warning("Receipt stored but Telegram delivery failed: %s", type(exc).__name__)
     return True
