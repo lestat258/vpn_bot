@@ -1,52 +1,47 @@
-from fastapi.responses import RedirectResponse
-"""Модуль дашборда"""
+"""Authenticated read-only dashboard."""
+import asyncio
+import time
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-import sqlite3
-
 from .auth import check_auth
+from dashboard_metrics import dashboard_data, local_metrics, probe_panels
 
 dashboard_router = APIRouter(tags=["dashboard"])
 templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+DB = "/opt/vpn-bot/data.db"
+HEADERS = {"Cache-Control":"no-store","Referrer-Policy":"no-referrer"}
+_panel_lock=asyncio.Lock()
+_panel_cache=None
+_panel_until=0.0
 
-@dashboard_router.get("/dashboard", response_class=HTMLResponse)
+
+@dashboard_router.get("/dashboard",response_class=HTMLResponse)
 async def dashboard(request: Request):
-    """Главная страница дашборда"""
     if not check_auth(request):
-        return RedirectResponse("/")
+        return RedirectResponse("/",status_code=303,headers=HEADERS)
+    context, metrics = await asyncio.gather(asyncio.to_thread(dashboard_data,DB),asyncio.to_thread(local_metrics))
+    return templates.TemplateResponse("dashboard.html",{"request":request,**context,"metrics":metrics},headers=HEADERS)
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
-    c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM users')
-    users_count = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM subscriptions WHERE is_active = 1')
-    active_subs = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM payments WHERE status = "paid"')
-    payments_count = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM servers WHERE is_active = 1')
-    servers_count = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM payments WHERE status = "pending"')
-    pending_count = c.fetchone()[0]
-    c.execute('SELECT COALESCE(SUM(amount_rub), 0) FROM payments WHERE status = "paid" AND DATE(created_at) = DATE("now")')
-    today_revenue = c.fetchone()[0]
-    c.execute('SELECT COALESCE(SUM(amount_rub), 0) FROM payments WHERE status = "paid" AND created_at > datetime("now", "-7 days")')
-    week_revenue = c.fetchone()[0]
-    c.execute('SELECT COALESCE(SUM(amount_rub), 0) FROM payments WHERE status = "paid" AND created_at > datetime("now", "-30 days")')
-    month_revenue = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM users WHERE DATE(created_at) = DATE("now")')
-    new_users_today = c.fetchone()[0]
-    conn.close()
 
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
-        "users_count": users_count,
-        "active_subs": active_subs,
-        "payments_count": payments_count,
-        "servers_count": servers_count,
-        "pending_count": pending_count,
-        "today_revenue": today_revenue,
-        "week_revenue": week_revenue,
-        "month_revenue": month_revenue,
-        "new_users_today": new_users_today
-    })
+@dashboard_router.get("/dashboard/live")
+async def dashboard_live(request: Request):
+    if not check_auth(request):
+        return JSONResponse({"detail":"Unauthorized"},status_code=401,headers=HEADERS)
+    return JSONResponse(await asyncio.to_thread(local_metrics),headers=HEADERS)
+
+
+@dashboard_router.get("/dashboard/panels")
+async def dashboard_panels(request: Request):
+    global _panel_cache,_panel_until
+    if not check_auth(request):
+        return JSONResponse({"detail":"Unauthorized"},status_code=401,headers=HEADERS)
+    async with _panel_lock:
+        if _panel_cache is None or time.monotonic()>=_panel_until:
+            try:
+                _panel_cache=await probe_panels(DB)
+            except Exception:
+                _panel_cache=None
+                return JSONResponse({"detail":"Unavailable"},status_code=503,headers=HEADERS)
+            _panel_until=time.monotonic()+30
+        return JSONResponse(_panel_cache,headers=HEADERS)

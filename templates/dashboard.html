@@ -5,7 +5,7 @@
     <h1><i class="fas fa-chart-simple"></i> Дашборд</h1>
     <span style="color: var(--text-secondary); font-size: 14px;">
         <i class="fas fa-circle" style="color: var(--success); font-size: 8px;"></i>
-        Система работает
+        Админ-панель доступна
     </span>
 </div>
 
@@ -24,7 +24,7 @@
     <div class="stat-card">
         <div class="icon"><i class="fas fa-credit-card"></i></div>
         <div class="number">{{ payments_count }}</div>
-        <div class="label">Всего оплат</div>
+        <div class="label">Оплаченных заказов</div>
     </div>
     <div class="stat-card">
         <div class="icon"><i class="fas fa-server"></i></div>
@@ -42,46 +42,46 @@
         <!-- Информация о системе -->
         <div class="card">
             <div class="card-header">
-                <span><i class="fas fa-server" style="color: var(--accent);"></i> Информация о системе</span>
+                <span><i class="fas fa-server" style="color: var(--accent);"></i> Ресурсы сервера админки</span>
             </div>
             <div class="card-body" style="padding: 16px 20px;">
                 <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
                     <span style="color: var(--text-secondary);">CPU</span>
-                    <span>1 Core</span>
+                    <span id="metric-cpu">{{ metrics.cpu }}</span>
                 </div>
                 <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
                     <span style="color: var(--text-secondary);">Память</span>
-                    <span>747.80 MB / 3.82 GB</span>
+                    <span id="metric-memory">{{ metrics.memory }}</span>
                 </div>
                 <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
                     <span style="color: var(--text-secondary);">Диск</span>
-                    <span>7.59 GB / 44.22 GB</span>
+                    <span id="metric-disk">{{ metrics.disk }}</span>
                 </div>
                 <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 6px 0;">
                     <span style="color: var(--text-secondary);">Время работы</span>
-                    <span>30d 18h</span>
+                    <span id="metric-uptime">{{ metrics.uptime }}</span>
                 </div>
             </div>
         </div>
 
-        <!-- Доход -->
+        <!-- Финансы: группы заказов по дате создания -->
         <div class="card">
             <div class="card-header">
-                <span><i class="fas fa-coins" style="color: var(--success);"></i> Доход</span>
+                <span><i class="fas fa-coins" style="color: var(--success);"></i> Поступления и возвраты</span>
             </div>
             <div class="card-body" style="padding: 16px 20px;">
-                <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
-                    <span style="color: var(--text-secondary);">Сегодня</span>
-                    <span style="font-weight: 600; color: var(--success);">{{ today_revenue }} ₽</span>
+                {% for period in finance %}
+                <div style="padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <strong>{{ period.label }}</strong>
+                    <div class="dashboard-metric" style="display:flex;justify-content:space-between;padding:6px 0;">
+                        <span>Оплачено</span><span style="color:var(--success);">{{ period.gross }} ₽</span>
+                    </div>
+                    <div class="dashboard-metric" style="display:flex;justify-content:space-between;padding:6px 0;">
+                        <span>Полные возвраты (завершены)</span><span>{{ period.refunded }} ₽</span>
+                    </div>
                 </div>
-                <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
-                    <span style="color: var(--text-secondary);">За неделю</span>
-                    <span style="font-weight: 600;">{{ week_revenue }} ₽</span>
-                </div>
-                <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 6px 0;">
-                    <span style="color: var(--text-secondary);">За месяц</span>
-                    <span style="font-weight: 600; color: var(--accent);">{{ month_revenue }} ₽</span>
-                </div>
+                {% endfor %}
+                <p style="font-size:12px;color:var(--text-secondary);margin-top:12px;">Локальный журнал, по дате создания заказа (МСК). Возвраты относятся к исходным заказам, не к дате возврата. Исторические и частичные возвраты могут не учитываться. Не банковская выписка.</p>
             </div>
         </div>
 
@@ -105,7 +105,7 @@
                     <span style="font-weight: 600; color: var(--warning);">{{ pending_count }}</span>
                 </div>
                 <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 6px 0;">
-                    <span style="color: var(--text-secondary);">Всего платежей</span>
+                    <span style="color: var(--text-secondary);">Оплаченных заказов</span>
                     <span style="font-weight: 600;">{{ payments_count }}</span>
                 </div>
             </div>
@@ -122,12 +122,11 @@
                     <span style="font-weight: 600;">{{ servers_count }}</span>
                 </div>
                 <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 6px 0;">
-                    <span style="color: var(--text-secondary);">Активных</span>
-                    <span style="font-weight: 600; color: var(--success);">
-                        <i class="fas fa-circle" style="color: var(--success); font-size: 8px;"></i>
-                        {{ servers_count }}
-                    </span>
+                    <span style="color: var(--text-secondary);">Включены в настройках</span>
+                    <span style="font-weight: 600;">{{ enabled_servers }}</span>
                 </div>
+                <div id="panel-states" style="padding-top:12px;overflow-wrap:anywhere;" aria-live="polite">Проверка API…</div>
+                <p style="font-size:12px;color:var(--text-secondary);margin-top:8px;">Доступность API 3x-ui с сервера админки, не проверка VPN-туннеля.</p>
             </div>
         </div>
 
@@ -157,14 +156,15 @@
 
     <div class="card">
         <div class="card-header">
-            <span><i class="fas fa-chart-bar" style="color: var(--accent);"></i> Платежи по дням</span>
+            <span><i class="fas fa-chart-bar" style="color: var(--accent);"></i> Оплаченные заказы за 7 дней (МСК)</span>
         </div>
         <div class="card-body" style="min-height: 200px; display: flex; align-items: flex-end; gap: 4px; padding: 16px 10px; overflow-x: auto;">
             {% if payments_daily %}
                 {% for item in payments_daily %}
                     <div style="flex: 1; display: flex; flex-direction: column; align-items: center; min-width: 20px;">
-                        <div style="width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; height: {{ item.count * 10 }}px; max-height: 150px; min-height: 4px;"></div>
-                        <span style="font-size: 8px; color: var(--text-muted); margin-top: 4px; transform: rotate(-45deg); white-space: nowrap;">{{ item.date[5:10] }}</span>
+                        <span style="font-size:12px;color:var(--text-primary);">{{ item.count }}</span>
+                        <div style="width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; height: {{ item.height }}px;"></div>
+                        <span style="font-size:10px;color:var(--text-secondary);margin-top:4px;white-space:nowrap;">{{ item.date[5:10] }}</span>
                     </div>
                 {% endfor %}
             {% else %}
@@ -175,7 +175,7 @@
 
     <div class="card">
         <div class="card-header">
-            <span><i class="fas fa-chart-pie" style="color: var(--warning);"></i> Популярные тарифы</span>
+            <span><i class="fas fa-chart-pie" style="color: var(--warning);"></i> Тарифы действующих подписок</span>
         </div>
         <div class="card-body" style="min-height: 200px;">
             {% if top_tariffs %}
@@ -196,4 +196,53 @@
 
 </div>
 
+<script>
+(function(){
+    let timer, running=false;
+    const fields=["cpu","memory","disk","uptime"];
+    async function get(path){
+        const r=await fetch(path,{cache:"no-store",credentials:"same-origin"});
+        if(!r.ok) throw Error("Unavailable");
+        return r.json();
+    }
+    async function refresh(){
+        if(document.hidden || running) return;
+        running=true;
+        try {
+            const values=await get("/dashboard/live");
+            for(const key of fields) document.getElementById("metric-"+key).textContent=values[key] || "Нет данных";
+        } catch {
+            for(const key of fields) document.getElementById("metric-"+key).textContent="Нет свежих данных";
+        }
+        const target=document.getElementById("panel-states");
+        try {
+            const value=await get("/dashboard/panels");
+            target.replaceChildren();
+            if(!value.panels.length) target.textContent="Нет включённых серверов";
+            for(const panel of value.panels){
+                const row=document.createElement("div");
+                row.className="dashboard-metric";
+                row.style.cssText="display:flex;justify-content:space-between;padding:6px 0";
+                const name=document.createElement("span");
+                name.textContent=panel.name;
+                const status=document.createElement("span");
+                status.textContent=panel.state;
+                status.style.color=panel.state==="API доступен"?"var(--success)":"var(--warning)";
+                row.append(name,status);
+                target.append(row);
+            }
+            if(value.truncated) target.append(document.createTextNode("Проверены первые 50 серверов."));
+        } catch { target.textContent="Нет свежих данных"; }
+        running=false;
+    }
+    function schedule(){
+        clearInterval(timer);
+        if(!document.hidden){refresh();timer=setInterval(refresh,30000);}
+    }
+    document.addEventListener("visibilitychange",schedule);
+    window.addEventListener("pagehide",()=>clearInterval(timer));
+    window.addEventListener("pageshow",schedule);
+    schedule();
+})();
+</script>
 {% endblock %}
