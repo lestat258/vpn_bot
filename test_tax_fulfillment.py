@@ -14,20 +14,46 @@ class TaxTests(unittest.IsolatedAsyncioTestCase):
         self.path = str(Path(self.tmp.name) / "test.db")
         with sqlite3.connect(self.path) as db:
             db.executescript("""
-            CREATE TABLE payments(payment_id TEXT PRIMARY KEY, telegram_id INTEGER,
-                amount_rub REAL, status TEXT);
-            CREATE TABLE payment_processing(payment_id TEXT PRIMARY KEY,
-                is_legacy INTEGER DEFAULT 0, payment_state TEXT,
-                vpn_state TEXT, tax_state TEXT, refund_state TEXT DEFAULT 'none',
-                subscription_id INTEGER, receipt_uuid TEXT UNIQUE, receipt_url TEXT,
-                last_error TEXT, updated_at TIMESTAMP);
+            PRAGMA foreign_keys=ON;
+            CREATE TABLE payments(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payment_id TEXT UNIQUE NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                tariff_id INTEGER NOT NULL,
+                amount_rub REAL NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE payment_processing(
+                payment_id TEXT PRIMARY KEY,
+                is_legacy INTEGER NOT NULL DEFAULT 0,
+                payment_state TEXT NOT NULL DEFAULT 'pending',
+                vpn_state TEXT NOT NULL DEFAULT 'not_started',
+                tax_state TEXT NOT NULL DEFAULT 'not_started',
+                refund_state TEXT NOT NULL DEFAULT 'none',
+                subscription_id INTEGER,
+                receipt_uuid TEXT UNIQUE,
+                receipt_url TEXT,
+                last_error TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(payment_id) REFERENCES payments(payment_id)
+            );
             CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);
-            CREATE TABLE tax_receipts(payment_id TEXT, receipt_uuid TEXT,
-                receipt_url TEXT, amount REAL, description TEXT,user_id INTEGER);
+            CREATE TABLE tax_receipts(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payment_id TEXT NOT NULL,
+                receipt_uuid TEXT NOT NULL,
+                receipt_url TEXT,
+                amount REAL,
+                description TEXT,
+                user_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
             INSERT INTO settings VALUES ('tax_enabled','true'),
                 ('tax_description_template','Настройка доступа к сети');
-            INSERT INTO payments VALUES ('new',100,1,'pending'),
-                ('old',100,1,'paid');
+            INSERT INTO payments(payment_id,telegram_id,tariff_id,amount_rub,status)
+                VALUES ('new',100,5,1,'pending'), ('old',100,5,1,'paid');
             INSERT INTO payment_processing(payment_id,payment_state,vpn_state,tax_state)
                 VALUES ('old','verified','done','not_started');
             """)
