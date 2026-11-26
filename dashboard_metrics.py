@@ -201,6 +201,6 @@ async def probe_panels(path):
         async def one(row):
             async with limit:
                 state=await probe_panel(client,row,key)
-            return {"name":row["name"],"state":state}
+            return {"id":row["id"],"name":row["name"],"state":state}
         statuses = await asyncio.gather(*(one(row) for row in rows))
     return {"panels":statuses,"truncated":truncated}
