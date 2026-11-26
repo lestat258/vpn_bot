@@ -5,6 +5,9 @@ from services.vpn_service import vpn_service
 import logging
 import sqlite3
 from datetime import datetime, timedelta
+from html import escape
+from aiogram.exceptions import TelegramBadRequest
+from payment_fulfillment import _subscription_qr
 from aiogram import Router, types, F, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
@@ -205,11 +208,15 @@ async def show_my_keys(callback: types.CallbackQuery):
 @router.callback_query(F.data.startswith("key_"))
 async def show_key_detail(callback: types.CallbackQuery):
     sub_id = int(callback.data.split("_")[1])
+    await callback.answer()
+    await render_key_detail(callback, sub_id)
+
+
+async def render_key_detail(callback: types.CallbackQuery, sub_id: int):
     sub = get_subscription_details(sub_id)
 
     if not sub or sub[8] != callback.from_user.id:
         await callback.message.answer("❌ Подписка не найдена", parse_mode="HTML")
-        await callback.answer()
         return
 
     sub_id, email, end_date, tariff_name, xui_client_uid, traffic_used, tariff_id, start_date, user_id = sub
@@ -222,7 +229,8 @@ async def show_key_detail(callback: types.CallbackQuery):
 
     # Never query the shared panel or invent a link from an unrelated server.
     link = await vpn_service.get_subscription_link(sub_id)
-    if not isinstance(link, str) or not link.startswith("https://"):
+    has_link = isinstance(link, str) and link.startswith("https://")
+    if not has_link:
         link = "Ссылка недоступна — обратитесь в поддержку"
 
     conn = sqlite3.connect(DB_PATH)
@@ -243,8 +251,8 @@ async def show_key_detail(callback: types.CallbackQuery):
     ])
 
     text = (
-        f"🔑 <b>Ключ: {tariff_name}</b>\n\n"
-        f"📧 E-mail в панели: <code>{email}</code>\n"
+        f"🔑 <b>Ключ: {escape(tariff_name)}</b>\n\n"
+        f"📧 E-mail в панели: <code>{escape(email or '')}</code>\n"
         f"📅 Создан: {start_date[:10] if start_date else 'Неизвестно'}\n"
         f"📅 Истекает: {end_date[:10]}\n"
         f"⏳ Осталось: {days_left} дн.\n\n"
@@ -255,11 +263,26 @@ async def show_key_detail(callback: types.CallbackQuery):
         f"💳 <b>Баланс:</b> {user_balance:.2f} ₽\n"
         f"🔄 <b>Авто-продление:</b> {auto_renew_text}\n\n"
         f"🔗 <b>Ссылка:</b>\n"
-        f"<code>{link}</code>"
+        f"<code>{escape(link)}</code>"
     )
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    await callback.answer()
+    message = callback.message
+    if has_link:
+        photo = types.BufferedInputFile(_subscription_qr(link), filename="subscription.png")
+        if len(text.encode("utf-16-le")) // 2 <= 1024:
+            media = types.InputMediaPhoto(media=photo, caption=text, parse_mode="HTML")
+            await message.edit_media(media=media, reply_markup=kb)
+            return
+        await message.answer_photo(photo)
+
+    if message.photo:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
+    else:
+        await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 # ============ ПРОДЛЕНИЕ КЛЮЧА ============
 
@@ -471,15 +494,7 @@ async def toggle_auto_renew(callback: types.CallbackQuery):
     status_text = "✅ Включено" if new_status else "❌ Выключено"
     await callback.answer(f"Авто-продление: {status_text}", show_alert=True)
 
-    new_callback = types.CallbackQuery(
-        id=callback.id,
-        from_user=callback.from_user,
-        chat_instance=callback.chat_instance,
-        message=callback.message,
-        data=f"key_{sub_id}",
-        inline_message_id=callback.inline_message_id
-    )
-    await show_key_detail(new_callback)
+    await render_key_detail(callback, sub_id)
 
 # ============ ПРОМОКОДЫ И ДОСТИЖЕНИЯ ============
 
