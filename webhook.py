@@ -110,28 +110,155 @@ async def get_tariff_info(tariff_id: int) -> Optional[Dict]:
 async def process_payment_success(payment_id, data):
     """Fulfill a payment previously verified through YooKassa API."""
     from payment_fulfillment import process_verified_payment
-    from tax_fulfillment import queue_verified, process_tax_receipt
-    try:
-        await asyncio.to_thread(queue_verified, DB_PATH, payment_id)
-    except Exception as exc:
-        logger.error('Receipt queue requires review: %s', type(exc).__name__)
-    try:
-        return await process_verified_payment(payment_id, data)
-    finally:
-        try:
-            await process_tax_receipt(
-                payment_id, db_path=DB_PATH,
-                operation_time=data['object'].get('captured_at'))
-        except Exception as exc:
-            logger.error('Receipt workflow requires review: %s', type(exc).__name__)
+    from tax_fulfillment import queue_verified
+    # Commit verified fiscal work before fulfillment. The dedicated worker
+    # independently rechecks YooKassa and never blocks the VPN response.
+    await asyncio.to_thread(queue_verified, DB_PATH, payment_id)
+    return await process_verified_payment(payment_id, data)
 
 
 # ============================================================
 # ВЕБХУК
 # ============================================================
 
-async def handle_webhook(request):
+async def verify_provider_payment(payment_id):
+    """Read-only provider lookup and validation shared by webhook and tax worker."""
     from decimal import Decimal
+
+    rows = await async_get_db_query(
+        "SELECT telegram_id, tariff_id, amount_rub "
+        "FROM payments WHERE payment_id = ?",
+        (payment_id,)
+    )
+
+    if not rows:
+        logger.warning("Unknown payment: %s", payment_id)
+        return None, web.Response(status=404, text="Not Found")
+
+    shop_id = get_setting("yookassa_shop_id")
+    stored_secret = get_setting("yookassa_secret_key")
+
+    if not shop_id or not stored_secret:
+        logger.error("YooKassa credentials missing")
+        return None, web.Response(status=503, text="Unavailable")
+
+    try:
+        from encryption import decrypt
+        secret = decrypt(stored_secret)
+    except Exception:
+        secret = stored_secret
+
+    def verify_payment():
+        from yookassa import Configuration, Payment
+        Configuration.account_id = str(shop_id)
+        Configuration.secret_key = secret
+        return Payment.find_one(payment_id)
+
+    try:
+        verified = await asyncio.to_thread(verify_payment)
+    except Exception as exc:
+        logger.error(
+            "YooKassa API error: %s",
+            type(exc).__name__
+        )
+        return None, web.Response(status=503, text="Unavailable")
+
+    if (
+        str(getattr(verified, "id", "")) != payment_id
+        or verified.status != "succeeded"
+        or verified.paid is not True
+    ):
+        return None, web.Response(status=403, text="Unconfirmed")
+
+    try:
+        expected = Decimal(
+            f"{float(rows[0]['amount_rub']):.2f}"
+        )
+        actual = Decimal(str(verified.amount.value))
+        valid_amount = (
+            actual == expected
+            and verified.amount.currency == "RUB"
+        )
+    except Exception:
+        valid_amount = False
+
+    if not valid_amount:
+        logger.error("Amount mismatch: %s", payment_id)
+        return None, web.Response(status=403, text="Amount mismatch")
+
+    metadata = getattr(verified, "metadata", None) or {}
+
+    if (
+        not isinstance(metadata, dict)
+        or str(metadata.get("telegram_id")) != str(rows[0]["telegram_id"])
+        or str(metadata.get("tariff_id")) != str(rows[0]["tariff_id"])
+    ):
+        logger.error("Metadata mismatch: %s", payment_id)
+        return None, web.Response(status=403, text="Metadata mismatch")
+
+    verified_data = {
+        "object": {
+            "id": payment_id,
+            "metadata": metadata,
+            "captured_at": getattr(verified, "captured_at", None),
+            "refunded_amount": getattr(verified, "refunded_amount", None)
+        }
+    }
+
+    return verified_data, None
+
+
+async def verify_for_tax(payment_id):
+    from decimal import Decimal
+    from tax_fulfillment import TaxReviewRequired, validated_operation_time
+
+    verified, error = await verify_provider_payment(payment_id)
+    if error is not None:
+        if error.status >= 500:
+            raise RuntimeError("Provider unavailable")
+        raise TaxReviewRequired("Provider payment mismatch")
+    obj = verified["object"]
+    refunded = obj.get("refunded_amount")
+    if refunded is not None:
+        try:
+            value = Decimal(str(refunded.value))
+            if not value.is_finite() or value < 0:
+                raise ValueError()
+        except Exception:
+            raise TaxReviewRequired("Invalid refunded amount") from None
+        if value > 0:
+            raise TaxReviewRequired("Payment has a refund")
+    try:
+        return validated_operation_time(obj.get("captured_at"))
+    except (ValueError, TypeError):
+        raise TaxReviewRequired("Capture timestamp unavailable") from None
+
+
+async def tax_worker_context(app):
+    from contextlib import suppress
+    from tax_fulfillment import drain_queue, interrupted_count
+
+    async def worker():
+        while True:
+            try:
+                count = await asyncio.to_thread(interrupted_count, DB_PATH)
+                if count:
+                    logger.warning("Fiscal processing interrupted: %d require manual reconciliation", count)
+                await drain_queue(DB_PATH, verify_for_tax)
+            except Exception as exc:
+                logger.error("Fiscal queue unavailable: %s", type(exc).__name__)
+            await asyncio.sleep(15)
+
+    task = asyncio.create_task(worker())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+async def handle_webhook(request):
 
     try:
         data = await request.json()
@@ -150,84 +277,9 @@ async def handle_webhook(request):
         if not isinstance(payment_id, str) or not payment_id or len(payment_id) > 128:
             return web.Response(status=400, text="Bad Request")
 
-        rows = await async_get_db_query(
-            "SELECT telegram_id, tariff_id, amount_rub "
-            "FROM payments WHERE payment_id = ?",
-            (payment_id,)
-        )
-
-        if not rows:
-            logger.warning("Unknown payment: %s", payment_id)
-            return web.Response(status=404, text="Not Found")
-
-        shop_id = get_setting("yookassa_shop_id")
-        stored_secret = get_setting("yookassa_secret_key")
-
-        if not shop_id or not stored_secret:
-            logger.error("YooKassa credentials missing")
-            return web.Response(status=503, text="Unavailable")
-
-        try:
-            from encryption import decrypt
-            secret = decrypt(stored_secret)
-        except Exception:
-            secret = stored_secret
-
-        def verify_payment():
-            from yookassa import Configuration, Payment
-            Configuration.account_id = str(shop_id)
-            Configuration.secret_key = secret
-            return Payment.find_one(payment_id)
-
-        try:
-            verified = await asyncio.to_thread(verify_payment)
-        except Exception as exc:
-            logger.error(
-                "YooKassa API error: %s",
-                type(exc).__name__
-            )
-            return web.Response(status=503, text="Unavailable")
-
-        if (
-            str(getattr(verified, "id", "")) != payment_id
-            or verified.status != "succeeded"
-            or verified.paid is not True
-        ):
-            return web.Response(status=403, text="Unconfirmed")
-
-        try:
-            expected = Decimal(
-                f"{float(rows[0]['amount_rub']):.2f}"
-            )
-            actual = Decimal(str(verified.amount.value))
-            valid_amount = (
-                actual == expected
-                and verified.amount.currency == "RUB"
-            )
-        except Exception:
-            valid_amount = False
-
-        if not valid_amount:
-            logger.error("Amount mismatch: %s", payment_id)
-            return web.Response(status=403, text="Amount mismatch")
-
-        metadata = getattr(verified, "metadata", None) or {}
-
-        if (
-            not isinstance(metadata, dict)
-            or str(metadata.get("telegram_id")) != str(rows[0]["telegram_id"])
-            or str(metadata.get("tariff_id")) != str(rows[0]["tariff_id"])
-        ):
-            logger.error("Metadata mismatch: %s", payment_id)
-            return web.Response(status=403, text="Metadata mismatch")
-
-        verified_data = {
-            "object": {
-                "id": payment_id,
-                "metadata": metadata,
-                "captured_at": getattr(verified, "captured_at", None)
-            }
-        }
+        verified_data, error = await verify_provider_payment(payment_id)
+        if error is not None:
+            return error
 
         success = await process_payment_success(
             payment_id, verified_data
@@ -252,6 +304,7 @@ async def handle_webhook(request):
 
 if __name__ == "__main__":
     app = web.Application()
+    app.cleanup_ctx.append(tax_worker_context)
     app.router.add_post('/webhook/', handle_webhook)
     app.router.add_get('/health', lambda r: web.Response(text='OK'))
     

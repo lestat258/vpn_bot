@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from tax_fulfillment import process_tax_receipt, queue_verified, disable_income_retry, validated_operation_time
+from tax_fulfillment import process_tax_receipt, queue_verified, disable_income_retry, validated_operation_time, drain_queue, TaxReviewRequired, claim, interrupted_count
 from payment_ledger import PaymentLedger
 
 
@@ -143,6 +143,50 @@ class TaxTests(unittest.IsolatedAsyncioTestCase):
         for value in (None, "2026-11-26T12:30:00"):
             with self.assertRaises(ValueError):
                 validated_operation_time(value)
+
+    async def verify(self, payment_id):
+        self.assertEqual(payment_id, "new")
+        return validated_operation_time("2026-11-26T11:30:00Z")
+
+    async def drain(self, verifier=None):
+        await drain_queue(self.path, verifier or self.verify,
+                          issuer=self.issuer, notifier=self.notifier)
+
+    async def test_queued_survives_restart(self):
+        queue_verified(self.path, "new")
+        await self.drain()
+        self.assertEqual(self.state(), "done")
+        self.assertEqual(self.state("old"), "not_started")
+        await self.drain()
+        self.assertEqual(self.calls, 1)
+
+    async def test_processing_survives_without_replay(self):
+        self.queue()
+        self.assertIsNotNone(claim(self.path, "new"))
+        await self.drain()
+        self.assertEqual(self.calls, 0)
+        self.assertEqual(self.state(), "processing")
+        self.assertEqual(interrupted_count(self.path), 1)
+
+    async def test_provider_read_failure_retried_safely(self):
+        self.queue()
+        async def fail(pid):
+            raise TimeoutError()
+        await self.drain(fail)
+        self.assertEqual(self.state(), "queued")
+        self.assertEqual(self.calls, 0)
+        await self.drain()
+        self.assertEqual(self.state(), "done")
+        self.assertEqual(self.calls, 1)
+
+    async def test_provider_mismatch_held(self):
+        self.queue()
+        async def mismatch(pid):
+            raise TaxReviewRequired()
+        await self.drain(mismatch)
+        self.assertEqual(self.state(), "needs_review")
+        await self.drain()
+        self.assertEqual(self.calls, 0)
 
     async def test_existing_receipt_held(self):
         self.queue()

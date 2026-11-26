@@ -192,3 +192,57 @@ async def process_tax_receipt(payment_id, *, db_path="/opt/vpn-bot/data.db",
     except Exception as exc:
         LOG.warning("Receipt stored but Telegram delivery failed: %s", type(exc).__name__)
     return True
+
+
+class TaxReviewRequired(RuntimeError):
+    """Provider data needs manual reconciliation before a receipt is issued."""
+
+
+def queued_ids(path):
+    with sqlite3.connect(f"file:{Path(path).resolve()}?mode=ro", uri=True) as db:
+        return [row[0] for row in db.execute("""
+            SELECT j.payment_id FROM payment_processing j JOIN payments p USING(payment_id)
+            WHERE j.tax_state='queued' AND j.payment_state='verified'
+              AND j.is_legacy=0 AND j.refund_state='none'
+              AND p.status IN ('paid','pending') AND p.amount_rub>0
+            ORDER BY j.created_at, j.payment_id
+        """)]
+
+
+def interrupted_count(path):
+    with sqlite3.connect(f"file:{Path(path).resolve()}?mode=ro", uri=True) as db:
+        return db.execute("""
+            SELECT COUNT(*) FROM payment_processing
+            WHERE tax_state IN ('processing','needs_review')
+        """).fetchone()[0]
+
+
+def hold_queued(path, payment_id):
+    with transaction(path) as db:
+        db.execute("""
+            UPDATE payment_processing SET tax_state='needs_review',
+                updated_at=CURRENT_TIMESTAMP
+            WHERE payment_id=? AND tax_state='queued'
+        """, (payment_id,))
+
+
+async def drain_queue(path, verifier, *, issuer=None, notifier=None):
+    """Resume only work that was never claimed. Retry safe read-only lookups,
+    never re-send an income POST after a crash or ambiguous outcome."""
+    for payment_id in await asyncio.to_thread(queued_ids, path):
+        try:
+            operation_time = await verifier(payment_id)
+            operation_time = validated_operation_time(operation_time)
+        except TaxReviewRequired:
+            await asyncio.to_thread(hold_queued, path, payment_id)
+            LOG.warning("Fiscal queue entry requires provider reconciliation")
+            continue
+        except Exception as exc:
+            LOG.warning("Fiscal provider verification deferred: %s", type(exc).__name__)
+            continue
+        try:
+            await process_tax_receipt(payment_id, db_path=path,
+                                      issuer=issuer, notifier=notifier,
+                                      operation_time=operation_time)
+        except Exception as exc:
+            LOG.error("Fiscal queue entry unavailable: %s", type(exc).__name__)
