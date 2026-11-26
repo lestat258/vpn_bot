@@ -51,7 +51,7 @@ class PaymentLedger:
             db.execute('''
                 INSERT OR IGNORE INTO payment_processing
                   (payment_id, payment_state, vpn_state, tax_state)
-                VALUES (?, 'verified', 'not_started', 'not_started')
+                VALUES (?, 'verified', 'not_started', 'queued')
             ''', (payment_id,))
             state = db.execute('''
                 SELECT is_legacy, vpn_state
