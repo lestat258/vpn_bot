@@ -113,6 +113,14 @@ async def process_payment_success(payment_id, data):
     from tax_fulfillment import queue_verified
     # Commit verified fiscal work before fulfillment. The dedicated worker
     # independently rechecks YooKassa and never blocks the VPN response.
+    from refund_fulfillment import scope, record_refund, money
+    if await asyncio.to_thread(scope, DB_PATH, payment_id) == "new":
+        refunded = data["object"].get("refunded_amount")
+        if refunded is not None and money(refunded.value) > 0:
+            if refunded.currency != "RUB":
+                raise ValueError("Invalid refund currency")
+            await asyncio.to_thread(record_refund, DB_PATH, payment_id, money(refunded.value))
+            return True
     await asyncio.to_thread(queue_verified, DB_PATH, payment_id)
     return await process_verified_payment(payment_id, data)
 
@@ -121,7 +129,7 @@ async def process_payment_success(payment_id, data):
 # ВЕБХУК
 # ============================================================
 
-async def verify_provider_payment(payment_id):
+async def verify_provider_payment(payment_id, expected_status='succeeded'):
     """Read-only provider lookup and validation shared by webhook and tax worker."""
     from decimal import Decimal
 
@@ -165,8 +173,8 @@ async def verify_provider_payment(payment_id):
 
     if (
         str(getattr(verified, "id", "")) != payment_id
-        or verified.status != "succeeded"
-        or verified.paid is not True
+        or verified.status != expected_status
+        or verified.paid is not (expected_status == "succeeded")
     ):
         return None, web.Response(status=403, text="Unconfirmed")
 
@@ -208,6 +216,80 @@ async def verify_provider_payment(payment_id):
     return verified_data, None
 
 
+async def fetch_verified_refund(refund_id):
+    """Look up the refund at YooKassa; do not trust the event's fields."""
+    shop_id = get_setting("yookassa_shop_id")
+    stored_secret = get_setting("yookassa_secret_key")
+    if not shop_id or not stored_secret:
+        raise RuntimeError("Provider credentials unavailable")
+    try:
+        from encryption import decrypt
+        secret = decrypt(stored_secret)
+    except Exception:
+        secret = stored_secret
+
+    def lookup():
+        from yookassa import Configuration, Refund
+        Configuration.account_id = str(shop_id)
+        Configuration.secret_key = secret
+        return Refund.find_one(refund_id)
+
+    return await asyncio.to_thread(lookup)
+
+
+async def verify_full_refund(payment_id):
+    from refund_fulfillment import money
+    verified, error = await verify_provider_payment(payment_id)
+    if error is not None:
+        return False
+    rows = await async_get_db_query("SELECT amount_rub FROM payments WHERE payment_id=?", (payment_id,))
+    refunded = verified["object"].get("refunded_amount")
+    return bool(rows and refunded is not None
+                and refunded.currency == "RUB"
+                and money(refunded.value) == money(rows[0]["amount_rub"]))
+
+
+async def handle_payment_change(event, obj):
+    from refund_fulfillment import scope, money, record_canceled, record_refund
+    object_id = obj.get("id")
+    if not isinstance(object_id, str) or not object_id or len(object_id)>128:
+        return web.Response(status=400, text="Bad Request")
+    payment_id = object_id if event == "payment.canceled" else obj.get("payment_id")
+    if not isinstance(payment_id, str) or not payment_id or len(payment_id)>128:
+        return web.Response(status=400, text="Bad Request")
+    category = await asyncio.to_thread(scope, DB_PATH, payment_id)
+    if category == "historical":
+        return web.Response(status=200, text="OK")
+    if category != "new":
+        return web.Response(status=404, text="Not Found")
+
+    if event == "payment.canceled":
+        verified, error = await verify_provider_payment(payment_id, "canceled")
+        if error is not None:
+            return error
+        if verified["object"].get("captured_at") is not None:
+            return web.Response(status=409, text="Review required")
+        state = await asyncio.to_thread(record_canceled, DB_PATH, payment_id)
+    else:
+        refund = await fetch_verified_refund(object_id)
+        if (str(getattr(refund,"id","")) != object_id
+                or str(getattr(refund,"payment_id","")) != payment_id
+                or refund.status != "succeeded"
+                or refund.amount.currency != "RUB"):
+            return web.Response(status=403, text="Unconfirmed refund")
+        verified, error = await verify_provider_payment(payment_id)
+        if error is not None:
+            return error
+        aggregate = verified["object"].get("refunded_amount")
+        if (aggregate is None or aggregate.currency != "RUB"
+                or not 0 < money(refund.amount.value) <= money(aggregate.value)):
+            return web.Response(status=409, text="Refund mismatch")
+        state = await asyncio.to_thread(record_refund, DB_PATH, payment_id, money(aggregate.value))
+    if state.endswith("review"):
+        logger.warning("Payment change requires manual reconciliation")
+    return web.Response(status=200, text="OK")
+
+
 async def verify_for_tax(payment_id):
     from decimal import Decimal
     from tax_fulfillment import TaxReviewRequired, validated_operation_time
@@ -237,6 +319,7 @@ async def verify_for_tax(payment_id):
 async def tax_worker_context(app):
     from contextlib import suppress
     from tax_fulfillment import drain_queue, interrupted_count
+    from refund_fulfillment import drain_refunds
 
     async def worker():
         while True:
@@ -245,6 +328,7 @@ async def tax_worker_context(app):
                 if count:
                     logger.warning("Fiscal processing interrupted: %d require manual reconciliation", count)
                 await drain_queue(DB_PATH, verify_for_tax)
+                await drain_refunds(DB_PATH, verify_full_refund)
             except Exception as exc:
                 logger.error("Fiscal queue unavailable: %s", type(exc).__name__)
             await asyncio.sleep(15)
@@ -266,12 +350,16 @@ async def handle_webhook(request):
         if not isinstance(data, dict) or data.get("type") != "notification":
             return web.Response(status=400, text="Bad Request")
 
-        if data.get("event") != "payment.succeeded":
+        event = data.get("event")
+        if event not in ("payment.succeeded", "payment.canceled", "refund.succeeded"):
             return web.Response(status=200, text="OK")
 
         obj = data.get("object")
         if not isinstance(obj, dict):
             return web.Response(status=400, text="Bad Request")
+
+        if event != "payment.succeeded":
+            return await handle_payment_change(event, obj)
 
         payment_id = obj.get("id")
         if not isinstance(payment_id, str) or not payment_id or len(payment_id) > 128:
