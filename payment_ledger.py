@@ -38,7 +38,7 @@ class PaymentLedger:
             if pay['amount_rub'] is None or pay['amount_rub'] <= 0:
                 return 'held'  # Free trials do not pass through YooKassa.
             existing = db.execute('''
-                SELECT is_legacy, vpn_state
+                SELECT is_legacy, vpn_state, refund_state
                 FROM payment_processing WHERE payment_id=?
             ''', (payment_id,)).fetchone()
             if existing and existing['is_legacy']:
@@ -54,13 +54,15 @@ class PaymentLedger:
                 VALUES (?, 'verified', 'not_started', 'queued')
             ''', (payment_id,))
             state = db.execute('''
-                SELECT is_legacy, vpn_state
+                SELECT is_legacy, vpn_state, refund_state
                 FROM payment_processing WHERE payment_id=?
             ''', (payment_id,)).fetchone()
             if state['is_legacy']:
                 return 'legacy'
             if state['vpn_state'] == 'done':
                 return 'done'
+            if state['refund_state'] != 'none':
+                return 'held'
             if state['vpn_state'] != 'not_started':
                 return 'held'  # processing or needs_review: never retry blindly.
             db.execute('''
