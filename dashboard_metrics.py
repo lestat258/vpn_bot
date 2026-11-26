@@ -44,12 +44,14 @@ def cpu_percent(before, after):
 def local_metrics(proc="/proc", disk_path="/opt/vpn-bot"):
     proc = Path(proc)
     data = dict.fromkeys(("cpu","memory","disk","uptime"),UNKNOWN)
+    data["percent"] = dict.fromkeys(("cpu","memory","disk"))
     try:
         before = cpu_ticks(proc)
         time.sleep(.2)
         load = cpu_percent(before,cpu_ticks(proc))
         if load is not None:
             data["cpu"] = f"{load:.1f}% · {os.cpu_count() or 1} лог. CPU"
+            data["percent"]["cpu"] = load
     except (OSError, ValueError, IndexError):
         pass
     try:
@@ -62,12 +64,14 @@ def local_metrics(proc="/proc", disk_path="/opt/vpn-bot"):
         if 0 <= available <= total and total > 0:
             used = total-available
             data["memory"] = f"{used/2**30:.2f} / {total/2**30:.2f} ГиБ ({100*used/total:.0f}%)"
+            data["percent"]["memory"] = round(100*used/total,1)
     except (OSError, ValueError, KeyError, IndexError):
         pass
     try:
         total, used, free = shutil.disk_usage(disk_path)
         if total > 0:
             data["disk"] = f"{used/2**30:.2f} / {total/2**30:.2f} ГиБ ({100*used/total:.0f}%)"
+            data["percent"]["disk"] = round(100*used/total,1)
     except (OSError, ValueError):
         pass
     try:
@@ -78,6 +82,7 @@ def local_metrics(proc="/proc", disk_path="/opt/vpn-bot"):
             data["uptime"] = f"{days} д. {hours} ч. {rest//60} мин."
     except (OSError, ValueError, IndexError, OverflowError):
         pass
+    data["sampled_at"] = datetime.now(MSK).strftime("%d.%m.%Y %H:%M:%S МСК")
     return data
 
 
