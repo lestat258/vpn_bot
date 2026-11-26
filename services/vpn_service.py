@@ -1,7 +1,11 @@
 """
 Сервис для работы с VPN (создание, продление, управление подписками)
 """
+import fcntl
 import logging
+from contextlib import closing
+from pathlib import Path
+from urllib.parse import quote
 import sqlite3
 import asyncio
 from datetime import datetime, timedelta
@@ -15,6 +19,60 @@ from utils import generate_short_email, find_subid_by_email
 
 logger = logging.getLogger(__name__)
 DB_PATH = '/opt/vpn-bot/data.db'
+
+
+def _client_state(api, email, uid, subid):
+    reply = api._request('GET', '/panel/api/clients/get/' + quote(email, safe=''))
+    if not reply or reply.get('success') is not True:
+        raise ValueError('Не удалось прочитать клиента панели')
+    payload = reply['obj']
+    client = payload['client']
+    if (not uid or not subid or client.get('email') != email
+            or uid not in (client.get('uuid'), client.get('id'))
+            or client.get('subId') != subid or client.get('enable') is not True
+            or not payload.get('inboundIds')):
+        raise ValueError('Проверка владельца и состояния ключа не пройдена')
+    return int(client['expiryTime']), sorted(payload['inboundIds'])
+
+
+def _renew(subscription_id, days, tariff_id):
+    if type(days) is not int or days <= 0:
+        raise ValueError('Срок продления должен быть положительным')
+    # Serialize renewals of this key across bot and webhook processes.
+    lock_path = Path(DB_PATH).with_name(f'.renew-{int(subscription_id)}.lock')
+    with lock_path.open('a') as lock, closing(sqlite3.connect(DB_PATH)) as db:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        row = db.execute("""
+            SELECT s.end_date, s.xui_email, s.xui_client_uid, s.xui_subid,
+                   v.url, v.api_token
+              FROM subscriptions s JOIN servers v ON v.id=s.server_id
+             WHERE s.id=?
+        """, (subscription_id,)).fetchone()
+        if not row:
+            raise ValueError('Подписка или её сервер не найдены')
+        end, email, uid, subid, url, token = row
+        api = XUIClient(url=url, api_token=token)
+        old_ms, inbounds = _client_state(api, email, uid, subid)
+        local_end = datetime.fromisoformat(end)
+        if old_ms <= 0 or abs(old_ms - int(local_end.timestamp() * 1000)) > 1:
+            raise ValueError('Срок в панели требует сверки')
+        target_ms = old_ms + days * 86400000
+        reply = api._request('POST', '/panel/api/clients/bulkAdjust',
+                             {'emails': [email], 'addDays': days}, retries=1)
+        after = _client_state(api, email, uid, subid)
+        if (not reply or reply.get('success') is not True
+                or (reply.get('obj') or {}).get('adjusted') != 1
+                or after != (target_ms, inbounds)):
+            raise ValueError('Панель не подтвердила продление, требуется сверка')
+        new_end = datetime.fromtimestamp(target_ms / 1000, tz=local_end.tzinfo)
+        with db:
+            updated = db.execute("""
+                UPDATE subscriptions SET end_date=?, tariff_id=COALESCE(?, tariff_id)
+                 WHERE id=? AND end_date=? AND xui_client_uid=? AND xui_subid=?
+            """, (new_end.isoformat(), tariff_id, subscription_id, end, uid, subid))
+            if updated.rowcount != 1:
+                raise ValueError('Подписка изменилась во время продления, требуется сверка')
+        return new_end
 
 
 class VPNService:
@@ -242,49 +300,11 @@ class VPNService:
     ) -> Dict[str, Any]:
         """Продлевает существующую подписку"""
         try:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute('SELECT end_date, xui_email FROM subscriptions WHERE id = ?', (subscription_id,))
-            sub = c.fetchone()
-
-            if not sub:
-                conn.close()
-                return {'success': False, 'error': 'Подписка не найдена'}
-
-            end_date, xui_email = sub
-            current_end_date = datetime.fromisoformat(end_date)
-            new_end_date = current_end_date + timedelta(days=days_to_add)
-
-            if tariff_id:
-                c.execute('UPDATE subscriptions SET end_date = ?, tariff_id = ? WHERE id = ?',
-                         (new_end_date.isoformat(), tariff_id, subscription_id))
-            else:
-                c.execute('UPDATE subscriptions SET end_date = ? WHERE id = ?',
-                         (new_end_date.isoformat(), subscription_id))
-            conn.commit()
-            conn.close()
-
-            logger.info(f"✅ Подписка {subscription_id} продлена до {new_end_date}")
-
-            # Обновляем expiryTime на сервере
-            best_server = await asyncio.to_thread(server_manager.get_best_server)
-            if best_server:
-                xui = XUIClient(url=best_server['url'], api_token=best_server['api_token'])
-                new_expiry_time = int(new_end_date.timestamp() * 1000)
-                success = await asyncio.to_thread(xui.update_client_expiry, xui_email, new_expiry_time)
-                if success:
-                    logger.info(f"✅ Обновлён expiryTime в 3X-UI для {xui_email}")
-                else:
-                    logger.warning(f"⚠️ Не удалось обновить expiryTime в 3X-UI для {xui_email}")
-
-            return {
-                'success': True,
-                'new_end_date': new_end_date
-            }
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка продления подписки: {e}")
-            return {'success': False, 'error': str(e)}
+            new_end = await asyncio.to_thread(_renew, subscription_id, days_to_add, tariff_id)
+            return {'success': True, 'new_end_date': new_end}
+        except Exception as exc:
+            logger.error("Продление подписки %s требует сверки: %s", subscription_id, type(exc).__name__)
+            return {'success': False, 'error': 'Требуется сверка продления'}
 
     @staticmethod
     async def get_subscription_link(subscription_id: int) -> Optional[str]:
