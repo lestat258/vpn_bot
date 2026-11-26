@@ -320,6 +320,7 @@ async def tax_worker_context(app):
     from contextlib import suppress
     from tax_fulfillment import drain_queue, interrupted_count
     from refund_fulfillment import drain_refunds
+    from payment_admin_alerts import alert_worker
 
     async def worker():
         while True:
@@ -334,12 +335,15 @@ async def tax_worker_context(app):
             await asyncio.sleep(15)
 
     task = asyncio.create_task(worker())
+    alerts = asyncio.create_task(alert_worker(DB_PATH))
     try:
         yield
     finally:
         task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        alerts.cancel()
+        for pending in (task, alerts):
+            with suppress(asyncio.CancelledError):
+                await pending
 
 
 async def handle_webhook(request):

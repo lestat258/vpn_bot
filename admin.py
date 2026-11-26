@@ -11,6 +11,7 @@ import uvicorn
 
 from database import init_db
 from admin_modules.proxy_users import proxy_router
+from admin_pwa import pwa_router
 
 # Импорт всех модулей админ-панели
 from admin_modules import (
@@ -51,6 +52,7 @@ app.add_middleware(
 # ПОДКЛЮЧЕНИЕ ВСЕХ РОУТЕРОВ
 # ============================================================
 
+app.include_router(pwa_router)
 app.include_router(proxy_router)
 app.include_router(auth_router)          # /, /login, /logout, /health
 app.include_router(dashboard_router)     # /dashboard
