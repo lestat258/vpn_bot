@@ -2,12 +2,51 @@
 {% macro state(value) -%}
 <span class="badge badge-{{ value.style }}">{{ value.label }}</span>
 {%- endmacro %}
+{% macro check_form(p) -%}
+{% if p.is_new and csrf %}
+<form method="post" action="/payments/{{ p.id }}/check" class="payment-check-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="filter" value="{{ selected }}">
+    <input type="hidden" name="page" value="{{ page }}">
+    <button class="btn btn-secondary btn-sm" type="submit">Сверить</button>
+</form>
+{% endif %}
+{%- endmacro %}
 {% block content %}
+<style>
+.payment-mobile { display:none; }
+.payment-check-form { margin-top:8px; }
+.payment-filter { display:flex; gap:8px; align-items:center; max-width:100%; flex-wrap:wrap; }
+.payment-filter select { width:auto; max-width:100%; }
+.payment-summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:16px; }
+.payment-result { padding:16px; margin-bottom:16px; overflow-wrap:anywhere; }
+.payment-result dl { display:grid; grid-template-columns:minmax(100px,1fr) 2fr; gap:8px; }
+.payment-result dt { color:var(--text-secondary); }
+.payment-mobile article { border-bottom:1px solid var(--border-color); padding:16px; overflow-wrap:anywhere; }
+.payment-mobile article:last-child { border-bottom:0; }
+.payment-mobile header { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; }
+.payment-mobile dl { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:12px 0; }
+.payment-mobile dt { font-size:12px;color:var(--text-secondary);margin-bottom:4px; }
+.payment-mobile dd { margin:0; min-width:0; }
+.payment-mobile .badge { white-space:normal; max-width:100%; }
+.payment-mobile .btn { min-height:40px; }
+@media (max-width:1250px) {
+  .payment-desktop { display:none; }
+  .payment-mobile { display:block; }
+}
+@media (max-width:480px) {
+  .payment-summary { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .payment-summary .stat-card { padding:12px 8px; }
+  .payment-summary .number { font-size:19px; overflow-wrap:anywhere; }
+  .payment-filter { width:100%; }
+  .payment-filter select { flex:1;min-width:0; }
+}
+</style>
 <div class="page-header">
     <h1><i class="fas fa-credit-card"></i> Оплаты и возвраты</h1>
     <span style="color:var(--text-secondary)">Записей: {{ stats.total }}</span>
 </div>
-<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px">
+<div class="payment-summary">
     {% for value,label in [
       ('%.2f ₽'|format(stats.gross),'Оплачено · до возвратов'),
       ('%.2f ₽'|format(stats.completed_refunds),'Полные возвраты · завершены'),
@@ -20,10 +59,21 @@
     Данные локального журнала, не банковская выписка. Старые и частичные возвраты могут быть не учтены.
     Исторические заказы доступны только для просмотра. Новые — после установленной границы 26.11.2026 15:15 МСК.
 </p>
+{% if check_result %}
+<section class="card payment-result" role="status">
+    <h2>Сверка заказа #{{ check_result.order_id }}</h2>
+    <p>Результат на момент запроса. Данные не изменялись.</p>
+    <dl>
+    {% for item in check_result.lines %}
+        <dt>{{ item.label }}</dt><dd>{{ item.value }}</dd>
+    {% endfor %}
+    </dl>
+</section>
+{% endif %}
 <div class="card">
     <div class="card-header" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
         <span><i class="fas fa-clock-rotate-left"></i> Журнал операций</span>
-        <form method="get" action="/payments" style="display:flex;gap:8px;align-items:center">
+        <form method="get" action="/payments" class="payment-filter">
             <label for="filter">Фильтр</label>
             <select id="filter" class="form-control" name="filter">
                 {% for key,label in filters.items() %}
@@ -34,10 +84,10 @@
         </form>
     </div>
     <div class="card-body" style="padding:0">
-        <div class="table-wrapper" style="overflow-x:auto">
+        <div class="table-wrapper payment-desktop" style="overflow-x:auto">
             <table class="table" style="min-width:940px">
                 <thead><tr><th>Заказ</th><th>Пользователь / тариф</th><th>Сумма</th>
-                    <th>Оплата / ЮKassa</th><th>VPN</th><th>Чек ФНС</th><th>Возврат</th><th>Создан (UTC*)</th></tr></thead>
+                    <th>Оплата / ЮKassa</th><th>VPN</th><th>Чек ФНС</th><th>Возврат</th><th>Создан</th></tr></thead>
                 <tbody>
                 {% for p in payments %}
                 <tr>
@@ -50,13 +100,30 @@
                     <td>{{ state(p.vpn_display) }}{% if p.subscription_id %}<br><small>Подписка #{{ p.subscription_id }}</small>{% endif %}</td>
                     <td>{{ state(p.tax_display) }}{% if p.receipt_link %}<br><a href="{{ p.receipt_link }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Открыть чек</a>{% endif %}</td>
                     <td>{{ state(p.refund_display) }}</td>
-                    <td>{{ p.created_at or '—' }}</td>
+                    <td>{{ p.display_date }}{{ check_form(p) }}</td>
                 </tr>
                 {% else %}
                 <tr><td colspan="8" style="text-align:center;padding:32px">Платежей не найдено</td></tr>
                 {% endfor %}
                 </tbody>
             </table>
+        </div>
+        <div class="payment-mobile">
+        {% for p in payments %}
+            <article>
+                <header><strong>Заказ #{{ p.id }}</strong>{{ state(p.payment_display) }}<strong>{{ '%.2f'|format(p.amount_rub) }} ₽</strong></header>
+                <p>{{ p.customer or 'Неизвестно' }} · {{ p.tariff or '—' }}</p>
+                {% if not p.is_new %}<span class="badge badge-secondary">История / вне контура</span>{% endif %}
+                <dl>
+                    <div><dt>ЮKassa</dt><dd>{{ state(p.provider_display) }}</dd></div>
+                    <div><dt>VPN</dt><dd>{{ state(p.vpn_display) }}{% if p.subscription_id %}<br>Подписка #{{ p.subscription_id }}{% endif %}</dd></div>
+                    <div><dt>Чек ФНС</dt><dd>{{ state(p.tax_display) }}{% if p.receipt_link %}<br><a href="{{ p.receipt_link }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Открыть чек</a>{% endif %}</dd></div>
+                    <div><dt>Возврат</dt><dd>{{ state(p.refund_display) }}</dd></div>
+                </dl>
+                <small>{{ p.display_date }}</small>
+                {{ check_form(p) }}
+            </article>
+        {% else %}<p style="padding:24px">Платежей не найдено</p>{% endfor %}
         </div>
         <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:16px">
             <span>Найдено: {{ count }} · Страница {{ page }} из {{ pages }}</span>
@@ -65,5 +132,5 @@
         </div>
     </div>
 </div>
-<p style="color:var(--text-muted);font-size:12px;margin-top:12px">* Дата создания из базы; для старых и бесплатных заказов часовой пояс может отличаться. Статусы отражают локальный журнал, а не живой запрос к ЮKassa или ФНС. «В обработке» может означать незавершённую операцию.</p>
+<p style="color:var(--text-muted);font-size:12px;margin-top:12px">Новые платные заказы показаны по МСК; для исторических и бесплатных записей сохранена дата из базы. Статусы отражают локальный журнал, а не живой запрос к ЮKassa или ФНС. «В обработке» может означать незавершённую операцию.</p>
 {% endblock %}
