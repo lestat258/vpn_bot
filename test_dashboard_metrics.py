@@ -57,6 +57,36 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(data["memory"],"0.50 / 1.00 ГиБ (50%)")
             self.assertEqual(data["uptime"],"1 д. 1 ч. 1 мин.")
             self.assertNotEqual(data["disk"],"Нет данных")
+            self.assertEqual(data["percent"]["cpu"],75.0)
+            self.assertEqual(data["percent"]["memory"],50.0)
+            self.assertTrue(0 <= data["percent"]["disk"] <= 100)
+            self.assertRegex(data["sampled_at"],r"^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2} МСК$")
+
+    def test_missing_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"missing"
+            data=local_metrics(path,path)
+            self.assertEqual(data["percent"],{"cpu":None,"memory":None,"disk":None})
+            self.assertEqual(data["uptime"],"Нет данных")
+
+    def test_dashboard_template(self):
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
+        from types import SimpleNamespace
+        env=Environment(loader=FileSystemLoader("templates"),autoescape=select_autoescape())
+        html=env.get_template("dashboard.html").render(
+            request=SimpleNamespace(url=SimpleNamespace(path="/dashboard")),
+            metrics={"cpu":"90%","memory":"75%","disk":"Нет данных","uptime":"1 д.",
+                     "percent":{"cpu":90,"memory":75,"disk":None},"sampled_at":"TEST MSK"},
+            finance=[],payments_daily=[{"date":"2026-11-26","count":2,"height":100}],
+            top_tariffs=[{"name":str(n),"count":n} for n in (1,2,5,11,21,22)])
+        self.assertIn('data-level="danger"',html)
+        self.assertIn('data-level="warning"',html)
+        self.assertIn('data-level="unknown"',html)
+        self.assertIn('Замер: TEST MSK',html)
+        self.assertIn('>26.11<',html)
+        self.assertIn('>подписка<',html)
+        self.assertIn('>подписки<',html)
+        self.assertIn('>подписок<',html)
 
     def test_token(self):
         import base64

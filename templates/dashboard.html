@@ -1,6 +1,23 @@
 {% extends "base.html" %}
 
 {% block content %}
+<style>
+    .resource-meter { height: 6px; background: var(--border-color); border-radius: 8px; overflow: hidden; margin: 4px 0 12px; }
+    .resource-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--success); }
+    .resource-meter[data-level="warning"] > span { background: var(--warning); }
+    .resource-meter[data-level="danger"] > span { background: var(--danger); }
+    .resource-meter[data-level="unknown"] > span { width: 0 !important; }
+    .dashboard-chart-grid > .card { align-self: start; }
+</style>
+{% macro resource_meter(key, label) %}
+    {% set value = metrics.percent[key] %}
+    <div id="meter-{{ key }}" class="resource-meter"
+         data-level="{{ 'unknown' if value is none else 'danger' if value >= 90 else 'warning' if value >= 70 else 'normal' }}"
+         role="meter" aria-label="{{ label }}" aria-valuemin="0" aria-valuemax="100"
+         {% if value is not none %}aria-valuenow="{{ value }}"{% else %}aria-valuetext="Нет данных"{% endif %}>
+        <span style="width: {{ value if value is not none else 0 }}%;"></span>
+    </div>
+{% endmacro %}
 <div class="page-header">
     <h1><i class="fas fa-chart-simple"></i> Дашборд</h1>
     <span style="color: var(--text-secondary); font-size: 14px;">
@@ -49,18 +66,23 @@
                     <span style="color: var(--text-secondary);">CPU</span>
                     <span id="metric-cpu">{{ metrics.cpu }}</span>
                 </div>
+                {{ resource_meter('cpu', 'Загрузка CPU') }}
                 <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
                     <span style="color: var(--text-secondary);">Память</span>
                     <span id="metric-memory">{{ metrics.memory }}</span>
                 </div>
+                {{ resource_meter('memory', 'Использование памяти') }}
                 <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
                     <span style="color: var(--text-secondary);">Диск</span>
                     <span id="metric-disk">{{ metrics.disk }}</span>
                 </div>
+                {{ resource_meter('disk', 'Использование диска') }}
                 <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 6px 0;">
                     <span style="color: var(--text-secondary);">Время работы</span>
                     <span id="metric-uptime">{{ metrics.uptime }}</span>
                 </div>
+                <p id="metrics-sampled" style="font-size:12px;color:var(--text-secondary);margin-top:12px;">Замер: {{ metrics.sampled_at }}</p>
+                <p style="font-size:11px;color:var(--text-secondary);margin-top:4px;">Обновление каждые 30 сек. при открытой странице.</p>
             </div>
         </div>
 
@@ -164,7 +186,7 @@
                     <div style="flex: 1; display: flex; flex-direction: column; align-items: center; min-width: 20px;">
                         <span style="font-size:12px;color:var(--text-primary);">{{ item.count }}</span>
                         <div style="width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; height: {{ item.height }}px;"></div>
-                        <span style="font-size:10px;color:var(--text-secondary);margin-top:4px;white-space:nowrap;">{{ item.date[5:10] }}</span>
+                        <span style="font-size:10px;color:var(--text-secondary);margin-top:4px;white-space:nowrap;">{{ item.date[8:10] }}.{{ item.date[5:7] }}</span>
                     </div>
                 {% endfor %}
             {% else %}
@@ -177,14 +199,14 @@
         <div class="card-header">
             <span><i class="fas fa-chart-pie" style="color: var(--warning);"></i> Тарифы действующих подписок</span>
         </div>
-        <div class="card-body" style="min-height: 200px;">
+        <div class="card-body">
             {% if top_tariffs %}
                 {% for tariff in top_tariffs %}
                     <div class="dashboard-metric" style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
                         <span style="color: var(--text-secondary);">{{ tariff.name }}</span>
                         <span style="font-weight: 600;">
                             {{ tariff.count }}
-                            <span style="color: var(--text-muted); font-weight: 400;">подписок</span>
+                            <span style="color: var(--text-secondary); font-weight: 400;">{% if tariff.count % 100 in [11,12,13,14] %}подписок{% elif tariff.count % 10 == 1 %}подписка{% elif tariff.count % 10 in [2,3,4] %}подписки{% else %}подписок{% endif %}</span>
                         </span>
                     </div>
                 {% endfor %}
@@ -198,22 +220,43 @@
 
 <script>
 (function(){
-    let timer, running=false;
+    let timer, running=false, panelRunning=false;
     const fields=["cpu","memory","disk","uptime"];
     async function get(path){
         const r=await fetch(path,{cache:"no-store",credentials:"same-origin"});
         if(!r.ok) throw Error("Unavailable");
         return r.json();
     }
-    async function refresh(){
+    function setMeter(key,value){
+        const meter=document.getElementById("meter-"+key);
+        const valid=typeof value==="number" && Number.isFinite(value) && value>=0 && value<=100;
+        meter.dataset.level=valid?(value>=90?"danger":value>=70?"warning":"normal"):"unknown";
+        meter.firstElementChild.style.width=(valid?value:0)+"%";
+        if(valid){
+            meter.setAttribute("aria-valuenow",String(value));
+            meter.removeAttribute("aria-valuetext");
+        } else {
+            meter.removeAttribute("aria-valuenow");
+            meter.setAttribute("aria-valuetext","Нет данных");
+        }
+    }
+    async function refreshMetrics(){
         if(document.hidden || running) return;
         running=true;
         try {
             const values=await get("/dashboard/live");
             for(const key of fields) document.getElementById("metric-"+key).textContent=values[key] || "Нет данных";
+            for(const key of ["cpu","memory","disk"]) setMeter(key,values.percent?.[key]);
+            document.getElementById("metrics-sampled").textContent=values.sampled_at?"Замер: "+values.sampled_at:"Время замера неизвестно";
         } catch {
             for(const key of fields) document.getElementById("metric-"+key).textContent="Нет свежих данных";
-        }
+            for(const key of ["cpu","memory","disk"]) setMeter(key,null);
+            document.getElementById("metrics-sampled").textContent="Обновление не удалось";
+        } finally { running=false; }
+    }
+    async function refreshPanels(){
+        if(document.hidden || panelRunning) return;
+        panelRunning=true;
         const target=document.getElementById("panel-states");
         try {
             const value=await get("/dashboard/panels");
@@ -233,8 +276,9 @@
             }
             if(value.truncated) target.append(document.createTextNode("Проверены первые 50 серверов."));
         } catch { target.textContent="Нет свежих данных"; }
-        running=false;
+        finally { panelRunning=false; }
     }
+    function refresh(){ refreshMetrics(); refreshPanels(); }
     function schedule(){
         clearInterval(timer);
         if(!document.hidden){refresh();timer=setInterval(refresh,30000);}
