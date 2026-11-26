@@ -12,6 +12,17 @@
 </form>
 {% endif %}
 {%- endmacro %}
+{% macro resend_form(p) -%}
+{% if p.is_new and csrf and p.status == 'paid' and p.payment_state == 'verified' and p.tax_state == 'done' and p.refund_state == 'none' and p.receipt_link %}
+<form method="post" action="/payments/{{ p.id }}/resend" class="payment-check-form" onsubmit="return confirm('Повторно отправить существующий чек покупателю в Telegram?');">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="filter" value="{{ selected }}">
+    <input type="hidden" name="page" value="{{ page }}">
+    <input type="hidden" name="confirm" value="yes">
+    <button class="btn btn-secondary btn-sm" type="submit">Отправить чек повторно</button>
+</form>
+{% endif %}
+{%- endmacro %}
 {% block content %}
 <style>
 .payment-mobile { display:none; }
@@ -33,6 +44,12 @@
 @media (max-width:1250px) {
   .payment-desktop { display:none; }
   .payment-mobile { display:block; }
+}
+@media (max-width:768px) {
+  .payment-result dl { grid-template-columns:minmax(0,1fr) minmax(0,1.5fr); }
+  .payment-mobile dl { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .payment-result dd { margin:0; min-width:0; }
+  .payment-result .badge { white-space:normal; }
 }
 @media (max-width:480px) {
   .payment-summary { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
@@ -61,7 +78,8 @@
 </p>
 {% if check_result %}
 <section class="card payment-result" role="status">
-    <h2>Сверка заказа #{{ check_result.order_id }}</h2>
+    <h2>{% if check_result.kind == 'resend' %}Отправка чека заказа{% else %}Сверка заказа{% endif %} #{{ check_result.order_id }}</h2>
+    {% if check_result.summary %}<p><strong class="badge badge-{{ 'success' if check_result.ok else 'warning' }}">{{ check_result.summary }}</strong></p>{% endif %}
     <p>Результат на момент запроса. Данные не изменялись.</p>
     <dl>
     {% for item in check_result.lines %}
@@ -100,7 +118,7 @@
                     <td>{{ state(p.vpn_display) }}{% if p.subscription_id %}<br><small>Подписка #{{ p.subscription_id }}</small>{% endif %}</td>
                     <td>{{ state(p.tax_display) }}{% if p.receipt_link %}<br><a href="{{ p.receipt_link }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Открыть чек</a>{% endif %}</td>
                     <td>{{ state(p.refund_display) }}</td>
-                    <td>{{ p.display_date }}{{ check_form(p) }}</td>
+                    <td>{{ p.display_date }}{{ check_form(p) }}{{ resend_form(p) }}</td>
                 </tr>
                 {% else %}
                 <tr><td colspan="8" style="text-align:center;padding:32px">Платежей не найдено</td></tr>
@@ -121,7 +139,7 @@
                     <div><dt>Возврат</dt><dd>{{ state(p.refund_display) }}</dd></div>
                 </dl>
                 <small>{{ p.display_date }}</small>
-                {{ check_form(p) }}
+                {{ check_form(p) }}{{ resend_form(p) }}
             </article>
         {% else %}<p style="padding:24px">Платежей не найдено</p>{% endfor %}
         </div>

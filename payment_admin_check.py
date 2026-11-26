@@ -5,6 +5,7 @@ import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from payment_admin_view import status_display
 from refund_fulfillment import eligible_row, money, with_authenticated_client, receipt_cancellation, refund_confirmed
 
 
@@ -91,25 +92,41 @@ async def check_order(path,order_id,*,provider=None,fiscal=None):
     lines=[]
     def add(label,value):
         lines.append({"label":label,"value":value})
-    result={"order_id":order_id,"lines":lines}
+    result={"order_id":order_id,"lines":lines,"ok":False,
+            "summary":"Требуется внимание: не все данные подтверждены."}
     snapshot=await asyncio.to_thread(order_snapshot,path,order_id)
     if not snapshot:
         add("Сверка","Заказ вне нового платёжного контура или не найден.")
         return result
     p,j,receipts=snapshot
-    add("Локальный статус",p["status"])
-    add("Локальный возврат",j.get("refund_state") or "Нет записи")
-    add("Локальный чек",j.get("tax_state") or "Нет записи")
+    add("Локальный статус",status_display("payment",p["status"])["label"])
+    add("Локальный возврат",status_display("refund",j.get("refund_state"))["label"])
+    add("Локальный чек",status_display("tax",j.get("tax_state"))["label"])
+    provider_ok=False
+    fiscal_ok=False
     try:
         data=await asyncio.wait_for((provider or provider_read)(path,p["payment_id"]),20)
         state,refunded=provider_state(p,data)
         add("ЮKassa",{"succeeded":"Оплачен","pending":"Ожидает","canceled":"Отменён","waiting_for_capture":"Ожидает подтверждения"}[state])
         add("Возвращено в ЮKassa",f"{refunded:.2f} ₽" if refunded is not None else "Не указано")
         expected={"paid":"succeeded","pending":"pending","canceled":"canceled"}.get(p["status"])
-        if expected!=state:
+        payment_ok=expected==state
+        if not payment_ok:
             add("Оплата","Расхождение с локальным статусом")
-        if refunded is not None and refunded>0 and j.get("refund_state") in (None,"none"):
-            add("Возврат","Расхождение: возврат не отражён в журнале")
+        local_refund=j.get("refund_state")
+        refund_ok=False
+        if refunded is not None:
+            if local_refund in (None,"none"):
+                refund_ok=refunded==0
+            elif local_refund in ("full_done","full_queued","full_processing","full_review"):
+                refund_ok=refunded==money(p["amount_rub"])
+            elif local_refund=="partial_review":
+                refund_ok=0<refunded<money(p["amount_rub"])
+            if not refund_ok:
+                add("Возврат","Расхождение с локальным состоянием возврата")
+        provider_ok=(payment_ok and refund_ok and state=="succeeded"
+                     and j.get("payment_state")=="verified"
+                     and local_refund in ("none","full_done"))
     except Exception:
         add("ЮKassa","Не удалось подтвердить данные")
     uid=j.get("receipt_uuid")
@@ -124,8 +141,14 @@ async def check_order(path,order_id,*,provider=None,fiscal=None):
         state=await asyncio.wait_for((fiscal or fiscal_read)(path,uid,money(p["amount_rub"])),100)
         label={"active":"Действующий","refund":"Аннулирован: возврат средств","other_canceled":"Аннулирован: другая или неизвестная причина"}[state]
         add("ФНС",label)
-        if (state=="active" and j.get("tax_state")=="canceled") or (state!="active" and j.get("tax_state")!="canceled"):
+        fiscal_ok=((state=="active" and j.get("tax_state")=="done" and j.get("refund_state")=="none")
+                   or (state=="refund" and j.get("tax_state")=="canceled" and j.get("refund_state")=="full_done"))
+        if not fiscal_ok:
             add("Чек","Расхождение с локальным статусом")
     except Exception:
         add("ФНС","Не удалось подтвердить состояние чека")
+    if provider_ok and fiscal_ok and j.get("vpn_state")=="done":
+        # The VPN state is local; no live VPN check is claimed.
+        result["ok"]=True
+        result["summary"]="Расхождений по оплате, возврату и чеку не обнаружено."
     return result
