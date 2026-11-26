@@ -321,6 +321,7 @@ async def tax_worker_context(app):
     from tax_fulfillment import drain_queue, interrupted_count
     from refund_fulfillment import drain_refunds
     from payment_admin_alerts import alert_worker
+    from system_monitor import monitor_worker, delivery_worker
 
     async def worker():
         while True:
@@ -336,12 +337,16 @@ async def tax_worker_context(app):
 
     task = asyncio.create_task(worker())
     alerts = asyncio.create_task(alert_worker(DB_PATH))
+    monitoring = asyncio.create_task(monitor_worker(DB_PATH))
+    monitor_delivery = asyncio.create_task(delivery_worker(DB_PATH))
     try:
         yield
     finally:
         task.cancel()
         alerts.cancel()
-        for pending in (task, alerts):
+        monitoring.cancel()
+        monitor_delivery.cancel()
+        for pending in (task, alerts, monitoring, monitor_delivery):
             with suppress(asyncio.CancelledError):
                 await pending
 

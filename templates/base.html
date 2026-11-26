@@ -911,6 +911,9 @@
 
         <div class="nav">
             <div class="nav-section">Основное</div>
+            <a class="nav-link {% if request.url.path == '/monitoring' %}active{% endif %}" href="/monitoring">
+                <i class="fas fa-heart-pulse"></i> Мониторинг
+            </a>
             <a class="nav-link {% if request.url.path == '/dashboard' %}active{% endif %}" href="/dashboard">
                 <i class="fas fa-chart-simple"></i> Дашборд
             </a>

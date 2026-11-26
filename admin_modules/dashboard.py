@@ -45,3 +45,21 @@ async def dashboard_panels(request: Request):
                 return JSONResponse({"detail":"Unavailable"},status_code=503,headers=HEADERS)
             _panel_until=time.monotonic()+30
         return JSONResponse(_panel_cache,headers=HEADERS)
+
+
+@dashboard_router.get("/monitoring",response_class=HTMLResponse)
+async def monitoring(request: Request):
+    if not check_auth(request):
+        return RedirectResponse("/",status_code=303,headers=HEADERS)
+    from system_monitor import history
+    from dashboard_metrics import MSK
+    from datetime import datetime
+    data=await asyncio.to_thread(history,DB)
+    def fmt(stamp):
+        return datetime.fromtimestamp(stamp,MSK).strftime("%d.%m.%Y %H:%M:%S") if stamp is not None else "—"
+    data["heartbeat"]=fmt(data["heartbeat"])
+    for row in data["states"]:
+        row["checked_at"]=fmt(row["checked_at"])
+    for row in data["events"]:
+        row["occurred_at"]=fmt(row["occurred_at"])
+    return templates.TemplateResponse("monitoring.html",{"request":request,**data},headers=HEADERS)
