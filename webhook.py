@@ -110,7 +110,14 @@ async def get_tariff_info(tariff_id: int) -> Optional[Dict]:
 async def process_payment_success(payment_id, data):
     """Fulfill a payment previously verified through YooKassa API."""
     from payment_fulfillment import process_verified_payment
-    return await process_verified_payment(payment_id, data)
+    success = await process_verified_payment(payment_id, data)
+    if success:
+        try:
+            from tax_fulfillment import process_tax_receipt
+            await process_tax_receipt(payment_id, db_path=DB_PATH)
+        except Exception as exc:
+            logger.error('Receipt workflow requires review: %s', type(exc).__name__)
+    return success
 
 
 # ============================================================
