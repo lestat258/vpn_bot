@@ -66,7 +66,7 @@ def _subscription_qr(link):
         return output.getvalue()
 
 
-async def _telegram_notify(telegram_id, text, link):
+async def _telegram_notify(telegram_id, text, link, *, include_guide=True):
     from aiogram import Bot
     from aiogram.exceptions import TelegramBadRequest
     from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
@@ -81,7 +81,7 @@ async def _telegram_notify(telegram_id, text, link):
         token = raw_token
     markup = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="📖 Инструкция по подключению", callback_data="paid_key_guide")
-    ]])
+    ]]) if include_guide else None
     bot = Bot(token=token)
     try:
         if link:

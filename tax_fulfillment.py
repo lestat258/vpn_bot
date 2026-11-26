@@ -5,6 +5,7 @@ rows are deliberately not eligible; reconcile those with FNS separately.
 import asyncio
 import base64
 import logging
+import re
 import sqlite3
 import tempfile
 import uuid
@@ -136,6 +137,15 @@ def validated_operation_time(value):
     return value
 
 
+def public_receipt_url(inn, receipt_uuid):
+    """Public FNS print endpoint, verified against a real receipt."""
+    if not isinstance(inn, str) or not re.fullmatch(r"[0-9]{12}", inn):
+        raise ValueError("Invalid taxpayer identifier")
+    if not isinstance(receipt_uuid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", receipt_uuid):
+        raise ValueError("Invalid receipt identifier")
+    return f"https://lknpd.nalog.ru/api/v1/receipt/{inn}/{receipt_uuid}/print"
+
+
 async def issue(path, amount, description, operation_time):
     from nalogo import Client
     inn, password = await asyncio.to_thread(credentials, path)
@@ -152,9 +162,7 @@ async def issue(path, amount, description, operation_time):
         if not isinstance(receipt_uuid, str) or not receipt_uuid:
             raise RuntimeError("Missing receipt UUID")
         # The result is committed locally before any Telegram notification.
-        url = client.receipt().print_url(receipt_uuid)
-        if not isinstance(url, str) or not url.startswith("https://"):
-            raise RuntimeError("Invalid receipt URL")
+        url = public_receipt_url(inn, receipt_uuid)
         return receipt_uuid, url
 
 
@@ -163,7 +171,7 @@ async def notify(user_id, url):
     from payment_fulfillment import _telegram_notify
     await _telegram_notify(user_id,
                            '🧾 <b>Чек об оплате</b>\n<a href="' + escape(url, quote=True) + '">Открыть чек</a>',
-                           None)
+                           None, include_guide=False)
 
 
 async def process_tax_receipt(payment_id, *, db_path="/opt/vpn-bot/data.db",

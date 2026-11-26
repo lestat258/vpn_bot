@@ -2,8 +2,9 @@ import asyncio
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
 from pathlib import Path
-from tax_fulfillment import process_tax_receipt, queue_verified, disable_income_retry, validated_operation_time, drain_queue, TaxReviewRequired, claim, interrupted_count
+from tax_fulfillment import process_tax_receipt, queue_verified, disable_income_retry, validated_operation_time, drain_queue, TaxReviewRequired, claim, interrupted_count, public_receipt_url, notify
 from payment_ledger import PaymentLedger
 
 
@@ -213,6 +214,26 @@ class TaxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state(), "needs_review")
         await self.drain()
         self.assertEqual(self.calls, 0)
+
+    async def test_public_receipt_url(self):
+        self.assertEqual(public_receipt_url("123456789012", "test-123"),
+                         "https://lknpd.nalog.ru/api/v1/receipt/123456789012/test-123/print")
+        for invalid in ("../other", "a/b", "a?b", "", None):
+            with self.assertRaises(ValueError):
+                public_receipt_url("123456789012", invalid)
+        with self.assertRaises(ValueError):
+            public_receipt_url("1234", "test-123")
+
+    async def test_receipt_notification_has_no_vpn_guide(self):
+        with patch("payment_fulfillment._telegram_notify", new_callable=AsyncMock) as send:
+            url = public_receipt_url("123456789012", "test-123")
+            await notify(100, url)
+            send.assert_awaited_once()
+            args, kwargs = send.await_args
+            self.assertEqual(args[0], 100)
+            self.assertIn(url, args[1])
+            self.assertIsNone(args[2])
+            self.assertEqual(kwargs, {"include_guide": False})
 
     async def test_existing_receipt_held(self):
         self.queue()
