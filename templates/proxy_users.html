@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Прокси-пользователи{% endblock %}
+{% block content %}
+<h1>Прокси-пользователи</h1>
+{% if enabled %}
+<p>Учётные записи Squid. После удаления ранее подтверждённый доступ может сохраняться до истечения срока кэша Squid.</p>
+<form method="post" action="/proxy-users/add" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Логин <input name="username" required maxlength="64" pattern="[A-Za-z0-9_.\-]{1,64}"></label>
+    <label>Пароль <input name="password" required type="password" minlength="12" maxlength="72" autocomplete="new-password"></label>
+    <button type="submit" class="btn btn-primary">Добавить</button>
+</form>
+<h2>Учётные записи</h2>
+{% if usernames %}
+<table>
+    <thead><tr><th scope="col">Логин</th><th scope="col">Действие</th></tr></thead>
+    <tbody>
+    {% for username in usernames %}
+    <tr><td>{{ username }}</td><td>
+        <form method="post" action="/proxy-users/delete" onsubmit="return confirm('Удалить этого прокси-пользователя?')">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="username" value="{{ username }}">
+            <button type="submit" class="btn btn-danger" aria-label="Удалить {{ username }}">Удалить</button>
+        </form>
+    </td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>Пользователей пока нет.</p>
+{% endif %}
+{% else %}
+<p>Раздел появится после подключения файла пользователей Squid на сервере.</p>
+{% endif %}
+{% endblock %}

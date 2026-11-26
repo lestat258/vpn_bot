@@ -52,7 +52,8 @@ class ConnectionPool:
             
             self._stats['misses'] += 1
             self._stats['created'] += 1
-            conn = sqlite3.connect(DB_PATH)
+            # A pooled connection can be checked out by another request thread.
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("PRAGMA journal_mode = WAL")  # Улучшает производительность
