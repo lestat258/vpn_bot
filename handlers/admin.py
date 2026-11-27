@@ -457,6 +457,19 @@ async def send_message_process(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Ошибка отправки: {e}")
         await state.clear()
 
+def admin_balance_keyboard(telegram_id, *, review=False):
+    buttons = []
+    if not review:
+        buttons.extend([
+            [types.InlineKeyboardButton(text="💰 Пополнить", callback_data=f"user_deposit_{telegram_id}")],
+            [types.InlineKeyboardButton(text="💸 Списать", callback_data=f"user_withdraw_{telegram_id}")]
+        ])
+    else:
+        buttons.append([types.InlineKeyboardButton(text="🔍 Проверить баланс", callback_data=f"user_balance_{telegram_id}")])
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_back_to_{telegram_id}")])
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 @router.callback_query(F.data.startswith("user_balance_"))
 async def admin_user_balance(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
@@ -478,11 +491,7 @@ async def admin_user_balance(callback: types.CallbackQuery):
 
     balance = user[0] or 0
 
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="💰 Пополнить", callback_data=f"user_deposit_{telegram_id}")],
-        [types.InlineKeyboardButton(text="💸 Списать", callback_data=f"user_withdraw_{telegram_id}")],
-        [types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_back_to_{telegram_id}")]
-    ])
+    kb = admin_balance_keyboard(telegram_id)
 
     await callback.message.edit_text(
         f"💰 <b>Баланс пользователя</b>\n\n"
@@ -505,37 +514,61 @@ async def admin_deposit_start(callback: types.CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text(
         "💰 <b>Пополнение баланса</b>\n\n"
-        "Введите сумму пополнения (в рублях):",
+        "Введите сумму пополнения (в рублях) или /cancel для отмены:",
         parse_mode="HTML"
     )
     await callback.answer()
 
-@router.message(AdminDeposit.amount)
-async def admin_deposit_process(message: types.Message, state: FSMContext):
-    if message.from_user.id!=ADMIN_ID:
+async def admin_balance_operation(message, state, *, withdraw):
+    if message.from_user.id != ADMIN_ID:
         await state.clear()
         await message.answer("⛔ Доступ запрещён")
         return
-    raw=(message.text or "").strip()
-    if raw=="/cancel":
-        await state.clear()
-        await message.answer("❌ Операция отменена")
-        return
+
+    owner = None
     try:
-        data=await state.get_data()
-        owner=int(data["user_id"])
-        amount=raw.replace(",",".")
-        n=kopecks(amount,positive=True,maximum=10000000)
-        balance,changed=await asyncio.to_thread(admin_adjust,DB_PATH,
-            f"admin:{message.chat.id}:{message.message_id}",owner,message.from_user.id,amount,withdraw=False)
+        data = await state.get_data()
+        owner = int(data["user_id"])
+        if owner <= 0:
+            owner = None
+            raise ValueError("Invalid user")
+    except (ValueError, KeyError, TypeError):
         await state.clear()
-        await message.answer(f"✅ Пополнение: {rubles(n):.2f} ₽\nБаланс после операции: {rubles(balance):.2f} ₽")
-    except (ValueError,KeyError,TypeError):
-        await message.answer("Операция недоступна: проверьте сумму, остаток и наличие блокировки средств.")
-    except Exception:
-        logging.error("Administrative balance operation requires review")
-        await state.clear()
-        await message.answer("Результат операции не подтверждён. Проверьте журнал перед повтором.")
+        await message.answer("Пользователь не выбран. Откройте его карточку заново.")
+        return
+
+    raw = (message.text or "").strip()
+    review = False
+    if raw == "/cancel":
+        text = "❌ Операция отменена"
+    else:
+        try:
+            amount = raw.replace(",", ".")
+            n = kopecks(amount, positive=True, maximum=10000000)
+            balance, changed = await asyncio.to_thread(
+                admin_adjust, DB_PATH,
+                f"admin:{message.chat.id}:{message.message_id}",
+                owner, message.from_user.id, amount, withdraw=withdraw)
+            label = "Списание" if withdraw else "Пополнение"
+            text = (f"✅ {label}: {rubles(n):.2f} ₽\n"
+                    f"Баланс после операции: {rubles(balance):.2f} ₽")
+            if not changed:
+                text = "Операция уже учтена.\n" + text
+        except (ValueError, KeyError, TypeError):
+            text = "Операция недоступна: проверьте сумму, остаток и наличие блокировки средств."
+        except Exception:
+            logging.error("Administrative balance operation requires review")
+            text = "Результат операции не подтверждён. Проверьте журнал перед повтором."
+            review = True
+    # Return to the menu, never leave an input state active under navigation.
+    await state.clear()
+    await message.answer(text, reply_markup=admin_balance_keyboard(owner, review=review))
+
+
+@router.message(AdminDeposit.amount)
+async def admin_deposit_process(message: types.Message, state: FSMContext):
+    await admin_balance_operation(message, state, withdraw=False)
+
 
 
 @router.callback_query(F.data.startswith("user_withdraw_"))
@@ -550,37 +583,15 @@ async def admin_withdraw_start(callback: types.CallbackQuery, state: FSMContext)
 
     await callback.message.answer(
         "💸 <b>Списание баланса</b>\n\n"
-        "Введите сумму списания (в рублях):",
+        "Введите сумму списания (в рублях) или /cancel для отмены:",
         parse_mode="HTML"
     )
     await callback.answer()
 
 @router.message(AdminWithdraw.amount)
 async def admin_withdraw_process(message: types.Message, state: FSMContext):
-    if message.from_user.id!=ADMIN_ID:
-        await state.clear()
-        await message.answer("⛔ Доступ запрещён")
-        return
-    raw=(message.text or "").strip()
-    if raw=="/cancel":
-        await state.clear()
-        await message.answer("❌ Операция отменена")
-        return
-    try:
-        data=await state.get_data()
-        owner=int(data["user_id"])
-        amount=raw.replace(",",".")
-        n=kopecks(amount,positive=True,maximum=10000000)
-        balance,changed=await asyncio.to_thread(admin_adjust,DB_PATH,
-            f"admin:{message.chat.id}:{message.message_id}",owner,message.from_user.id,amount,withdraw=True)
-        await state.clear()
-        await message.answer(f"✅ Списание: {rubles(n):.2f} ₽\nБаланс после операции: {rubles(balance):.2f} ₽")
-    except (ValueError,KeyError,TypeError):
-        await message.answer("Операция недоступна: проверьте сумму, остаток и наличие блокировки средств.")
-    except Exception:
-        logging.error("Administrative balance operation requires review")
-        await state.clear()
-        await message.answer("Результат операции не подтверждён. Проверьте журнал перед повтором.")
+    await admin_balance_operation(message, state, withdraw=True)
+
 
 
 @router.callback_query(F.data.startswith("user_block_"))
