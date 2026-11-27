@@ -505,13 +505,20 @@ async def process_promocode_input(message: types.Message, state: FSMContext):
     discount_text = None
     with closing(sqlite3.connect(DB_PATH)) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
+        from promo_reservations import has_open
         c = conn.cursor()
+        if has_open(conn,owner):
+            error = "❌ Сначала завершите ожидающий счёт со скидкой."
+        elif c.execute("SELECT 1 FROM settings WHERE key=? AND value<>''", (f"promocode_user_{owner}",)).fetchone():
+            error = "❌ У вас уже есть активированный ручной промокод."
         c.execute("""
             SELECT id, discount_percent, discount_amount, valid_until, max_uses, used_count
             FROM promocodes WHERE code = ? AND is_active = 1
         """, (code,))
         promo = c.fetchone()
-        if not promo:
+        if error is not None:
+            pass
+        elif not promo:
             error = "❌ Промокод не найден или неактивен"
         else:
             pid, percent, amount, valid_until, max_uses, used_count = promo

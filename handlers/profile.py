@@ -521,6 +521,10 @@ def promo_menu_content(owner):
     status = trigger_manager.get_user_trigger_status(owner)
 
     text = "🎫 <b>Промокоды и достижения</b>\n\n"
+    from promo_reservations import open_reservation
+    pending = open_reservation(DB_PATH,owner)
+    if pending:
+        text += "⏳ Скидка зарезервирована в ожидающем счёте.\n\n"
 
     if active:
         text += "🟢 <b>Ваши промокоды:</b>\n\n"
@@ -564,6 +568,7 @@ def promo_menu_content(owner):
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="🎫 Мои промокоды", callback_data="my_promocodes")],
+        [types.InlineKeyboardButton(text="🧾 Ожидающий счёт со скидкой", callback_data="promo_pending")],
         [types.InlineKeyboardButton(text="🏆 Все достижения", callback_data="my_achievements")],
         [types.InlineKeyboardButton(text="🏷️ Ввести промокод", callback_data="profile_promocode")],
         [types.InlineKeyboardButton(text="📖 Как это работает", callback_data="achievements_help")],
@@ -655,16 +660,16 @@ async def apply_promo_confirm(callback: types.CallbackQuery):
     discount_text = f"{promo['discount_percent']}%" if promo['discount_percent'] > 0 else f"{promo['discount_amount']}₽"
     days_left = (datetime.fromisoformat(promo['expires_at']) - datetime.now()).days
 
-    text = f"🎫 <b>Применить промокод?</b>\n\n"
+    text = f"🎫 <b>Промокод</b>\n\n"
     text += f"📌 <b>{promo['code']}</b>\n"
     text += f"💰 Скидка: {discount_text}\n"
     text += f"⏳ Действует: {days_left} дн.\n\n"
-    text += "Промокод будет применён к следующей покупке.\n"
+    text += "При покупке сравнивается первая действующая награда и ручной промокод. Применяется большая скидка.\n"
     text += "⚠️ Промокоды не суммируются!"
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="✅ Да, применить", callback_data=f"confirm_apply_promo_{promo_id}")],
-        [types.InlineKeyboardButton(text="❌ Нет, отмена", callback_data="my_promocodes")]
+        [types.InlineKeyboardButton(text="К тарифам", callback_data="back_to_tariffs")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="my_promocodes")]
     ])
 
     await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
@@ -678,7 +683,7 @@ async def confirm_apply_promo(callback: types.CallbackQuery):
     promo_id = int(callback.data.replace("confirm_apply_promo_", ""))
 
     if trigger_manager.use_promocode(callback.from_user.id, promo_id):
-        await callback.answer("✅ Промокод применён!", show_alert=True)
+        await callback.answer("Награда доступна. Скидка определяется при покупке.", show_alert=True)
     else:
         await callback.answer("❌ Не удалось применить", show_alert=True)
     await show_my_promocodes(callback)

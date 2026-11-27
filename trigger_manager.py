@@ -2,6 +2,7 @@
 Модуль управления триггерами для промокодов
 """
 from runtime_config import DB_PATH
+from promo_reservations import has_schema
 import sqlite3
 import json
 import logging
@@ -283,42 +284,9 @@ class TriggerManager:
         return promocodes
     
     def use_promocode(self, user_id: int, promocode_id: int) -> bool:
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        c.execute('''
-            SELECT id, code, discount_percent, discount_amount, is_used, expires_at
-            FROM user_promocodes
-            WHERE id = ? AND user_id = ? AND is_used = 0
-        ''', (promocode_id, user_id))
-        promo = c.fetchone()
-        
-        if not promo:
-            conn.close()
-            return False
-        
-        expires_at = datetime.fromisoformat(promo[5])
-        if datetime.now() > expires_at:
-            conn.close()
-            return False
-        
-        c.execute('''
-            UPDATE user_promocodes 
-            SET is_used = 1, used_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-        ''', (promocode_id,))
-        
-        c.execute('''
-            INSERT INTO promocode_uses (promocode_id, user_id, source)
-            VALUES (?, ?, ?)
-        ''', (promo[0], user_id, f'user_promocode_{promo[1]}'))
-        
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"✅ Промокод {promo[1]} использован пользователем {user_id}")
-        return True
-    
+        """Compatibility: selecting a reward must never consume it."""
+        return any(p["id"]==promocode_id for p in self.get_user_promocodes(user_id))
+
     def is_promocode_applied(self, user_id: int, promocode_id: int) -> bool:
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
@@ -374,27 +342,18 @@ class TriggerManager:
         return status
     
     def cleanup_expired_promocodes(self, user_id: int = None):
-        """Очищает истёкшие промокоды"""
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        if user_id:
-            c.execute('''
-                DELETE FROM user_promocodes
-                WHERE user_id = ? AND expires_at < datetime('now') AND is_used = 0
-            ''', (user_id,))
-        else:
-            c.execute('''
-                DELETE FROM user_promocodes
-                WHERE expires_at < datetime('now') AND is_used = 0
-            ''')
-        
-        deleted = c.rowcount
-        conn.commit()
-        conn.close()
-        
-        if deleted > 0:
-            logger.info(f"✅ Удалено {deleted} истёкших промокодов")
-        return deleted
+        """Never delete a reward tied to an unresolved checkout."""
+        from contextlib import closing
+        with closing(sqlite3.connect(self.db_path,timeout=15)) as conn,conn:
+            conn.execute("BEGIN IMMEDIATE")
+            sql="DELETE FROM user_promocodes WHERE datetime(expires_at)<=datetime('now') AND is_used=0"
+            args=()
+            if user_id:
+                sql+=" AND user_id=?"
+                args=(user_id,)
+            if has_schema(conn):
+                sql+=" AND NOT EXISTS (SELECT 1 FROM promo_reservations r WHERE r.reward_id=user_promocodes.id AND r.state IN ('reserved','attached'))"
+            return conn.execute(sql,args).rowcount
+
 
 trigger_manager = TriggerManager()

@@ -1,0 +1,96 @@
+"""Provider integration for durable discount reservations."""
+import hashlib
+import sqlite3
+from contextlib import closing
+from balance_ledger import kopecks,rubles
+from promo_reservations import (
+    reserve,attach,payable,metadata_for,open_reservation,validate_binding,
+    ReservationConflict,ReservationBusy,
+)
+
+
+def request_key(bot_id,callback_id):
+    return hashlib.sha256(f"vpn4us-checkout:{bot_id}:{callback_id}".encode()).hexdigest()
+
+
+def provider_fields(payment,metadata,amount):
+    actual=getattr(payment,"metadata",None)
+    if not isinstance(actual,dict):
+        raise ReservationConflict("Provider metadata unavailable")
+    for k,v in metadata.items():
+        if k=="subscription_id" and v in (None,"") and actual.get(k) in (None,""):
+            continue
+        if str(actual.get(k))!=str(v):
+            raise ReservationConflict("Provider metadata mismatch")
+    if not metadata.get("promo_reservation_id") and actual.get("promo_reservation_id"):
+        raise ReservationConflict("Unexpected discount reservation")
+    if payment.amount.currency!="RUB" or kopecks(payment.amount.value,positive=True)!=amount:
+        raise ReservationConflict("Provider amount mismatch")
+    pid=getattr(payment,"id",None)
+    if not isinstance(pid,str) or not pid or len(pid)>128:
+        raise ReservationConflict("Provider ID unavailable")
+    return pid
+
+
+def payment_link(payment):
+    url=getattr(getattr(payment,"confirmation",None),"confirmation_url",None)
+    return url if isinstance(url,str) and url.startswith("https://") else None
+
+
+def create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,username,*,action="new_key",subscription_id=None):
+    row,fresh=reserve(path,checkout_id,owner,tariff_id,price,action=action,subscription_id=subscription_id)
+    if row and not fresh:
+        raise ReservationBusy("Already attempted")
+    original=kopecks(price,positive=True)
+    amount=payable(row) if row else original
+    discount=original-amount
+    metadata=metadata_for(row) if row else {
+        "telegram_id":owner,"tariff_id":tariff_id,"action":action,
+        "subscription_id":subscription_id if subscription_id is not None else "",
+    }
+    metadata={k:str(v) for k,v in metadata.items()}
+    payload={
+        "amount":{"value":f"{rubles(amount):.2f}","currency":"RUB"},
+        "confirmation":{"type":"redirect","return_url":f"https://t.me/{username}"},
+        "capture":True,
+        "description":f"VPN {name}"[:128],
+        "metadata":metadata,
+    }
+    payment=provider.create(payload,checkout_id)
+    pid=provider_fields(payment,metadata,amount)
+    if row:
+        attach(path,checkout_id,pid,payment.metadata,payment.amount.value)
+    else:
+        with closing(sqlite3.connect(path,timeout=15)) as db,db:
+            db.execute("BEGIN IMMEDIATE")
+            existing=db.execute("SELECT telegram_id,tariff_id,amount_rub,status FROM payments WHERE payment_id=?",(pid,)).fetchone()
+            if existing is None:
+                db.execute("INSERT INTO payments(payment_id,telegram_id,tariff_id,amount_rub,status) VALUES(?,?,?,?,'pending')",
+                    (pid,owner,tariff_id,str(rubles(amount))))
+            elif existing[:2]!=(owner,tariff_id) or kopecks(existing[2])!=amount or existing[3]!="pending":
+                raise ReservationConflict("Existing payment differs")
+    return amount,discount,payment_link(payment)
+
+
+def check_open_checkout(path,provider,owner):
+    """Read only the owner's attached provider order, except verified cancellation."""
+    row=open_reservation(path,owner)
+    if not row:
+        return "none",None,None
+    if row["state"]=="reserved":
+        return "review",payable(row),None
+    pid=row["payment_id"]
+    payment=provider.find_one(pid)
+    if provider_fields(payment,metadata_for(row),payable(row))!=pid:
+        raise ReservationConflict("Wrong provider payment")
+    validate_binding(path,pid,payment.metadata,payment.amount.value)
+    status=payment.status
+    if status=="canceled" and payment.paid is False and getattr(payment,"captured_at",None) is None:
+        from refund_fulfillment import record_canceled
+        result=record_canceled(path,pid,metadata=payment.metadata,amount=payment.amount.value)
+        return ("canceled" if result=="done" else "review"),payable(row),None
+    if status=="pending" and payment.paid is False:
+        return "pending",payable(row),payment_link(payment)
+    if status=="succeeded" and payment.paid is True:
+        return "paid",payable(row),None
+    return "review",payable(row),None
