@@ -1,3 +1,4 @@
+from runtime_config import DB_PATH, TEMPLATE_DIR
 from fastapi.responses import RedirectResponse
 """Модуль авторизации и аутентификации"""
 import uuid
@@ -12,7 +13,7 @@ from two_factor_auth import two_factor_auth
 
 # Создаем роутер
 auth_router = APIRouter(tags=["auth"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 logger = logging.getLogger(__name__)
 
 # Хранилище сессий
@@ -30,7 +31,7 @@ def log_admin_action(admin_id, action, details=None, ip=None):
     """Логирование действий администратора"""
     try:
         import sqlite3
-        conn = sqlite3.connect('/opt/vpn-bot/data.db')
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('INSERT INTO admin_logs (admin_id, action, details, ip) VALUES (?, ?, ?, ?)',
                   (admin_id, action, details, ip))

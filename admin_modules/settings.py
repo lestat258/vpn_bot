@@ -1,3 +1,4 @@
+from runtime_config import TEMPLATE_DIR
 from fastapi.responses import RedirectResponse
 """Модуль настроек"""
 from fastapi import APIRouter, Request, Form
@@ -8,7 +9,7 @@ from .auth import check_auth, log_admin_action
 from database import get_all_settings, set_setting
 
 settings_router = APIRouter(tags=["settings"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 @settings_router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):

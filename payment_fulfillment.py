@@ -5,6 +5,7 @@ and verifying succeeded/paid, amount, currency and metadata. This module never
 verifies the original payment itself, never creates tax receipts and never
 retries external effects whose outcomes may be uncertain.
 """
+from runtime_config import DB_PATH
 import asyncio
 import logging
 import sqlite3
@@ -16,7 +17,7 @@ from pathlib import Path
 from payment_ledger import PaymentLedger
 
 LOG = logging.getLogger(__name__)
-DEFAULT_DB = '/opt/vpn-bot/data.db'
+DEFAULT_DB = DB_PATH
 
 
 def _load_payment(db_path, payment_id):

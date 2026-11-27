@@ -1,6 +1,7 @@
 """
 Административные хендлеры бота
 """
+from runtime_config import BACKUP_DIR, DB_PATH
 import logging
 import sqlite3
 import json
@@ -44,7 +45,7 @@ from server_manager import server_manager
 from backup_manager import backup_manager
 
 router = Router()
-DB_PATH = '/opt/vpn-bot/data.db'
+
 ADMIN_ID = int(get_setting('admin_id') or 812021055)
 
 # Временное хранилище для продления
@@ -1640,7 +1641,7 @@ async def backup_create(callback: types.CallbackQuery):
         await callback.message.edit_text(
             f"✅ <b>Бэкап создан!</b>\n\n"
             f"📅 Дата: {result['timestamp']}\n"
-            f"📁 Папка: /opt/vpn-bot/backups/",
+            f"📁 Папка: {BACKUP_DIR}/",
             reply_markup=get_back_keyboard("backup_menu_back"),
             parse_mode="HTML"
         )

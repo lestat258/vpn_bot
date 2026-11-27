@@ -1,6 +1,7 @@
 """
 Модуль для рассылки сообщений
 """
+from runtime_config import DB_PATH
 import sqlite3
 import asyncio
 import logging
@@ -26,7 +27,7 @@ async def send_broadcast_with_text(text):
         return 0
     
     bot = Bot(token=bot_token)
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT telegram_id FROM users WHERE is_blocked = 0')
     users = c.fetchall()

@@ -3,12 +3,13 @@
 Call claim() only after independent YooKassa verification.  Never automatically
 retry an externally attempted VPN action whose outcome is uncertain.
 """
+from runtime_config import DB_PATH
 import sqlite3
 from contextlib import contextmanager
 
 
 class PaymentLedger:
-    def __init__(self, path='/opt/vpn-bot/data.db'):
+    def __init__(self, path=DB_PATH):
         self.path = path
 
     @contextmanager

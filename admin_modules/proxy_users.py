@@ -1,4 +1,5 @@
 """Manage the configured Squid NCSA credentials file."""
+from runtime_config import TEMPLATE_DIR
 import fcntl
 import hmac
 import logging
@@ -18,7 +19,7 @@ from fastapi.templating import Jinja2Templates
 from .auth import check_auth
 
 proxy_router = APIRouter(prefix="/proxy-users")
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 logger = logging.getLogger(__name__)
 csrf_key = secrets.token_bytes(32)
 valid_username = re.compile(r"[A-Za-z0-9_.-]{1,64}")

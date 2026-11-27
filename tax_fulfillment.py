@@ -2,6 +2,7 @@
 Never repeat an ambiguous external income registration. Historical not_started
 rows are deliberately not eligible; reconcile those with FNS separately.
 """
+from runtime_config import DB_PATH
 import asyncio
 import base64
 import logging
@@ -181,7 +182,7 @@ async def notify(user_id, url):
                            None, include_guide=False)
 
 
-async def process_tax_receipt(payment_id, *, db_path="/opt/vpn-bot/data.db",
+async def process_tax_receipt(payment_id, *, db_path=DB_PATH,
                               issuer=None, notifier=None, operation_time=None):
     claimed = await asyncio.to_thread(claim, db_path, payment_id)
     if claimed is None:

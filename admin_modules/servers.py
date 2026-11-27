@@ -1,3 +1,4 @@
+from runtime_config import DB_PATH, TEMPLATE_DIR
 from fastapi.responses import RedirectResponse
 """Модуль управления серверами"""
 from fastapi import APIRouter, Request, Form
@@ -12,7 +13,7 @@ from encryption import encrypt
 from server_manager import server_manager
 
 servers_router = APIRouter(tags=["servers"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 def generate_short_email(telegram_id, username=None):
     """Генерация email для клиента"""
@@ -33,7 +34,7 @@ async def servers_page(request: Request):
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT id, name, url, CASE WHEN LENGTH(api_token)>0 THEN 'configured' ELSE '' END AS api_token, is_active, status, online_count, sub_url FROM servers")
     servers = c.fetchall()
@@ -58,7 +59,7 @@ async def add_server(request: Request,
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     encrypted_token = encrypt(api_token)
     c.execute('INSERT INTO servers (name, url, api_token, is_active, status, sub_url) VALUES (?,?,?,?,?,?)',
@@ -84,7 +85,7 @@ async def delete_server(request: Request, server_id: int):
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT name FROM servers WHERE id = ?', (server_id,))
     server = c.fetchone()
@@ -106,7 +107,7 @@ async def edit_server_page(request: Request, server_id: int):
     if not check_auth(request):
         return RedirectResponse('/login', status_code=303)
 
-    database_file = Path(__file__).resolve().parents[1] / 'data.db'
+    database_file = Path(DB_PATH)
     conn = sqlite3.connect(str(database_file))
     try:
         conn.row_factory = sqlite3.Row
@@ -180,7 +181,7 @@ async def edit_server(
     if not check_https(url) or (sub_url and not check_https(sub_url)):
         raise HTTPException(status_code=400, detail='Only HTTPS URLs are supported')
 
-    database_file = Path(__file__).resolve().parents[1] / 'data.db'
+    database_file = Path(DB_PATH)
     conn = sqlite3.connect(str(database_file), timeout=15)
     try:
         with conn:
@@ -261,7 +262,7 @@ async def stage4_inbounds_page(request: Request, server_id: int):
     from inbound_policy import get_policy
     if not check_auth(request):
         return RedirectResponse('/login', status_code=303)
-    db_path = Path(__file__).resolve().parents[1] / 'data.db'
+    db_path = Path(DB_PATH)
     con = sqlite3.connect(str(db_path))
     con.row_factory = sqlite3.Row
     try:
@@ -309,7 +310,7 @@ async def stage4_save_inbounds(
     cookie = request.cookies.get('vpn_bot_inbound_csrf', '')
     if not cookie or not secrets.compare_digest(cookie, csrf):
         raise HTTPException(status_code=403, detail='Invalid CSRF token')
-    db_path = Path(__file__).resolve().parents[1] / 'data.db'
+    db_path = Path(DB_PATH)
     con = sqlite3.connect(str(db_path))
     con.row_factory = sqlite3.Row
     try:

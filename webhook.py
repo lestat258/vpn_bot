@@ -2,6 +2,7 @@
 """
 Webhook сервер для обработки платежей ЮKassa
 """
+from runtime_config import DB_PATH
 import logging
 import json
 import sqlite3
@@ -33,7 +34,6 @@ logger = logging.getLogger(__name__)
 # КОНСТАНТЫ
 # ============================================================
 
-DB_PATH = '/opt/vpn-bot/data.db'
 
 # ============================================================
 # БАЗА ДАННЫХ (контекстный менеджер)

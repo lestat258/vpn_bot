@@ -3,6 +3,7 @@
 Модуль для работы с API «Мой налог» (самозанятые)
 """
 
+from runtime_config import DB_PATH
 import logging
 import sqlite3
 from decimal import Decimal
@@ -70,7 +71,7 @@ class TaxManager:
                     
                     # Сохраняем в БД
                     if payment_id:
-                        conn = sqlite3.connect('/opt/vpn-bot/data.db')
+                        conn = sqlite3.connect(DB_PATH)
                         c = conn.cursor()
                         c.execute('''
                             INSERT INTO tax_receipts (payment_id, receipt_uuid, receipt_url, amount, description, user_id)

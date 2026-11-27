@@ -1,6 +1,7 @@
 """
 Вспомогательные функции для бота
 """
+from runtime_config import DB_PATH
 import hashlib
 import sqlite3
 import logging
@@ -11,7 +12,6 @@ from typing import Optional, Tuple, List, Dict
 from xui_client import XUIClient
 from server_manager import server_manager
 
-DB_PATH = '/opt/vpn-bot/data.db'
 
 def generate_short_email(telegram_id, username=None):
     """Генерирует короткий email для клиента"""

@@ -4,6 +4,7 @@ Manual opt-in only; NO cron, NO timers, NO web UI mutations.
 Use --dry-run for no writes. The explicit --apply path is intentionally disabled
 until a distinct owned test subscription is provisioned and reviewed.
 """
+from runtime_config import DB_PATH
 import argparse
 import fcntl
 import json
@@ -17,8 +18,7 @@ from urllib.parse import quote, urlsplit
 
 from subscription_sync_plan import build_plan, index_inbounds
 
-ROOT = Path(__file__).resolve().parent
-DB = ROOT / 'data.db'
+DB = Path(DB_PATH)
 LOCKDIR = Path('/run/lock')
 STOP_UNITS = ('vpn-bot', 'vpn-admin', 'vpn-webhook')
 

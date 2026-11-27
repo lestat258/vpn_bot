@@ -1,4 +1,5 @@
 """Модуль безопасности (2FA, смена пароля, логи)"""
+from runtime_config import DB_PATH, TEMPLATE_DIR
 import sqlite3
 from fastapi import APIRouter, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -9,7 +10,7 @@ from database import get_setting, set_setting, get_all_settings
 from two_factor_auth import two_factor_auth
 
 security_router = APIRouter(tags=["security"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 # ============ 2FA ============
 
@@ -114,7 +115,7 @@ async def admin_logs_page(request: Request):
     if not check_auth(request):
         return RedirectResponse("/")
     
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''SELECT id, admin_id, action, details, ip, created_at
                  FROM admin_logs ORDER BY created_at DESC LIMIT 100''')

@@ -1,3 +1,4 @@
+from runtime_config import DB_PATH, TEMPLATE_DIR
 from fastapi.responses import RedirectResponse
 """Модуль рассылок"""
 import asyncio
@@ -9,7 +10,7 @@ import sqlite3
 from .auth import check_auth, log_admin_action
 
 broadcast_router = APIRouter(tags=["broadcast"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 async def process_broadcast(broadcast_id):
     """Обработка рассылки в фоне"""
@@ -27,7 +28,7 @@ async def process_broadcast(broadcast_id):
         pass
 
     bot = Bot(token=bot_token)
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
     c.execute('SELECT message, filter FROM broadcasts WHERE id = ?', (broadcast_id,))
@@ -66,7 +67,7 @@ async def process_broadcast(broadcast_id):
         except:
             pass
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''UPDATE broadcasts
                  SET sent_at = CURRENT_TIMESTAMP, status = 'sent', total_sent = ?
@@ -82,7 +83,7 @@ async def broadcast_page(request: Request):
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''SELECT id, message, filter, scheduled_at, sent_at, status, total_sent, created_at
                  FROM broadcasts ORDER BY created_at DESC LIMIT 50''')
@@ -107,7 +108,7 @@ async def send_broadcast(request: Request):
     if not message:
         return RedirectResponse("/broadcast?error=Введите текст сообщения", status_code=302)
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''INSERT INTO broadcasts (message, filter, status)
                  VALUES (?, ?, ?)''',

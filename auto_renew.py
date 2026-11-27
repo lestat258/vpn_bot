@@ -1,6 +1,7 @@
 """
 Модуль автоматического продления подписок через баланс
 """
+from runtime_config import DB_PATH
 import sqlite3
 import logging
 from datetime import datetime, timedelta
@@ -11,7 +12,6 @@ from xui_client import XUIClient
 from server_manager import server_manager
 
 logger = logging.getLogger(__name__)
-DB_PATH = '/opt/vpn-bot/data.db'
 
 class AutoRenewManager:
     def __init__(self):

@@ -10,6 +10,7 @@
 - Перезапуск при ошибках
 - Health check для мониторинга
 """
+from runtime_config import DATA_DIR
 import asyncio
 import logging
 import sys
@@ -22,8 +23,6 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault
 
-# Добавляем путь к проекту
-sys.path.insert(0, '/opt/vpn-bot')
 
 from database import init_db, get_setting, get_all_settings
 from encryption import decrypt
@@ -39,12 +38,13 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Настройка логирования в файл и консоль
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format=LOG_FORMAT,
     datefmt=LOG_DATE_FORMAT,
     handlers=[
-        logging.FileHandler('/opt/vpn-bot/bot.log', encoding='utf-8'),
+        logging.FileHandler(str(DATA_DIR / "bot.log"), encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -62,9 +62,8 @@ logger = logging.getLogger(__name__)
 
 class Config:
     """Конфигурация приложения"""
-    DB_PATH = '/opt/vpn-bot/data.db'
-    LOCK_FILE = '/opt/vpn-bot/bot.lock'
-    PID_FILE = '/opt/vpn-bot/bot.pid'
+    LOCK_FILE = str(DATA_DIR / "bot.lock")
+    PID_FILE = str(DATA_DIR / "bot.pid")
     
     @classmethod
     def check_single_instance(cls):

@@ -1,4 +1,5 @@
 """Модуль управления пользователями"""
+from runtime_config import DB_PATH, TEMPLATE_DIR
 from fastapi import APIRouter, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -8,14 +9,14 @@ from datetime import datetime
 from .auth import check_auth, log_admin_action
 
 users_router = APIRouter(tags=["users"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 @users_router.get("/users", response_class=HTMLResponse)
 async def users_page(request: Request):
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
         SELECT u.id, u.telegram_id, u.username, u.first_name,
@@ -58,7 +59,7 @@ async def toggle_block_user(request: Request, telegram_id: int):
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('UPDATE users SET is_blocked = NOT is_blocked WHERE telegram_id = ?', (telegram_id,))
     conn.commit()
@@ -72,7 +73,7 @@ async def user_detail(request: Request, telegram_id: int):
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT id, telegram_id, username, first_name, created_at, is_blocked, balance FROM users WHERE telegram_id = ?', (telegram_id,))
     user = c.fetchone()
@@ -116,7 +117,7 @@ async def add_key_page(request: Request, telegram_id: int):
     if not check_auth(request):
         return RedirectResponse("/")
     
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT id, name, price_rub, duration_days FROM tariffs WHERE is_active = 1')
     tariffs = c.fetchall()
@@ -137,7 +138,7 @@ async def add_key_submit(request: Request, telegram_id: int,
     
     from services import vpn_service
     
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT name, traffic_gb, ip_limit FROM tariffs WHERE id = ?', (tariff_id,))
     tariff = c.fetchone()
