@@ -163,3 +163,24 @@ class BalanceTests(unittest.TestCase):
             tax.assert_not_called()
         self.assertEqual(self.read("SELECT balance FROM users WHERE telegram_id=42"),[(0.0,)])
         self.assertEqual(self.read("SELECT refund_state FROM payment_processing"),[("full_review",)])
+
+
+    def test_new_deposit_is_visible_in_journal_and_alerts_even_with_low_id(self):
+        from payment_admin_view import load_journal
+        from payment_admin_alerts import claim_alerts
+        with closing(sqlite3.connect(self.path)) as db,db:
+            db.executescript("""
+                ALTER TABLE users ADD COLUMN first_name TEXT;
+                ALTER TABLE payment_processing ADD COLUMN receipt_uuid TEXT;
+                ALTER TABLE payment_processing ADD COLUMN receipt_url TEXT;
+                CREATE TABLE tariffs(id INTEGER PRIMARY KEY,name TEXT);
+                INSERT INTO settings VALUES('admin_id','99');
+            """)
+        self.credit()
+        journal=load_journal(self.path,"new")
+        self.assertEqual(journal["count"],1)
+        self.assertEqual(journal["payments"][0]["tariff"],"Пополнение баланса")
+        self.assertEqual(journal["payments"][0]["vpn_display"]["label"],"Зачислено")
+        record_deposit_change(self.path,"new",self.meta,refund="10.50")
+        self.assertEqual(claim_alerts(self.path),(99,[(2,"refund")]))
+        self.assertEqual(claim_alerts(self.path),(99,[]))
