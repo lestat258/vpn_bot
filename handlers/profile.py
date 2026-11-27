@@ -1,5 +1,6 @@
 from runtime_config import DB_PATH
 from screen_navigation import render_screen, render_command, render_photo_screen
+from form_navigation import FORM_SCREEN, is_current_screen, current_deposit_input
 import asyncio
 import hashlib
 from balance_ledger import validate_deposit_amount, deposit_metadata, register_deposit, rubles
@@ -338,9 +339,8 @@ async def user_confirm_delete_key(callback: types.CallbackQuery):
 
 # ============ ПОПОЛНЕНИЕ БАЛАНСА ============
 
-@router.callback_query(F.data == "deposit")
-async def deposit_menu(callback: types.CallbackQuery):
-    balance = get_user_balance(callback.from_user.id)
+def deposit_menu_content(owner, notice=""):
+    balance = get_user_balance(owner)
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="100 ₽", callback_data="deposit_100")],
         [types.InlineKeyboardButton(text="200 ₽", callback_data="deposit_200")],
@@ -349,36 +349,59 @@ async def deposit_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="✏️ Своя сумма", callback_data="deposit_custom")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_profile")]
     ])
-    await render_screen(callback.message, 
-        f"💰 <b>Пополнение баланса</b>\n\n"
-        f"Текущий баланс: <b>{balance:.2f} ₽</b>\n\n"
-        f"Выберите сумму для пополнения или введите свою:",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+    text = (f"💰 <b>Пополнение баланса</b>\n\n"
+            f"Текущий баланс: <b>{balance:.2f} ₽</b>\n\n"
+            "Выберите сумму для пополнения или введите свою:")
+    return (f"{notice}\n\n{text}" if notice else text), kb
+
+
+@router.callback_query(F.data == "deposit")
+async def deposit_menu(callback: types.CallbackQuery):
+    text, kb = deposit_menu_content(callback.from_user.id)
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
+
+
+DEPOSIT_PROMPT = (
+    "✏️ <b>Введите сумму пополнения</b>\n\n"
+    "Минимальная сумма: <b>10 ₽</b>\n"
+    "Максимальная сумма: <b>100000 ₽</b>\n\n"
+    "Введите число (например: 150, 250.50):\n"
+    "Или отправьте /cancel для отмены"
+)
+
 
 @router.callback_query(F.data == "deposit_custom")
 async def deposit_custom(callback: types.CallbackQuery, state: FSMContext):
-    await render_screen(callback.message, 
-        "✏️ <b>Введите сумму пополнения</b>\n\n"
-        "Минимальная сумма: <b>10 ₽</b>\n"
-        "Максимальная сумма: <b>100000 ₽</b>\n\n"
-        "Введите число (например: 150, 250.50):\n"
-        "Или отправьте /cancel для отмены",
-        reply_markup=get_back_keyboard("cancel_custom_deposit"),
-        parse_mode="HTML"
-    )
+    if await state.get_state() is not None:
+        await callback.answer("Сначала завершите текущий ввод.", show_alert=True)
+        return
+    if not is_current_screen(callback.message, getattr(callback.message, "message_id", None)):
+        await callback.answer("Откройте актуальное меню пополнения.", show_alert=True)
+        return
+    result = await render_screen(callback.message, DEPOSIT_PROMPT,
+        reply_markup=get_back_keyboard("cancel_custom_deposit"), parse_mode="HTML")
+    screen_id = getattr(result, "message_id", None)
+    if not is_current_screen(callback.message, screen_id):
+        await callback.answer("Не удалось открыть форму. Попробуйте ещё раз.", show_alert=True)
+        return
+    await state.set_data({FORM_SCREEN: screen_id})
     await state.set_state(CustomDeposit.amount)
     await callback.answer()
 
+
 @router.callback_query(F.data == "cancel_custom_deposit")
 async def cancel_custom_deposit(callback: types.CallbackQuery, state: FSMContext):
-    if await state.get_state()!=CustomDeposit.amount.state:
-        await callback.answer("Ввод уже завершён",show_alert=True)
+    data = await state.get_data()
+    if (await state.get_state() != CustomDeposit.amount.state
+            or data.get(FORM_SCREEN) != getattr(callback.message, "message_id", None)
+            or not is_current_screen(callback.message, data.get(FORM_SCREEN))):
+        await callback.answer("Ввод уже завершён", show_alert=True)
         return
     await state.clear()
-    await deposit_menu(callback)
+    text, kb = deposit_menu_content(callback.from_user.id, "Пополнение отменено.")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
 
 
 async def create_deposit_payment(bot, owner, amount, request_key):
@@ -407,25 +430,42 @@ async def create_deposit_payment(bot, owner, amount, request_key):
 
 @router.message(CustomDeposit.amount)
 async def deposit_custom_amount(message: types.Message, state: FSMContext):
-    raw=(message.text or "").strip()
-    if raw.lower() in ("/cancel","отмена","cancel"):
+    if not await current_deposit_input(message, state):
         await state.clear()
-        await message.answer("❌ Пополнение отменено.")
+        # Do not edit an unrelated active screen or create a payment.
+        await message.answer("Ввод суммы завершён. Откройте пополнение заново.")
+        return
+    raw = (message.text or "").strip()
+    if raw.lower() in ("/cancel", "отмена", "cancel"):
+        await state.clear()
+        text, kb = deposit_menu_content(message.from_user.id, "Пополнение отменено.")
+        await render_command(message, text, reply_markup=kb, parse_mode="HTML")
         return
     try:
-        amount=validate_deposit_amount(raw.replace(",","."))
+        amount = validate_deposit_amount(raw.replace(",", "."))
     except ValueError:
-        await message.answer("Введите сумму от 10 до 100000 ₽, не более двух знаков после запятой.")
+        result = await render_command(message,
+            "❌ Введите сумму от 10 до 100000 ₽, не более двух знаков после запятой.\n\n" + DEPOSIT_PROMPT,
+            reply_markup=get_back_keyboard("cancel_custom_deposit"), parse_mode="HTML")
+        # A deleted screen may have been replaced while reporting the error.
+        screen_id = getattr(result, "message_id", None)
+        if screen_id is not None:
+            await state.update_data({FORM_SCREEN: screen_id})
         return
+
+    # Stop accepting amounts before the provider request; a failed render
+    # must never cause a second automatic payment creation.
+    await state.clear()
     try:
-        kb=await create_deposit_payment(message.bot,message.from_user.id,amount,
-                                       f"message:{message.chat.id}:{message.message_id}")
-        await message.answer(f"💳 Пополнение баланса: {rubles(amount):.2f} ₽\nНажмите кнопку для оплаты.",reply_markup=kb)
-        await state.clear()
+        kb = await create_deposit_payment(message.bot, message.from_user.id, amount,
+                                           f"message:{message.chat.id}:{message.message_id}")
     except Exception:
         logging.error("Deposit creation failed")
-        await message.answer("Не удалось подготовить платёж. Обратитесь в поддержку.")
-        await state.clear()
+        await render_command(message, "Не удалось подготовить платёж. Обратитесь в поддержку.",
+                             reply_markup=get_back_keyboard("deposit"))
+        return
+    await render_command(message, f"💳 Пополнение баланса: {rubles(amount):.2f} ₽\nНажмите кнопку для оплаты.",
+                         reply_markup=kb)
 
 
 @router.callback_query(F.data.startswith("deposit_"))
@@ -441,13 +481,6 @@ async def deposit_process(callback: types.CallbackQuery):
         await render_screen(callback.message, "Не удалось подготовить платёж. Обратитесь в поддержку.")
     await callback.answer()
 
-
-@router.message(CustomDeposit.amount, Command("cancel"))
-async def cancel_deposit(message: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state == CustomDeposit.amount:
-        await state.clear()
-        await message.answer("❌ Пополнение отменено.", parse_mode="HTML")
 
 # ============ АВТО-ПРОДЛЕНИЕ ============
 

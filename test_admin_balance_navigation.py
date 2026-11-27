@@ -126,5 +126,5 @@ class AdminBalanceNavigationTests(unittest.IsolatedAsyncioTestCase):
 
     def test_profile_cancel_is_scoped_to_custom_deposit(self):
         tree=ast.parse((Path(__file__).parent/"handlers/profile.py").read_text(encoding="utf-8"))
-        node=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=="cancel_deposit")
+        node=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=="deposit_custom_amount")
         self.assertIn("CustomDeposit.amount",ast.unparse(node.decorator_list[0]))
