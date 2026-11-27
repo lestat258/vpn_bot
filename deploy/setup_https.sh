@@ -20,6 +20,10 @@ if [[ ${1:-} == --admin-only ]]; then
 fi
 [[ $# == 2 ]] || fail 'Использование: sudo bash deploy/setup_https.sh [--check-only | --admin-only] DOMAIN ACME_EMAIL'
 domain=${1,,}
+https_port=${VPN4US_HTTPS_PORT:-443}
+[[ $https_port == 443 || $https_port == 8443 ]] || fail 'Укажите порт HTTPS 443 или 8443.'
+public_url="https://$domain"
+if [[ $https_port == 8443 ]]; then public_url+=":8443"; fi
 email=$2
 [[ ${#domain} -le 253 && $domain =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] ||
     fail 'Укажите доменное имя без схемы, порта и пути.'
@@ -32,10 +36,10 @@ getent ahostsv4 "$domain" >/dev/null || fail "Добавьте A-запись д
 exec 9>/run/vpn4us-https.lock
 flock -n 9 || fail 'Настройка HTTPS уже выполняется.'
 
-sockets=$(ss -H -ltnp '( sport = :80 or sport = :443 )')
+sockets=$(ss -H -ltnp "( sport = :80 or sport = :$https_port )")
 while IFS= read -r socket; do
     if [[ -n $socket && $socket != *'"nginx"'* ]]; then
-        fail 'Порт 80 или 443 занят другим процессом. Сначала согласуйте маршрутизацию HTTPS с 3x-ui или Xray.'
+        fail "Порт 80 или $https_port занят другим процессом. Проверьте, какая служба его использует."
     fi
 done <<< "$sockets"
 
@@ -109,7 +113,7 @@ listen_v6=
 listen_tls_v6=
 if [[ -s /proc/net/if_inet6 ]]; then
     listen_v6='    listen [::]:80;'
-    listen_tls_v6='    listen [::]:443 ssl;'
+    listen_tls_v6="    listen [::]:$https_port ssl;"
 fi
 
 write_http() {
@@ -126,7 +130,7 @@ $listen_v6
     }
 
     location / {
-        return 308 https://$domain\$request_uri;
+        return 308 $public_url\$request_uri;
     }
 }
 EOF
@@ -154,7 +158,7 @@ write_http > "$tmp/site"
 cat >> "$tmp/site" <<EOF
 
 server {
-    listen 443 ssl;
+    listen $https_port ssl;
 $listen_tls_v6
     server_name $domain;
     ssl_certificate $lineage/fullchain.pem;
@@ -174,14 +178,14 @@ $listen_tls_v6
 EOF
 reload_site
 systemctl enable --now certbot.timer
-curl --noproxy '*' --resolve "$domain:443:127.0.0.1" --fail --silent --show-error \
-    --max-time 10 --output /dev/null "https://$domain/"
+curl --noproxy '*' --resolve "$domain:$https_port:127.0.0.1" --fail --silent --show-error \
+    --max-time 10 --output /dev/null "$public_url/"
 if (( ! admin_only )); then
-    status=$(curl --noproxy '*' --resolve "$domain:443:127.0.0.1" --silent --show-error \
-    --max-time 10 --output /dev/null --write-out '%{http_code}' "https://$domain/webhook/")
+    status=$(curl --noproxy '*' --resolve "$domain:$https_port:127.0.0.1" --silent --show-error \
+    --max-time 10 --output /dev/null --write-out '%{http_code}' "$public_url/webhook/")
     [[ $status == 405 ]] || fail "Webhook вернул HTTP $status на GET, ожидался HTTP 405."
 fi
-printf 'Админка VPN4US — https://%s/\n' "$domain"
+printf 'Админка VPN4US — %s/\n' "$public_url"
 if (( ! admin_only )); then
-    printf 'Уведомления ЮKassa — https://%s/webhook/\n' "$domain"
+    printf 'Уведомления ЮKassa — %s/webhook/\n' "$public_url"
 fi

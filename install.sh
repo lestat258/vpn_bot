@@ -26,6 +26,11 @@ done
 
 read -r -p 'Домен админки VPN4US: ' domain
 domain=${domain,,}
+export VPN4US_HTTPS_PORT=${VPN4US_HTTPS_PORT:-443}
+[[ $VPN4US_HTTPS_PORT == 443 || $VPN4US_HTTPS_PORT == 8443 ]] ||
+    fail 'Укажите порт HTTPS 443 или 8443.'
+public_url="https://$domain"
+if [[ $VPN4US_HTTPS_PORT == 8443 ]]; then public_url+=":8443"; fi
 read -r -p 'Email для выпуска сертификата: ' email
 [[ ${#domain} -le 253 && $domain =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] ||
     fail 'Укажите доменное имя без схемы, порта и пути.'
@@ -81,7 +86,7 @@ WorkingDirectory=$app_dir
 UMask=0077
 Environment=VPN4US_DATA_DIR=$data_dir
 Environment=VPN4US_ADMIN_BIND=127.0.0.1
-Environment=VPN4US_ACTIVATION_URL=https://$domain
+Environment=VPN4US_ACTIVATION_URL=$public_url
 Environment=VPN4US_ADMIN_ALLOWED_HOSTS=$domain,localhost,127.0.0.1
 ExecStart=$app_dir/venv/bin/python $app_dir/admin.py
 Restart=on-failure
