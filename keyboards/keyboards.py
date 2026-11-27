@@ -31,7 +31,7 @@ def get_main_keyboard(telegram_id=None):
         if is_admin:
             buttons.append([KeyboardButton(text="🔧 Админ-панель")])
     
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, persistent=True)
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, is_persistent=True, one_time_keyboard=False)
 
 def get_device_keyboard():
     """Клавиатура выбора устройства"""

@@ -86,7 +86,8 @@ async def profile(message: types.Message, *, callback=None):
     conn.close()
 
     renderer = render_screen if callback is not None else render_command
-    await renderer(message,profile_text,
+    options = {} if callback is not None else {"keyboard": get_main_keyboard(owner)}
+    await renderer(message,profile_text, **options,
         reply_markup=get_profile_keyboard(has_promocodes),
         parse_mode="HTML",
         disable_web_page_preview=True

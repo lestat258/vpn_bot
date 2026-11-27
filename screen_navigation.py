@@ -92,6 +92,10 @@ def _screen_db():
             bot_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
             message_id INTEGER NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('text','photo')),
             PRIMARY KEY(bot_id,chat_id))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS keyboard_anchors(
+            bot_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            PRIMARY KEY(bot_id,chat_id))""")
     except Exception:
         db.close()
         raise
@@ -108,6 +112,54 @@ def _save(key,mid,kind):
         db.execute("""INSERT INTO active_screens(bot_id,chat_id,message_id,kind)
             VALUES(?,?,?,?) ON CONFLICT(bot_id,chat_id) DO UPDATE
             SET message_id=excluded.message_id,kind=excluded.kind""",(*key,mid,kind))
+
+
+def _read_anchor(key):
+    with closing(_screen_db()) as db:
+        row=db.execute("SELECT message_id FROM keyboard_anchors WHERE bot_id=? AND chat_id=?",key).fetchone()
+        return row[0] if row else None
+
+
+def _save_anchor(key,mid):
+    with closing(_screen_db()) as db,db:
+        db.execute("""INSERT INTO keyboard_anchors(bot_id,chat_id,message_id)
+            VALUES(?,?,?) ON CONFLICT(bot_id,chat_id) DO UPDATE
+            SET message_id=excluded.message_id""",(*key,mid))
+
+
+async def _ensure_keyboard(message,key,keyboard,*,refresh=False):
+    """Send a dedicated keyboard message, never register it as a screen."""
+    previous=_read_anchor(key)
+    if previous is not None and not refresh:
+        return False
+    anchor=await message.answer(
+        "⌨️ Главное меню VPN4US. Если клавиатура скрыта, отправьте /menu.",
+        reply_markup=keyboard)
+    mid=getattr(anchor,"message_id",None)
+    if not isinstance(mid,int) or mid<=0:
+        raise RuntimeError("Keyboard message ID unavailable")
+    _save_anchor(key,mid)
+    if previous is not None and previous!=mid:
+        await _retire_id(message.bot,key[1],previous)
+    return True
+
+
+MENU_COMMANDS=frozenset((
+    "👤 Профиль","📋 Купить ключ","🎁 Пригласить друга","❓ Вопросы",
+    "📥 Установить VPN","🔧 Админ-панель","/start","/menu","/profile",
+    "/buy","/install","/faq","/help","/referral","/admin",
+))
+
+
+async def _clean_command(message):
+    # Only exact navigation commands, after a successful screen update.
+    # Never erase arbitrary messages, amounts, promo codes, or deep links.
+    if getattr(message,"text",None) not in MENU_COMMANDS:
+        return
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        LOG.info("Navigation command could not be removed")
 
 
 async def _retire_id(bot,chat_id,mid):
@@ -138,34 +190,57 @@ async def render_screen(message,text,**kwargs):
     async with _lock(key):
         previous=_read(key)
         preserved=significant_message(message)
-        result=await _render_screen(message,text,**kwargs)
+        reply=kwargs.get("reply_markup")
+        keyboard_added=False
+        if isinstance(reply,ReplyKeyboardMarkup):
+            keyboard_added=await _ensure_keyboard(message,key,reply)
+            kwargs.pop("reply_markup")
+        if keyboard_added:
+            # Keep the first screen below the new keyboard anchor.
+            result=await message.answer(text,**kwargs)
+            if not preserved:
+                await retire_screen(message)
+        else:
+            result=await _render_screen(message,text,**kwargs)
         if preserved and previous and previous[0]==message.message_id:
             previous=None
         await _remember(key,message,result,previous,"text",retired_source=not preserved)
         return result
 
 
-async def render_command(message,text,**kwargs):
-    """Open a menu from a private user message, without editing/deleting it."""
+async def _render_command_locked(message,key,text,kwargs,*,force_new=False):
+    previous=_read(key)
+    reply=kwargs.get("reply_markup")
+    if not force_new and previous and previous[1]=="text" and not isinstance(reply,(ReplyKeyboardMarkup,ReplyKeyboardRemove,ForceReply)):
+        try:
+            return await message.bot.edit_message_text(text=text,chat_id=key[1],
+                                                        message_id=previous[0],**kwargs)
+        except TelegramBadRequest as exc:
+            reason=str(exc).lower()
+            if "message is not modified" in reason:
+                return None
+            if not any(part in reason for part in ("message can't be edited",
+                    "message to edit not found","there is no text in the message to edit")):
+                raise
+    result=await message.answer(text,**kwargs)
+    await _remember(key,message,result,previous,"text")
+    return result
+
+
+async def render_command(message,text,*,keyboard=None,refresh_keyboard=False,**kwargs):
+    """Open a menu; optionally maintain its separate keyboard and clean the command."""
     key=_key(message,command=True)
     if key is None:
         return await message.answer(text,**kwargs)
     async with _lock(key):
-        previous=_read(key)
-        reply=kwargs.get("reply_markup")
-        if previous and previous[1]=="text" and not isinstance(reply,(ReplyKeyboardMarkup,ReplyKeyboardRemove,ForceReply)):
-            try:
-                return await message.bot.edit_message_text(text=text,chat_id=key[1],
-                                                            message_id=previous[0],**kwargs)
-            except TelegramBadRequest as exc:
-                reason=str(exc).lower()
-                if "message is not modified" in reason:
-                    return None
-                if not any(part in reason for part in ("message can't be edited",
-                        "message to edit not found","there is no text in the message to edit")):
-                    raise
-        result=await message.answer(text,**kwargs)
-        await _remember(key,message,result,previous,"text")
+        added=False
+        if keyboard is not None:
+            added=await _ensure_keyboard(message,key,keyboard,refresh=refresh_keyboard)
+            if isinstance(kwargs.get("reply_markup"),ReplyKeyboardMarkup):
+                kwargs.pop("reply_markup")
+        result=await _render_command_locked(message,key,text,kwargs,force_new=added)
+        if keyboard is not None:
+            await _clean_command(message)
         return result
 
 

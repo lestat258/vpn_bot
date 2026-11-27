@@ -110,3 +110,98 @@ class PersistentNavigationTests(unittest.IsolatedAsyncioTestCase):
         await nav.render_command(user,"Menu")
         self.assertIsNone(nav._read(self.key))
         user.delete.assert_not_awaited()
+
+
+    def keyboard(self):
+        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="👤 Профиль")]],is_persistent=True)
+
+    async def test_first_menu_command_separates_keyboard_and_active_screen(self):
+        user=self.message(command=True,text="👤 Профиль")
+        user.answer.side_effect=[SimpleNamespace(message_id=20),SimpleNamespace(message_id=21)]
+        nav._save(self.key,7,"text")
+        await nav.render_command(user,"Profile",keyboard=self.keyboard())
+        self.assertEqual(nav._read_anchor(self.key),20)
+        self.assertEqual(nav._read(self.key),(21,"text"))
+        self.assertEqual(user.answer.await_count,2)
+        self.assertTrue(user.answer.await_args_list[0].kwargs["reply_markup"].is_persistent)
+        self.bot.delete_message.assert_awaited_once_with(chat_id=42,message_id=7)
+        user.delete.assert_awaited_once()
+
+    async def test_switch_menu_edits_screen_and_preserves_keyboard(self):
+        nav._save_anchor(self.key,20)
+        nav._save(self.key,21,"text")
+        user=self.message(command=True,text="📋 Купить ключ")
+        await nav.render_command(user,"Buy",keyboard=self.keyboard())
+        self.bot.edit_message_text.assert_awaited_once_with(text="Buy",chat_id=42,message_id=21)
+        user.answer.assert_not_awaited()
+        user.delete.assert_awaited_once()
+        self.bot.delete_message.assert_not_awaited()
+        self.assertEqual(nav._read_anchor(self.key),20)
+
+    async def test_menu_command_refreshes_keyboard_without_tracking_anchor(self):
+        nav._save_anchor(self.key,20)
+        nav._save(self.key,21,"text")
+        user=self.message(command=True,text="/menu")
+        user.answer.side_effect=[SimpleNamespace(message_id=30),SimpleNamespace(message_id=31)]
+        kb=self.keyboard()
+        await nav.render_command(user,"Menu",keyboard=kb,refresh_keyboard=True,reply_markup=kb)
+        self.assertEqual(nav._read_anchor(self.key),30)
+        self.assertEqual(nav._read(self.key),(31,"text"))
+        self.assertEqual([c.kwargs["message_id"] for c in self.bot.delete_message.await_args_list],[20,21])
+        self.assertNotIn("reply_markup",user.answer.await_args.kwargs)
+        user.delete.assert_awaited_once()
+
+    async def test_back_to_main_does_not_replace_existing_keyboard(self):
+        nav._save_anchor(self.key,20)
+        nav._save(self.key,21,"text")
+        m=self.message(mid=21)
+        await nav.render_screen(m,"Menu",reply_markup=self.keyboard())
+        m.edit_text.assert_awaited_once_with("Menu")
+        m.answer.assert_not_awaited()
+        m.delete.assert_not_awaited()
+        self.assertEqual(nav._read_anchor(self.key),20)
+
+    async def test_first_callback_main_menu_creates_separate_anchor(self):
+        nav._save(self.key,7,"text")
+        m=self.message(mid=7)
+        m.answer.side_effect=[SimpleNamespace(message_id=20),SimpleNamespace(message_id=21)]
+        await nav.render_screen(m,"Menu",reply_markup=self.keyboard())
+        self.assertEqual(nav._read_anchor(self.key),20)
+        self.assertEqual(nav._read(self.key),(21,"text"))
+        m.delete.assert_awaited_once()
+        self.bot.delete_message.assert_not_awaited()
+
+    async def test_unrecognized_messages_not_deleted(self):
+        nav._save_anchor(self.key,20)
+        nav._save(self.key,21,"text")
+        for raw in ("100","HELLO","/start ref_123","Some message"):
+            user=self.message(command=True,text=raw)
+            await nav.render_command(user,"Menu",keyboard=self.keyboard())
+            user.delete.assert_not_awaited()
+
+    async def test_failed_render_does_not_delete_command(self):
+        nav._save_anchor(self.key,20)
+        nav._save(self.key,21,"text")
+        self.bot.edit_message_text.side_effect=TelegramNetworkError(method=None,message="timeout")
+        user=self.message(command=True,text="/profile")
+        with self.assertRaises(TelegramNetworkError):
+            await nav.render_command(user,"Profile",keyboard=self.keyboard())
+        user.delete.assert_not_awaited()
+
+    async def test_no_change_is_success_and_command_removed(self):
+        nav._save_anchor(self.key,20)
+        nav._save(self.key,21,"text")
+        self.bot.edit_message_text.side_effect=TelegramBadRequest(method=None,message="message is not modified")
+        user=self.message(command=True,text="/profile")
+        await nav.render_command(user,"Profile",keyboard=self.keyboard())
+        user.delete.assert_awaited_once()
+        user.answer.assert_not_awaited()
+
+    async def test_cleanup_failure_does_not_replay_screen(self):
+        nav._save_anchor(self.key,20)
+        nav._save(self.key,21,"text")
+        user=self.message(command=True,text="/profile")
+        user.delete.side_effect=TelegramBadRequest(method=None,message="message can't be deleted")
+        await nav.render_command(user,"Profile",keyboard=self.keyboard())
+        self.bot.edit_message_text.assert_awaited_once()
+        user.answer.assert_not_awaited()
