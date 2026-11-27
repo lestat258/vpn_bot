@@ -111,13 +111,17 @@ class AdminBalanceNavigationTests(unittest.IsolatedAsyncioTestCase):
     async def test_deposit_prompt_has_cancel_button(self):
         self.callback.data="user_deposit_42"
         await self.env["admin_deposit_start"](self.callback,self.state)
+        self.callback.message.edit_text.assert_awaited_once()
+        self.callback.message.answer.assert_not_awaited()
         markup=self.callback.message.edit_text.await_args.kwargs["reply_markup"]
         self.assertEqual(markup["inline_keyboard"][0][0]["callback_data"],"admin_balance_cancel_deposit_42")
 
     async def test_withdraw_prompt_has_cancel_button(self):
         self.callback.data="user_withdraw_42"
         await self.env["admin_withdraw_start"](self.callback,self.state)
-        markup=self.callback.message.answer.await_args.kwargs["reply_markup"]
+        self.callback.message.edit_text.assert_awaited_once()
+        self.callback.message.answer.assert_not_awaited()
+        markup=self.callback.message.edit_text.await_args.kwargs["reply_markup"]
         self.assertEqual(markup["inline_keyboard"][0][0]["callback_data"],"admin_balance_cancel_withdraw_42")
 
     def test_profile_cancel_is_scoped_to_custom_deposit(self):
