@@ -130,3 +130,20 @@ class PromoFormTests(unittest.IsolatedAsyncioTestCase):
             await self.env["process_promocode_input"](self.message,self.state)
         self.assertEqual(self.snapshot(),(0,[],[]))
         self.render.assert_not_awaited()
+
+
+    async def test_activation_records_expiry_without_changing_legacy_setting_format(self):
+        with closing(sqlite3.connect(self.db)) as db,db:
+            db.execute("UPDATE promocodes SET valid_until='2099-01-01'")
+        await self.env["process_promocode_input"](self.message,self.state)
+        with closing(sqlite3.connect(self.db)) as db:
+            self.assertEqual(db.execute("SELECT telegram_id,promocode_id,value,valid_until FROM manual_promo_grants").fetchall(),
+                             [(42,1,"15|0","2099-01-01")])
+
+    async def test_expired_manual_grant_allows_new_activation(self):
+        from promo_reservations import save_manual_grant
+        with closing(sqlite3.connect(self.db)) as db,db:
+            db.execute("INSERT INTO settings VALUES('promocode_user_42','5|0')")
+            save_manual_grant(db,42,2,"5|0","2000-01-01")
+        await self.env["process_promocode_input"](self.message,self.state)
+        self.assertEqual(self.snapshot(),(1,[(1,42)],[("promocode_user_42","15|0")]))

@@ -335,3 +335,46 @@ class PromoCheckoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(verified)
         self.assertEqual(error.status,403)
         self.assertTrue(has_unbound(self.path))
+
+
+    async def test_success_handler_settles_before_fulfillment_and_is_idempotent(self):
+        self.checkout()
+        from aiohttp import web
+        from balance_ledger import is_registered
+        from unittest.mock import patch
+        queue=Mock()
+        async def fulfill(pid,data):
+            self.assertEqual(self.query("SELECT state FROM promo_reservations"),[("consumed",)])
+            self.assertEqual(self.query("SELECT value FROM settings"),[("",)])
+            return True
+        fulfill=AsyncMock(side_effect=fulfill)
+        fake_fulfill=ModuleType("payment_fulfillment")
+        fake_fulfill.process_verified_payment=fulfill
+        fake_fulfill._telegram_notify=AsyncMock()
+        fake_tax=ModuleType("tax_fulfillment")
+        fake_tax.queue_verified=queue
+        fn=load_functions("webhook.py",{"process_payment_success"},
+            dict(DB_PATH=self.path,asyncio=asyncio,is_registered=is_registered))["process_payment_success"]
+        data={"object":{**self.verified(),"refunded_amount":None}}
+        with patch.dict(sys.modules,{"payment_fulfillment":fake_fulfill,"tax_fulfillment":fake_tax}):
+            self.assertTrue(await fn("pay",data))
+            self.assertTrue(await fn("pay",data))
+        self.assertEqual(queue.call_count,2)
+        self.assertEqual(fulfill.await_count,2)
+        self.assertEqual(self.query("SELECT state FROM promo_reservations"),[("consumed",)])
+
+    async def test_cancellation_handler_recovers_unbound_order_then_releases(self):
+        self.lost_response()
+        self.payment.status="canceled"
+        from aiohttp import web
+        from balance_ledger import is_registered
+        fn=load_functions("webhook.py",{"handle_payment_change"},
+            dict(DB_PATH=self.path,asyncio=asyncio,is_registered=is_registered,
+                 verify_provider_payment=self.verifier(),web=web,logger=Mock()))["handle_payment_change"]
+        with self.fake_sdk():
+            response=await fn("payment.canceled",{"id":"pay"})
+            replay=await fn("payment.canceled",{"id":"pay"})
+        self.assertEqual((response.status,replay.status),(200,200))
+        self.assertEqual(self.query("SELECT state FROM promo_reservations"),[("released",)])
+        self.assertEqual(self.query("SELECT status FROM payments WHERE payment_id='pay'"),[("canceled",)])
+        self.provider.create.assert_called_once()

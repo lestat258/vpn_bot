@@ -335,3 +335,28 @@ def recover_verified_binding(path,payment_id,metadata,amount):
     _match(row,metadata,amount)
     attach(path,row["checkout_id"],payment_id,metadata,amount)
     return True
+
+
+def manual_discount_status(path,owner):
+    """Read-only UI projection; do not modify grants while rendering."""
+    with closing(sqlite3.connect(path,timeout=15)) as db:
+        value=db.execute("SELECT value FROM settings WHERE key=?",(f"promocode_user_{owner}",)).fetchone()
+        if not value or not value[0]:
+            return None
+        deadline=None
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='manual_promo_grants'").fetchone():
+            grant=db.execute("SELECT valid_until FROM manual_promo_grants WHERE telegram_id=? AND value=?",(owner,value[0])).fetchone()
+            deadline=grant[0] if grant else None
+        if deadline is not None and not _unexpired(deadline) and not has_open(db,owner):
+            return None
+        try:
+            p,a=map(Decimal,value[0].split("|"))
+            if not p.is_finite() or not a.is_finite() or not 0<=p<=100 or a<0:
+                return None
+            if p>0:
+                return f"{p.normalize():f}%",deadline
+            if a>0:
+                return f"{a:.2f} ₽",deadline
+        except (ValueError,InvalidOperation):
+            return None
+        return None
