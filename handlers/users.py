@@ -1,5 +1,7 @@
 from runtime_config import DB_PATH
 from screen_navigation import render_screen
+from subscription_renewal import expiry_presentation
+from html import escape
 from services.vpn_service import vpn_service
 """
 Пользовательские хендлеры бота
@@ -251,13 +253,25 @@ async def refresh_menu(message: types.Message):
 async def device_instruction(callback: types.CallbackQuery):
     logging.info(f"=== DEVICE INSTRUCTION: {callback.data} ===")
 
-    device = callback.data.replace("device_", "")
+    device = callback.data.removeprefix("device_")
+    await render_install_choices(callback, device)
+
+
+@router.callback_query(F.data.startswith("install_select_"))
+async def install_select_back(callback: types.CallbackQuery):
+    await render_install_choices(callback, callback.data.removeprefix("install_select_"), force_select=True)
+
+
+async def render_install_choices(callback, device, *, force_select=False):
     device_names = {
         'android': 'Android',
         'ios': 'iOS',
         'windows': 'Windows'
     }
-    device_name = device_names.get(device, device)
+    if device not in device_names:
+        await callback.answer("Неизвестное устройство", show_alert=True)
+        return
+    device_name = device_names[device]
 
     # Получаем все активные подписки пользователя
     conn = sqlite3.connect(DB_PATH)
@@ -283,7 +297,7 @@ async def device_instruction(callback: types.CallbackQuery):
         return
 
     # Если подписка одна - сразу показываем инструкцию
-    if len(subs) == 1:
+    if len(subs) == 1 and not force_select:
         sub_id, email, end_date, tariff_name, xui_client_uid = subs[0]
         await show_instruction_for_key(callback, device, device_name, sub_id, email, tariff_name, xui_client_uid)
         return
@@ -292,9 +306,9 @@ async def device_instruction(callback: types.CallbackQuery):
     buttons = []
     for sub in subs:
         sub_id, email, end_date, tariff_name, xui_client_uid = sub
-        days_left = (datetime.fromisoformat(end_date) - datetime.now()).days
+        _, date_label, remaining = expiry_presentation(end_date)
         buttons.append([types.InlineKeyboardButton(
-            text=f"📦 {tariff_name} (до {end_date[:10]}, {days_left} дн.)",
+            text=f"📦 {tariff_name} (до {date_label}, {remaining.lower()})",
             callback_data=f"select_device_{device}_{sub_id}"
         )])
 
@@ -304,8 +318,7 @@ async def device_instruction(callback: types.CallbackQuery):
 
     await render_screen(callback.message, 
         f"📱 <b>Вы выбрали {device_name}</b>\n\n"
-        f"У вас есть несколько активных подписок.\n"
-        f"Выберите, для какой подписки показать инструкцию:",
+        "Выберите, для какой подписки показать инструкцию:",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -316,9 +329,14 @@ async def device_key_selected(callback: types.CallbackQuery):
     """Обработчик выбора ключа для устройства"""
     logging.info(f"=== DEVICE KEY SELECTED: {callback.data} ===")
 
-    parts = callback.data.split("_")
-    device = parts[2]
-    sub_id = int(parts[3])
+    try:
+        _, _, device, raw_id = callback.data.split("_")
+        sub_id = int(raw_id)
+        if device not in ("android", "ios", "windows") or sub_id <= 0:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Некорректный выбор", show_alert=True)
+        return
 
     device_names = {
         'android': 'Android',
@@ -341,30 +359,32 @@ async def device_key_selected(callback: types.CallbackQuery):
     conn.close()
 
     if not sub:
-        await render_screen(callback.message, "❌ Подписка не найдена", parse_mode="HTML")
+        await render_screen(callback.message, "❌ Подписка не найдена", 
+                            reply_markup=get_back_keyboard(f"install_select_{device}"), parse_mode="HTML")
         await callback.answer()
         return
 
     email, end_date, tariff_name, xui_client_uid = sub
 
-    await show_instruction_for_key(callback, device, device_name, sub_id, email, tariff_name, xui_client_uid)
+    await show_instruction_for_key(callback, device, device_name, sub_id, email, tariff_name, xui_client_uid,
+                                   back_to=f"install_select_{device}")
 
-async def show_instruction_for_key(callback, device, device_name, sub_id, email, tariff_name, xui_client_uid):
-    """Показывает инструкцию для выбранного ключа"""
-    from services.vpn_service import vpn_service
+async def show_instruction_for_key(callback, device, device_name, sub_id, email, tariff_name, xui_client_uid,
+                                   *, back_to="back_to_devices"):
+    """Показывает инструкцию для выбранного ключа с возвратом в исходный экран."""
 
     instructions = {
         'android': get_setting('text_android_instruction') or (
             "📱 <b>Настройка для Android</b>\n\n"
             "1. Установите Incy из Google Play\n"
-            "2. Нажмите «Добавить в 1 клик» ниже\n"
+            "2. Скопируйте ссылку ниже и добавьте подписку в Incy\n"
             "3. Подтвердите импорт подписки\n"
             "4. Нажмите «Подключиться»"
         ),
         'ios': get_setting('text_ios_instruction') or (
             "🍏 <b>Настройка для iOS</b>\n\n"
             "1. Установите Incy из App Store\n"
-            "2. Нажмите «Добавить в 1 клик» ниже\n"
+            "2. Скопируйте ссылку ниже и добавьте подписку в Incy\n"
             "3. Подтвердите импорт подписки\n"
             "4. Нажмите «Подключиться»"
         ),
@@ -384,19 +404,21 @@ async def show_instruction_for_key(callback, device, device_name, sub_id, email,
         await render_screen(callback.message, 
             "Не удалось получить ссылку подписки. Откройте «Мои ключи» "
             "или обратитесь в поддержку — новый ключ создавать не нужно.",
-            reply_markup=get_back_keyboard("back_to_keys_from_install"),
+            reply_markup=get_back_keyboard(back_to),
         )
         await callback.answer()
         return
 
     text = instructions.get(device, instructions['android'])
-    text = f"📦 <b>Тариф: {tariff_name}</b>\n\n" + text
+    # Older configured instructions may still reference the removed deep link.
+    text = text.replace("Нажмите «Добавить в 1 клик» ниже",
+                        "Скопируйте ссылку ниже и добавьте подписку в Incy")
+    text = f"📦 <b>Тариф: {escape(tariff_name)}</b>\n\n" + text
 
     if device == 'windows':
-        text += f"\n\n🔗 <b>Ваша ссылка:</b>\n<code>{link}</code>"
+        text += f"\n\n🔗 <b>Ваша ссылка:</b>\n<code>{escape(link)}</code>"
         kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="🔙 Назад к ключам", callback_data="back_to_keys_from_install")],
-            [types.InlineKeyboardButton(text="🔙 Назад к устройствам", callback_data="back_to_devices")]
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data=back_to)]
         ])
     else:
         if device == 'ios':
@@ -406,13 +428,12 @@ async def show_instruction_for_key(callback, device, device_name, sub_id, email,
             app_store_link = "https://play.google.com/store/apps/details?id=llc.itdev.incy"
             button_text = "📲 Скачать Incy (Google Play)"
 
-        text += f"\n\n🔗 <b>Ваша ссылка для подключения:</b>\n<code>{link}</code>"
+        text += f"\n\n🔗 <b>Ваша ссылка для подключения:</b>\n<code>{escape(link)}</code>"
         text += "\n\n👆 Коснитесь ссылки, чтобы скопировать её в буфер обмена"
 
         kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text=button_text, url=app_store_link)],
-            [types.InlineKeyboardButton(text="🔙 Назад к ключам", callback_data="back_to_keys_from_install")],
-            [types.InlineKeyboardButton(text="🔙 Назад к устройствам", callback_data="back_to_devices")]
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data=back_to)]
         ])
 
     await render_screen(callback.message, 
@@ -435,10 +456,8 @@ async def back_to_devices(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "back_to_keys_from_install")
 async def back_to_keys_from_install(callback: types.CallbackQuery):
-    """Возврат к списку ключей из установки VPN"""
-    # Показываем список ключей
-    from handlers.profile import show_my_keys
-    await show_my_keys(callback)
+    """У старой кнопки нет данных об устройстве; возвращаем в установку."""
+    await back_to_devices(callback)
 
 @router.callback_query(F.data == "back_to_main")
 async def back_to_main(callback: types.CallbackQuery):
