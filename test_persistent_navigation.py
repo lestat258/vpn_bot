@@ -205,3 +205,64 @@ class PersistentNavigationTests(unittest.IsolatedAsyncioTestCase):
         await nav.render_command(user,"Profile",keyboard=self.keyboard())
         self.bot.edit_message_text.assert_awaited_once()
         user.answer.assert_not_awaited()
+
+
+    async def test_start_rebuilds_even_when_old_ids_still_editable(self):
+        nav._save_anchor(self.key,20)
+        nav._save(self.key,21,"text")
+        user=self.message(command=True,text="/start")
+        user.answer.side_effect=[SimpleNamespace(message_id=30),SimpleNamespace(message_id=31)]
+        await nav.render_command(user,"Welcome",keyboard=self.keyboard(),refresh_keyboard=True)
+        self.bot.edit_message_text.assert_not_awaited()
+        self.assertEqual(nav._read_anchor(self.key),30)
+        self.assertEqual(nav._read(self.key),(31,"text"))
+        self.assertEqual([c.kwargs["message_id"] for c in self.bot.delete_message.await_args_list],[20,21])
+        user.delete.assert_awaited_once()
+
+    async def test_start_recovers_when_previous_messages_are_missing(self):
+        nav._save_anchor(self.key,20)
+        nav._save(self.key,21,"photo")
+        self.bot.delete_message.side_effect=TelegramBadRequest(method=None,message="message to delete not found")
+        self.bot.edit_message_reply_markup.side_effect=TelegramBadRequest(method=None,message="message to edit not found")
+        user=self.message(command=True,text="/start")
+        user.answer.side_effect=[SimpleNamespace(message_id=30),SimpleNamespace(message_id=31)]
+        await nav.render_command(user,"Welcome",keyboard=self.keyboard(),refresh_keyboard=True)
+        self.assertEqual(nav._read_anchor(self.key),30)
+        self.assertEqual(nav._read(self.key),(31,"text"))
+        self.bot.edit_message_text.assert_not_awaited()
+        user.delete.assert_awaited_once()
+
+    async def test_start_does_not_remove_command_if_welcome_send_fails(self):
+        nav._save_anchor(self.key,20)
+        nav._save(self.key,21,"text")
+        user=self.message(command=True,text="/start")
+        user.answer.side_effect=[SimpleNamespace(message_id=30),TelegramNetworkError(method=None,message="timeout")]
+        with self.assertRaises(TelegramNetworkError):
+            await nav.render_command(user,"Welcome",keyboard=self.keyboard(),refresh_keyboard=True)
+        self.assertEqual(nav._read(self.key),(21,"text"))
+        user.delete.assert_not_awaited()
+
+    async def test_real_start_handler_forces_recovery_for_existing_user(self):
+        import logging
+        import sqlite3
+        from test_renewal_checkout import load_functions
+        path=str(nav.NAV_DB_PATH.parent/"commercial.db")
+        with sqlite3.connect(path) as db:
+            db.executescript("""CREATE TABLE users(telegram_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT);
+                INSERT INTO users VALUES(42,'old','Old');""")
+        render=AsyncMock()
+        kb=self.keyboard()
+        env=load_functions("handlers/users.py",{"cmd_start"},
+            dict(types=SimpleNamespace(Message=object,InlineKeyboardMarkup=lambda **kw:kw,
+                                       InlineKeyboardButton=lambda **kw:kw),
+                 sqlite3=sqlite3,DB_PATH=path,logging=logging,
+                 get_setting=lambda k:None,get_main_keyboard=lambda uid:kb,render_command=render))
+        user=self.message(command=True,text="/start")
+        user.from_user.username="new"
+        user.from_user.first_name="New"
+        await env["cmd_start"](user)
+        render.assert_awaited_once()
+        self.assertTrue(render.await_args.kwargs["refresh_keyboard"])
+        self.assertIs(render.await_args.kwargs["keyboard"],kb)
+        with sqlite3.connect(path) as db:
+            self.assertEqual(db.execute("SELECT * FROM users").fetchall(),[(42,"new","New")])
