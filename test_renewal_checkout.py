@@ -71,11 +71,12 @@ class CheckoutTests(unittest.IsolatedAsyncioTestCase):
         env=load_functions("handlers/profile.py",{"renew_from_key"},
             dict(DB_PATH=self.path,renewable_subscriptions=renewable_subscriptions,
                  expiry_presentation=expiry_presentation,escape=escape,get_tariffs_keyboard=kb,
+                 render_screen=AsyncMock(),
                  types=SimpleNamespace(CallbackQuery=object)))
         self.callback.data="renew_from_key_2"
         await env["renew_from_key"](self.callback)
         kb.assert_called_once_with(subscription_id=2)
-        self.assertIn("№2",self.callback.message.answer.await_args.args[0])
+        self.assertIn("№2",env["render_screen"].await_args.args[1])
 
     async def test_keyboards_keep_target_and_buy_separate(self):
         env=load_functions("keyboards/keyboards.py",{"get_tariffs_keyboard"},

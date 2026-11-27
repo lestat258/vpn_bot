@@ -1,4 +1,5 @@
 from runtime_config import DB_PATH
+from screen_navigation import render_screen
 from services.vpn_service import vpn_service
 """
 Пользовательские хендлеры бота
@@ -144,8 +145,7 @@ async def cmd_start(message: types.Message):
 
 @router.callback_query(F.data == "start_menu")
 async def start_menu(callback: types.CallbackQuery):
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "Главное меню:",
         reply_markup=get_main_keyboard(callback.from_user.id),
         parse_mode="HTML",
@@ -273,7 +273,7 @@ async def device_instruction(callback: types.CallbackQuery):
     conn.close()
 
     if not subs:
-        await callback.message.answer(
+        await render_screen(callback.message, 
             "❌ У вас нет активной подписки.\n\n"
             "Пожалуйста, выберите тариф в разделе «📋 Купить ключ» и оплатите подписку.",
             reply_markup=get_tariffs_keyboard(),
@@ -302,7 +302,7 @@ async def device_instruction(callback: types.CallbackQuery):
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    await callback.message.answer(
+    await render_screen(callback.message, 
         f"📱 <b>Вы выбрали {device_name}</b>\n\n"
         f"У вас есть несколько активных подписок.\n"
         f"Выберите, для какой подписки показать инструкцию:",
@@ -341,7 +341,7 @@ async def device_key_selected(callback: types.CallbackQuery):
     conn.close()
 
     if not sub:
-        await callback.message.answer("❌ Подписка не найдена", parse_mode="HTML")
+        await render_screen(callback.message, "❌ Подписка не найдена", parse_mode="HTML")
         await callback.answer()
         return
 
@@ -381,7 +381,7 @@ async def show_instruction_for_key(callback, device, device_name, sub_id, email,
     # "best" server. Never invent or reconstruct links on a shared panel.
     link = await vpn_service.get_subscription_link(sub_id)
     if not isinstance(link, str) or not link.startswith("https://"):
-        await callback.message.answer(
+        await render_screen(callback.message, 
             "Не удалось получить ссылку подписки. Откройте «Мои ключи» "
             "или обратитесь в поддержку — новый ключ создавать не нужно.",
             reply_markup=get_back_keyboard("back_to_keys_from_install"),
@@ -415,7 +415,7 @@ async def show_instruction_for_key(callback, device, device_name, sub_id, email,
             [types.InlineKeyboardButton(text="🔙 Назад к устройствам", callback_data="back_to_devices")]
         ])
 
-    await callback.message.answer(
+    await render_screen(callback.message, 
         text,
         reply_markup=kb,
         parse_mode="HTML",
@@ -426,8 +426,7 @@ async def show_instruction_for_key(callback, device, device_name, sub_id, email,
 @router.callback_query(F.data == "back_to_devices")
 async def back_to_devices(callback: types.CallbackQuery):
     """Возврат к выбору устройства"""
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "Выберите ваше устройство:",
         reply_markup=get_device_keyboard(),
         parse_mode="HTML"
@@ -437,7 +436,6 @@ async def back_to_devices(callback: types.CallbackQuery):
 @router.callback_query(F.data == "back_to_keys_from_install")
 async def back_to_keys_from_install(callback: types.CallbackQuery):
     """Возврат к списку ключей из установки VPN"""
-    await callback.message.delete()
     # Показываем список ключей
     from handlers.profile import show_my_keys
     await show_my_keys(callback)
@@ -445,8 +443,7 @@ async def back_to_keys_from_install(callback: types.CallbackQuery):
 @router.callback_query(F.data == "back_to_main")
 async def back_to_main(callback: types.CallbackQuery):
     """Возврат в главное меню"""
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "Главное меню:",
         reply_markup=get_main_keyboard(callback.from_user.id),
         parse_mode="HTML"
