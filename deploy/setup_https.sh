@@ -8,7 +8,12 @@ fail() {
 }
 
 [[ $EUID == 0 ]] || fail 'Запустите скрипт через sudo.'
-[[ $# == 2 ]] || fail 'Использование: sudo bash deploy/setup_https.sh DOMAIN ACME_EMAIL'
+admin_only=0
+if [[ ${1:-} == --admin-only ]]; then
+    admin_only=1
+    shift
+fi
+[[ $# == 2 ]] || fail 'Использование: sudo bash deploy/setup_https.sh [--admin-only] DOMAIN ACME_EMAIL'
 domain=${1,,}
 email=$2
 [[ ${#domain} -le 253 && $domain =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] ||
@@ -65,7 +70,9 @@ nginx -T 2>/dev/null | awk -v domain="$domain" -v own="$site" '
     END { exit found ? 1 : 0 }
 ' || fail "Имя $domain уже используется в Nginx или конфигурация Nginx содержит ошибку."
 
-for address in http://127.0.0.1:8000/health http://127.0.0.1:8081/health; do
+addresses=(http://127.0.0.1:8000/health)
+if (( ! admin_only )); then addresses+=(http://127.0.0.1:8081/health); fi
+for address in "${addresses[@]}"; do
     curl --noproxy '*' --fail --header "Host: $domain" --silent --show-error --max-time 5 --output /dev/null "$address" ||
         fail "Служба VPN4US недоступна по адресу $address."
 done
@@ -162,7 +169,12 @@ reload_site
 systemctl enable --now certbot.timer
 curl --noproxy '*' --resolve "$domain:443:127.0.0.1" --fail --silent --show-error \
     --max-time 10 --output /dev/null "https://$domain/"
-status=$(curl --noproxy '*' --resolve "$domain:443:127.0.0.1" --silent --show-error \
+if (( ! admin_only )); then
+    status=$(curl --noproxy '*' --resolve "$domain:443:127.0.0.1" --silent --show-error \
     --max-time 10 --output /dev/null --write-out '%{http_code}' "https://$domain/webhook/")
-[[ $status == 405 ]] || fail "Webhook вернул HTTP $status на GET, ожидался HTTP 405."
-printf 'Админка VPN4US — https://%s/\nУведомления ЮKassa — https://%s/webhook/\n' "$domain" "$domain"
+    [[ $status == 405 ]] || fail "Webhook вернул HTTP $status на GET, ожидался HTTP 405."
+fi
+printf 'Админка VPN4US — https://%s/\n' "$domain"
+if (( ! admin_only )); then
+    printf 'Уведомления ЮKassa — https://%s/webhook/\n' "$domain"
+fi
