@@ -3,6 +3,7 @@
 Webhook сервер для обработки платежей ЮKassa
 """
 from runtime_config import DB_PATH
+from balance_ledger import is_registered, credit_verified, record_deposit_change, metadata_matches, kopecks, rubles
 import logging
 import os
 import json
@@ -110,8 +111,26 @@ async def get_tariff_info(tariff_id: int) -> Optional[Dict]:
 
 async def process_payment_success(payment_id, data):
     """Fulfill a payment previously verified through YooKassa API."""
-    from payment_fulfillment import process_verified_payment
+    from payment_fulfillment import process_verified_payment, _telegram_notify
     from tax_fulfillment import queue_verified
+    if await asyncio.to_thread(is_registered,DB_PATH,payment_id):
+        obj=data["object"]
+        refund=obj.get("refunded_amount")
+        # Require an explicit zero refund from the independently verified provider.
+        if refund is None or refund.currency!="RUB":
+            raise ValueError("Deposit refund state unavailable")
+        if kopecks(refund.value)>0:
+            await asyncio.to_thread(record_deposit_change,DB_PATH,payment_id,obj["metadata"],refund=refund.value)
+            return True
+        state,owner,balance=await asyncio.to_thread(credit_verified,DB_PATH,payment_id,obj["metadata"])
+        if state=="credited":
+            try:
+                await _telegram_notify(owner,f"✅ Баланс пополнен.\\nДоступный баланс: {rubles(balance):.2f} ₽",None,include_guide=False)
+            except Exception:
+                logger.warning("Deposit credited; notification not confirmed")
+        return state in ("credited","done","held")
+    if str(data["object"]["metadata"].get("tariff_id"))=="0":
+        return False
     # Commit verified fiscal work before fulfillment. The dedicated worker
     # independently rechecks YooKassa and never blocks the VPN response.
     from refund_fulfillment import scope, record_refund, money
@@ -205,6 +224,11 @@ async def verify_provider_payment(payment_id, expected_status='succeeded'):
         logger.error("Metadata mismatch: %s", payment_id)
         return None, web.Response(status=403, text="Metadata mismatch")
 
+    if rows[0]["tariff_id"]==0:
+        if not await asyncio.to_thread(is_registered,DB_PATH,payment_id) or not metadata_matches(
+                rows[0]["telegram_id"],kopecks(rows[0]["amount_rub"]),metadata):
+            return None,web.Response(status=403,text="Deposit metadata mismatch")
+
     verified_data = {
         "object": {
             "id": payment_id,
@@ -270,7 +294,11 @@ async def handle_payment_change(event, obj):
             return error
         if verified["object"].get("captured_at") is not None:
             return web.Response(status=409, text="Review required")
-        state = await asyncio.to_thread(record_canceled, DB_PATH, payment_id)
+        if await asyncio.to_thread(is_registered,DB_PATH,payment_id):
+            state=await asyncio.to_thread(record_deposit_change,DB_PATH,payment_id,
+                                          verified["object"]["metadata"],canceled=True)
+        else:
+            state = await asyncio.to_thread(record_canceled, DB_PATH, payment_id)
     else:
         refund = await fetch_verified_refund(object_id)
         if (str(getattr(refund,"id","")) != object_id
@@ -285,7 +313,11 @@ async def handle_payment_change(event, obj):
         if (aggregate is None or aggregate.currency != "RUB"
                 or not 0 < money(refund.amount.value) <= money(aggregate.value)):
             return web.Response(status=409, text="Refund mismatch")
-        state = await asyncio.to_thread(record_refund, DB_PATH, payment_id, money(aggregate.value))
+        if await asyncio.to_thread(is_registered,DB_PATH,payment_id):
+            state=await asyncio.to_thread(record_deposit_change,DB_PATH,payment_id,
+                                          verified["object"]["metadata"],refund=aggregate.value)
+        else:
+            state = await asyncio.to_thread(record_refund, DB_PATH, payment_id, money(aggregate.value))
     if state.endswith("review"):
         logger.warning("Payment change requires manual reconciliation")
     return web.Response(status=200, text="OK")

@@ -27,7 +27,7 @@ def _load_payment(db_path, payment_id):
             SELECT p.telegram_id, p.tariff_id, t.name, t.duration_days,
                    t.traffic_gb, t.ip_limit
               FROM payments p JOIN tariffs t ON t.id=p.tariff_id
-             WHERE p.payment_id=?
+             WHERE p.payment_id=? AND p.tariff_id>0
         ''', (payment_id,)).fetchone()
         return dict(row) if row else None
 
