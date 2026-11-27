@@ -2,6 +2,7 @@
 Обработчики платежей и тарифов
 """
 from runtime_config import DB_PATH
+from screen_navigation import render_screen
 from html import escape
 from subscription_renewal import renewable_subscriptions, renewal_tariff, expiry_presentation
 import logging
@@ -98,7 +99,7 @@ async def process_tariff(callback: types.CallbackQuery):
     # ============ ПРОВЕРКА НА ПРОБНЫЙ ТАРИФ ============
     if price == 0 and ('Пробный' in name or 'Тестовый' in name):
         if has_used_trial(callback.from_user.id):
-            await callback.message.answer(
+            await render_screen(callback.message, 
                 "❌ Вы уже использовали пробный доступ.\n\n"
                 "Для продолжения выберите платный тариф в разделе «📋 Купить ключ».",
                 reply_markup=get_tariffs_keyboard(),
@@ -128,7 +129,7 @@ async def process_tariff(callback: types.CallbackQuery):
             [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_tariffs")]
         ])
 
-        await callback.message.answer(
+        await render_screen(callback.message, 
             f"📋 <b>{name}</b>\n\n"
             f"У вас уже есть ключ.\n"
             f"Выберите действие:",
@@ -153,7 +154,7 @@ async def handle_renew_select(callback: types.CallbackQuery):
     tariff = renewal_tariff(DB_PATH, tariff_id)
 
     if not tariff:
-        await callback.message.answer("❌ Тариф не найден", parse_mode="HTML")
+        await render_screen(callback.message, "❌ Тариф не найден", parse_mode="HTML")
         await callback.answer()
         return
 
@@ -162,7 +163,7 @@ async def handle_renew_select(callback: types.CallbackQuery):
     active_subs = renewable_subscriptions(DB_PATH, callback.from_user.id)
 
     if not active_subs:
-        await callback.message.answer(
+        await render_screen(callback.message, 
             "❌ У вас нет доступных подписок для продления.\n\n"
             "Вы можете купить новый ключ.",
             reply_markup=get_tariffs_keyboard(),
@@ -188,7 +189,7 @@ async def handle_renew_select(callback: types.CallbackQuery):
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    await callback.message.answer(
+    await render_screen(callback.message, 
         f"📋 <b>Выберите подписку для продления</b>\n\n"
         f"Выберите, какую подписку вы хотите продлить:",
         reply_markup=kb,
@@ -240,7 +241,7 @@ async def handle_new_key(callback: types.CallbackQuery):
     tariff = get_tariff_by_id(tariff_id)
 
     if not tariff:
-        await callback.message.answer("❌ Тариф не найден", parse_mode="HTML")
+        await render_screen(callback.message, "❌ Тариф не найден", parse_mode="HTML")
         await callback.answer()
         return
 
@@ -401,7 +402,7 @@ async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip
             [types.InlineKeyboardButton(text="🔙 Назад", callback_data=back_to)]
         ])
 
-        await callback.message.answer(
+        await render_screen(callback.message, 
             f"📋 <b>{escape(name)}</b>\n"
             + target_text
             + f"💰 {price:.0f}₽"
@@ -413,7 +414,7 @@ async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip
         )
     except Exception as e:
         logging.error(f"Payment error: {e}")
-        await callback.message.answer(
+        await render_screen(callback.message, 
             f"❌ Ошибка при создании платежа: {e}\n\n"
             "Попробуйте позже или обратитесь в поддержку.",
             parse_mode="HTML"
@@ -444,8 +445,7 @@ async def handle_renew(callback: types.CallbackQuery):
 @router.callback_query(F.data == "back_to_tariffs")
 async def back_to_tariffs(callback: types.CallbackQuery):
     """Возврат к списку тарифов"""
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "Выберите подходящий тариф:",
         reply_markup=get_tariffs_keyboard(),
         parse_mode="HTML"
@@ -455,8 +455,7 @@ async def back_to_tariffs(callback: types.CallbackQuery):
 @router.callback_query(F.data == "back_to_main")
 async def back_to_main(callback: types.CallbackQuery):
     """Возврат в главное меню"""
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "Главное меню:",
         reply_markup=get_main_keyboard(callback.from_user.id),
         parse_mode="HTML"
@@ -466,8 +465,7 @@ async def back_to_main(callback: types.CallbackQuery):
 @router.callback_query(F.data == "back_to_renew_select")
 async def back_to_renew_select(callback: types.CallbackQuery):
     """Возврат к выбору ключа для продления"""
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "Выберите тариф, затем подписку для продления:",
         reply_markup=get_tariffs_keyboard(),
         parse_mode="HTML"

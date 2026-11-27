@@ -1,4 +1,5 @@
 from runtime_config import DB_PATH
+from screen_navigation import render_screen
 import asyncio
 import hashlib
 from balance_ledger import validate_deposit_amount, deposit_metadata, register_deposit, rubles
@@ -92,12 +93,11 @@ async def profile(message: types.Message):
 
 @router.callback_query(F.data == "back_to_profile")
 async def back_to_profile(callback: types.CallbackQuery):
-    await callback.message.delete()
     class FakeMessage:
         from_user = callback.from_user
         chat = callback.message.chat
         async def answer(self, *args, **kwargs):
-            await callback.message.answer(*args, **kwargs)
+            await render_screen(callback.message, *args, **kwargs)
     await profile(FakeMessage())
     await callback.answer()
 
@@ -153,7 +153,7 @@ async def balance_auto_renew_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="back_to_profile")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "balance_help")
@@ -178,14 +178,13 @@ async def balance_help(callback: types.CallbackQuery):
 • Вы всегда можете отключить авто-продление"""
 
     kb = get_back_keyboard("balance_auto_renew")
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 # ============ КЛЮЧИ ============
 
 @router.callback_query(F.data == "my_keys")
 async def show_my_keys(callback: types.CallbackQuery):
-    await callback.message.delete()
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -195,14 +194,14 @@ async def show_my_keys(callback: types.CallbackQuery):
 
     if count == 0:
         kb = get_back_keyboard("back_to_tariffs")
-        await callback.message.answer(
+        await render_screen(callback.message, 
             "🔑 <b>У вас нет доступных ключей</b>\n\n"
             "Вы можете приобрести ключ в разделе «📋 Купить ключ».",
             reply_markup=kb,
             parse_mode="HTML"
         )
     else:
-        await callback.message.answer(
+        await render_screen(callback.message, 
             "🔑 <b>Ваши ключи</b>\n\nВыберите подписку чтобы увидеть ключ и инструкцию:",
             reply_markup=get_keys_keyboard(callback.from_user.id),
             parse_mode="HTML"
@@ -220,7 +219,7 @@ async def render_key_detail(callback: types.CallbackQuery, sub_id: int):
     sub = get_subscription_details(sub_id)
 
     if not sub or sub[8] != callback.from_user.id:
-        await callback.message.answer("❌ Подписка не найдена", parse_mode="HTML")
+        await render_screen(callback.message, "❌ Подписка не найдена", parse_mode="HTML")
         return
 
     sub_id, email, end_date, tariff_name, xui_client_uid, traffic_used, tariff_id, start_date, user_id = sub
@@ -287,14 +286,7 @@ async def render_key_detail(callback: types.CallbackQuery, sub_id: int):
             return
         await message.answer_photo(photo)
 
-    if message.photo:
-        await message.answer(text, reply_markup=kb, parse_mode="HTML")
-        try:
-            await message.delete()
-        except TelegramBadRequest:
-            pass
-    else:
-        await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(message,text,reply_markup=kb,parse_mode="HTML")
 
 # ============ ПРОДЛЕНИЕ КЛЮЧА ============
 
@@ -314,7 +306,7 @@ async def renew_from_key(callback: types.CallbackQuery):
     _, end_date, name = rows[0]
     current, date_label, _ = expiry_presentation(end_date)
     status = "до" if current else "истёк"
-    await callback.message.answer(
+    await render_screen(callback.message, 
         f"📋 <b>Выберите тариф для продления</b>\n\n"
         f"🔑 Ключ №{sub_id}: {escape(name)} ({status} {date_label})\n\n"
         "Действующий ключ продлевается от даты окончания, просроченный — "
@@ -330,7 +322,7 @@ async def renew_from_key(callback: types.CallbackQuery):
 async def user_delete_key(callback: types.CallbackQuery):
     # Deliberate safety guard: a shared 3x-ui panel must not be modified
     # until precise per-client ownership and inbound scoping are implemented.
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "⚠️ Удаление ключа пока недоступно. Ваш доступ сохранится. "
         "Для отключения обратитесь в службу поддержки.",
         reply_markup=get_back_keyboard("my_keys"),
@@ -360,7 +352,7 @@ async def deposit_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="✏️ Своя сумма", callback_data="deposit_custom")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_profile")]
     ])
-    await callback.message.edit_text(
+    await render_screen(callback.message, 
         f"💰 <b>Пополнение баланса</b>\n\n"
         f"Текущий баланс: <b>{balance:.2f} ₽</b>\n\n"
         f"Выберите сумму для пополнения или введите свою:",
@@ -371,17 +363,26 @@ async def deposit_menu(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "deposit_custom")
 async def deposit_custom(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "✏️ <b>Введите сумму пополнения</b>\n\n"
         "Минимальная сумма: <b>10 ₽</b>\n"
         "Максимальная сумма: <b>100000 ₽</b>\n\n"
         "Введите число (например: 150, 250.50):\n"
         "Или отправьте /cancel для отмены",
+        reply_markup=get_back_keyboard("cancel_custom_deposit"),
         parse_mode="HTML"
     )
     await state.set_state(CustomDeposit.amount)
     await callback.answer()
+
+@router.callback_query(F.data == "cancel_custom_deposit")
+async def cancel_custom_deposit(callback: types.CallbackQuery, state: FSMContext):
+    if await state.get_state()!=CustomDeposit.amount.state:
+        await callback.answer("Ввод уже завершён",show_alert=True)
+        return
+    await state.clear()
+    await deposit_menu(callback)
+
 
 async def create_deposit_payment(bot, owner, amount, request_key):
     from yookassa import Payment
@@ -437,10 +438,10 @@ async def deposit_process(callback: types.CallbackQuery):
     try:
         amount=validate_deposit_amount(callback.data.removeprefix("deposit_"))
         kb=await create_deposit_payment(callback.bot,callback.from_user.id,amount,f"callback:{callback.id}")
-        await callback.message.edit_text(f"💳 Пополнение баланса: {rubles(amount):.2f} ₽\nНажмите кнопку для оплаты.",reply_markup=kb)
+        await render_screen(callback.message, f"💳 Пополнение баланса: {rubles(amount):.2f} ₽\nНажмите кнопку для оплаты.",reply_markup=kb)
     except Exception:
         logging.error("Deposit creation failed")
-        await callback.message.answer("Не удалось подготовить платёж. Обратитесь в поддержку.")
+        await render_screen(callback.message, "Не удалось подготовить платёж. Обратитесь в поддержку.")
     await callback.answer()
 
 
@@ -480,8 +481,10 @@ async def toggle_auto_renew(callback: types.CallbackQuery):
 # ============ ПРОМОКОДЫ И ДОСТИЖЕНИЯ ============
 
 @router.callback_query(F.data == "promo_achievements")
-async def promo_achievements_menu(callback: types.CallbackQuery):
+async def promo_achievements_menu(callback: types.CallbackQuery, state: FSMContext=None):
     """Объединённое меню промокодов и достижений (главное меню раздела)"""
+    if state is not None and await state.get_state()==EnterPromocode.waiting.state:
+        await state.clear()
     from trigger_manager import trigger_manager
     from datetime import datetime
 
@@ -540,7 +543,7 @@ async def promo_achievements_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="back_to_profile")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -562,7 +565,7 @@ async def show_my_promocodes(callback: types.CallbackQuery):
         kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")]
         ])
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
         await callback.answer()
         return
 
@@ -591,7 +594,7 @@ async def show_my_promocodes(callback: types.CallbackQuery):
 
     buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message, 
         text,
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
@@ -629,7 +632,7 @@ async def apply_promo_confirm(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="❌ Нет, отмена", callback_data="my_promocodes")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -680,7 +683,7 @@ async def show_achievements(callback: types.CallbackQuery):
         kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")]
         ])
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
         await callback.answer()
         return
 
@@ -726,7 +729,7 @@ async def show_achievements(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -769,7 +772,7 @@ async def achievements_help(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -782,7 +785,7 @@ async def profile_promocode(callback: types.CallbackQuery, state: FSMContext):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message, 
         "🏷️ <b>Ввести промокод</b>\n\n"
         "Введите промокод, чтобы получить скидку на подписку.\n"
         "Промокоды действуют ограниченное время.\n\n"
