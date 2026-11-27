@@ -497,15 +497,14 @@ async def process_promocode_input(message: types.Message, state: FSMContext):
                              reply_markup=kb, parse_mode="HTML", clean_cancel=True)
         return
 
-    # Keep the existing manual-discount lifecycle in this UI change.
-    # The two writes are now committed together; checkout reservation and
-    # consumption of discounts belong to a separate financial change.
+    # Activation claims the code quota, payment consumes the discount.
     owner = message.from_user.id
     error = None
     discount_text = None
     with closing(sqlite3.connect(DB_PATH)) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
-        from promo_reservations import has_open
+        from promo_reservations import has_open, expire_manual_grant, save_manual_grant, _unexpired
+        expire_manual_grant(conn,owner)
         c = conn.cursor()
         if has_open(conn,owner):
             error = "❌ Сначала завершите ожидающий счёт со скидкой."
@@ -522,7 +521,7 @@ async def process_promocode_input(message: types.Message, state: FSMContext):
             error = "❌ Промокод не найден или неактивен"
         else:
             pid, percent, amount, valid_until, max_uses, used_count = promo
-            if valid_until and datetime.now() > datetime.fromisoformat(valid_until):
+            if valid_until and not _unexpired(valid_until):
                 error = "❌ Срок действия промокода истёк"
             elif used_count >= max_uses:
                 error = "❌ Промокод уже использован максимальное количество раз"
@@ -539,6 +538,7 @@ async def process_promocode_input(message: types.Message, state: FSMContext):
                 c.execute("UPDATE promocodes SET used_count=used_count+1 WHERE id=?", (pid,))
                 c.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
                           (f"promocode_user_{owner}", value))
+                save_manual_grant(conn,owner,pid,value,valid_until)
     if error is not None:
         await promo_input_error(message, state, error)
         return

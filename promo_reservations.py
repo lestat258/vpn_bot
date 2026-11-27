@@ -90,6 +90,34 @@ def _unexpired(raw):
         return False
 
 
+def ensure_manual_schema(db):
+    db.execute("""CREATE TABLE IF NOT EXISTS manual_promo_grants (
+        telegram_id INTEGER PRIMARY KEY, promocode_id INTEGER NOT NULL,
+        value TEXT NOT NULL, valid_until TEXT)""")
+
+
+def save_manual_grant(db,owner,promo_id,value,valid_until):
+    """Called in the same transaction as the activation counter and setting."""
+    ensure_manual_schema(db)
+    db.execute("""INSERT INTO manual_promo_grants(telegram_id,promocode_id,value,valid_until)
+        VALUES(?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET
+        promocode_id=excluded.promocode_id,value=excluded.value,valid_until=excluded.valid_until""",
+        (owner,promo_id,value,valid_until))
+
+
+def expire_manual_grant(db,owner):
+    """Only expire new grants with known deadlines. Legacy settings are preserved."""
+    ensure_manual_schema(db)
+    if has_open(db,owner):
+        return False
+    row=db.execute("SELECT value,valid_until FROM manual_promo_grants WHERE telegram_id=?",(owner,)).fetchone()
+    if row is None or row[1] is None or _unexpired(row[1]):
+        return False
+    db.execute("UPDATE settings SET value='' WHERE key=? AND value=?",(f"promocode_user_{owner}",row[0]))
+    db.execute("DELETE FROM manual_promo_grants WHERE telegram_id=?",(owner,))
+    return True
+
+
 def _select(db,owner,price):
     """Retain prior policy: first valid reward versus manual, larger wins.
     Equal discounts prefer the reward. Never combine discounts."""
@@ -136,6 +164,7 @@ def reserve(path,checkout_id,owner,tariff_id,price,*,action="new_key",subscripti
             return dict(existing),False
         if has_open(db,owner):
             raise ReservationBusy("Previous discounted checkout is unresolved")
+        expire_manual_grant(db,owner)
         candidate=_select(db,owner,original)
         if candidate is None:
             return None,False
@@ -231,6 +260,8 @@ def settle(db,payment_id,metadata,amount,status):
                            (f"promocode_user_{owner}",row["manual_value"]))
             if cur.rowcount!=1:
                 raise ReservationConflict("Manual discount changed while reserved")
+            ensure_manual_schema(db)
+            db.execute("DELETE FROM manual_promo_grants WHERE telegram_id=? AND value=?",(owner,row["manual_value"]))
         else:
             cur=db.execute("""UPDATE user_promocodes SET is_used=1,used_at=CURRENT_TIMESTAMP
                 WHERE id=? AND user_id=? AND promocode_id=? AND is_used=0""",
@@ -276,3 +307,31 @@ def settle_verified_success(path,payment_id,obj):
         if obj.get("id")!=payment_id:
             raise ReservationConflict("Provider payment identity mismatch")
         return settle(db,payment_id,metadata,obj["amount_rub"],"succeeded")
+
+
+def unbound_reservation(path,checkout_id):
+    if not isinstance(checkout_id,str) or not 1<=len(checkout_id)<=128:
+        return None
+    with closing(sqlite3.connect(path,timeout=15)) as db:
+        db.row_factory=sqlite3.Row
+        if not has_schema(db):
+            return None
+        row=db.execute("SELECT * FROM promo_reservations WHERE checkout_id=? AND state='reserved'",(checkout_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def has_unbound(path):
+    with closing(sqlite3.connect(path,timeout=15)) as db:
+        return has_schema(db) and bool(db.execute("SELECT 1 FROM promo_reservations WHERE state='reserved' LIMIT 1").fetchone())
+
+
+def recover_verified_binding(path,payment_id,metadata,amount):
+    """Only from authenticated provider response, never raw webhook data."""
+    if not isinstance(metadata,dict):
+        return False
+    row=unbound_reservation(path,metadata.get("promo_reservation_id"))
+    if row is None:
+        return False
+    _match(row,metadata,amount)
+    attach(path,row["checkout_id"],payment_id,metadata,amount)
+    return True

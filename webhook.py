@@ -153,8 +153,8 @@ async def process_payment_success(payment_id, data):
 # ВЕБХУК
 # ============================================================
 
-async def verify_provider_payment(payment_id, expected_status='succeeded'):
-    """Read-only provider lookup and validation shared by webhook and tax worker."""
+async def verify_provider_payment(payment_id, expected_status='succeeded', *, allow_recovery=False):
+    """Verify provider state; only webhook may recover a missing local binding."""
     from decimal import Decimal
 
     rows = await async_get_db_query(
@@ -164,8 +164,9 @@ async def verify_provider_payment(payment_id, expected_status='succeeded'):
     )
 
     if not rows:
-        logger.warning("Unknown payment: %s", payment_id)
-        return None, web.Response(status=404, text="Not Found")
+        from promo_reservations import has_unbound
+        if not allow_recovery or not await asyncio.to_thread(has_unbound,DB_PATH):
+            return None, web.Response(status=404,text="Not Found")
 
     shop_id = get_setting("yookassa_shop_id")
     stored_secret = get_setting("yookassa_secret_key")
@@ -201,6 +202,20 @@ async def verify_provider_payment(payment_id, expected_status='succeeded'):
         or verified.paid is not (expected_status == "succeeded")
     ):
         return None, web.Response(status=403, text="Unconfirmed")
+
+    if not rows:
+        from promo_reservations import recover_verified_binding, ReservationConflict
+        try:
+            if verified.amount.currency!="RUB" or (expected_status=="canceled" and getattr(verified,"captured_at",None) is not None):
+                return None,web.Response(status=403,text="Unconfirmed")
+            await asyncio.to_thread(recover_verified_binding,DB_PATH,payment_id,
+                getattr(verified,"metadata",None),verified.amount.value)
+            # Another verifier may have attached it concurrently.
+            rows=await async_get_db_query("SELECT telegram_id, tariff_id, amount_rub FROM payments WHERE payment_id = ?",(payment_id,))
+            if not rows:
+                return None,web.Response(status=404,text="Not Found")
+        except (ReservationConflict,ValueError,sqlite3.Error):
+            return None,web.Response(status=409,text="Review required")
 
     try:
         expected = Decimal(
@@ -296,15 +311,17 @@ async def handle_payment_change(event, obj):
     category = await asyncio.to_thread(scope, DB_PATH, payment_id)
     if category == "historical":
         return web.Response(status=200, text="OK")
-    if category != "new":
+    if category != "new" and not (category=="unknown" and event=="payment.canceled"):
         return web.Response(status=404, text="Not Found")
 
     if event == "payment.canceled":
-        verified, error = await verify_provider_payment(payment_id, "canceled")
+        verified, error = await verify_provider_payment(payment_id, "canceled", allow_recovery=True)
         if error is not None:
             return error
         if verified["object"].get("captured_at") is not None:
             return web.Response(status=409, text="Review required")
+        if await asyncio.to_thread(scope, DB_PATH, payment_id)!="new":
+            return web.Response(status=404,text="Not Found")
         if await asyncio.to_thread(is_registered,DB_PATH,payment_id):
             state=await asyncio.to_thread(record_deposit_change,DB_PATH,payment_id,
                                           verified["object"]["metadata"],canceled=True)
@@ -421,7 +438,7 @@ async def handle_webhook(request):
         if not isinstance(payment_id, str) or not payment_id or len(payment_id) > 128:
             return web.Response(status=400, text="Bad Request")
 
-        verified_data, error = await verify_provider_payment(payment_id)
+        verified_data, error = await verify_provider_payment(payment_id, allow_recovery=True)
         if error is not None:
             return error
 
