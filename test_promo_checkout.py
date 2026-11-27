@@ -5,11 +5,16 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import Mock, AsyncMock, patch
 import asyncio
+import sys
+from datetime import datetime
+from types import ModuleType
+from decimal import Decimal
 from promo_checkout import create_checkout, check_open_checkout, request_key
 from promo_reservations import (
-    ReservationBusy,ReservationConflict,open_reservation,settle_verified_success,validate_binding
+    ReservationBusy,ReservationConflict,open_reservation,settle_verified_success,validate_binding,
+    save_manual_grant,transaction,has_unbound,recover_verified_binding
 )
 from refund_fulfillment import scope,record_canceled
 from trigger_manager import TriggerManager
@@ -185,3 +190,191 @@ class PromoCheckoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_key(1,"a"),request_key(1,"a"))
         self.assertNotEqual(request_key(1,"a"),request_key(2,"a"))
         self.assertEqual(len(request_key(1,"a")),64)
+
+
+    def lost_response(self):
+        def lost(payload,key):
+            self.create(payload,key)
+            raise TimeoutError("response lost")
+        self.provider.create.side_effect=lost
+        with self.assertRaises(TimeoutError):
+            self.checkout()
+        self.provider.list=Mock(return_value=SimpleNamespace(items=[self.payment],next_cursor=None))
+
+    def test_lost_response_recovers_existing_pending_payment_without_create(self):
+        self.lost_response()
+        self.assertTrue(has_unbound(self.path))
+        self.assertEqual(check_open_checkout(self.path,self.provider,42),("pending",8500,"https://example.invalid/pay"))
+        self.assertFalse(has_unbound(self.path))
+        self.provider.create.assert_called_once()
+        self.provider.find_one.assert_called_once_with("pay")
+        self.assertEqual(self.query("SELECT payment_id FROM payments ORDER BY id"),[("old",),("pay",)])
+
+    def test_lost_response_recovers_canceled_payment(self):
+        self.lost_response()
+        self.payment.status="canceled"
+        self.assertEqual(check_open_checkout(self.path,self.provider,42),("canceled",8500,None))
+        self.assertEqual(self.query("SELECT state FROM promo_reservations"),[("released",)])
+        self.assertEqual(self.query("SELECT value FROM settings"),[("15|0",)])
+
+    def test_empty_list_never_releases_reservation(self):
+        self.lost_response()
+        self.provider.list.return_value=SimpleNamespace(items=[],next_cursor=None)
+        self.assertEqual(check_open_checkout(self.path,self.provider,42),("review",8500,None))
+        self.assertTrue(has_unbound(self.path))
+        self.provider.find_one.assert_not_called()
+
+    def test_incomplete_list_never_attaches(self):
+        self.lost_response()
+        self.provider.list.side_effect=[
+            SimpleNamespace(items=[self.payment],next_cursor="a"),
+            SimpleNamespace(items=[],next_cursor="b"),
+            SimpleNamespace(items=[],next_cursor="c")]
+        self.assertEqual(check_open_checkout(self.path,self.provider,42),("review",8500,None))
+        self.assertTrue(has_unbound(self.path))
+        self.assertEqual(self.provider.list.call_count,3)
+        self.provider.find_one.assert_not_called()
+
+    def test_two_matching_ids_require_review(self):
+        self.lost_response()
+        other=SimpleNamespace(**vars(self.payment))
+        other.id="other"
+        self.provider.list.return_value=SimpleNamespace(items=[self.payment,other],next_cursor=None)
+        self.assertEqual(check_open_checkout(self.path,self.provider,42),("review",8500,None))
+        self.assertTrue(has_unbound(self.path))
+
+    def test_recovered_binding_must_match_metadata(self):
+        self.lost_response()
+        wrong={**self.payment.metadata,"telegram_id":"43"}
+        with self.assertRaises(ReservationConflict):
+            recover_verified_binding(self.path,"pay",wrong,"85.00")
+        self.assertTrue(has_unbound(self.path))
+        self.assertFalse(recover_verified_binding(self.path,"old",{},"100.00"))
+        self.assertEqual(self.query("SELECT payment_id FROM payments"),[("old",)])
+
+    def test_expired_manual_grant_cannot_discount_new_checkout(self):
+        with transaction(self.path) as db:
+            save_manual_grant(db,42,1,"15|0","2000-01-01")
+        self.assertEqual(self.checkout(),(10000,0,"https://example.invalid/pay"))
+        self.assertEqual(self.query("SELECT value FROM settings"),[("",)])
+        self.assertEqual(self.query("SELECT * FROM manual_promo_grants"),[])
+
+    def test_expiry_during_pending_order_does_not_block_verified_payment(self):
+        with transaction(self.path) as db:
+            save_manual_grant(db,42,1,"15|0","2099-01-01")
+        self.checkout()
+        self.execute("UPDATE manual_promo_grants SET valid_until='2000-01-01'")
+        self.assertEqual(settle_verified_success(self.path,"pay",self.verified()),"consumed")
+        self.assertEqual(self.query("SELECT * FROM manual_promo_grants"),[])
+
+    def test_cancel_after_expiry_does_not_restore_expired_discount_for_new_order(self):
+        with transaction(self.path) as db:
+            save_manual_grant(db,42,1,"15|0","2099-01-01")
+        self.checkout()
+        self.execute("UPDATE manual_promo_grants SET valid_until='2000-01-01'")
+        self.payment.status="canceled"
+        self.assertEqual(check_open_checkout(self.path,self.provider,42)[0],"canceled")
+        self.provider.create.side_effect=lambda payload,key: SimpleNamespace(
+            id="pay2",metadata=payload["metadata"],amount=SimpleNamespace(**payload["amount"]),
+            confirmation=SimpleNamespace(confirmation_url="https://example.invalid/pay"))
+        self.assertEqual(self.checkout("second")[0:2],(10000,0))
+
+    def verifier(self):
+        from aiohttp import web
+        async def query(sql,args):
+            with closing(sqlite3.connect(self.path)) as db:
+                db.row_factory=sqlite3.Row
+                return db.execute(sql,args).fetchall()
+        return load_functions("webhook.py",{"verify_provider_payment"},
+            dict(async_get_db_query=query,DB_PATH=self.path,asyncio=asyncio,sqlite3=sqlite3,
+                web=web,get_setting=lambda key:"test",logger=Mock()))["verify_provider_payment"]
+
+    def fake_sdk(self):
+        fake=ModuleType("yookassa")
+        fake.Configuration=SimpleNamespace()
+        fake.Payment=self.provider
+        enc=ModuleType("encryption")
+        enc.decrypt=lambda value:value
+        return patch.dict(sys.modules,{"yookassa":fake,"encryption":enc})
+
+    async def test_real_verifier_recovers_missing_local_order_on_success(self):
+        self.lost_response()
+        self.payment.status="succeeded"
+        self.payment.paid=True
+        with self.fake_sdk():
+            verified,error=await self.verifier()("pay",allow_recovery=True)
+        self.assertIsNone(error)
+        self.assertEqual(verified["object"]["amount_rub"],"85.00")
+        self.assertEqual(settle_verified_success(self.path,"pay",verified["object"]),"consumed")
+        self.provider.create.assert_called_once()
+
+    async def test_read_only_verifier_does_not_adopt_unknown_order(self):
+        self.lost_response()
+        with self.fake_sdk():
+            verified,error=await self.verifier()("pay")
+        self.assertIsNone(verified)
+        self.assertEqual(error.status,404)
+        self.assertTrue(has_unbound(self.path))
+        self.provider.find_one.assert_not_called()
+
+    async def test_real_verifier_rejects_wrong_metadata_on_recovery(self):
+        self.lost_response()
+        self.payment.status="succeeded"
+        self.payment.paid=True
+        self.payment.metadata={**self.payment.metadata,"tariff_id":"99"}
+        with self.fake_sdk():
+            verified,error=await self.verifier()("pay",allow_recovery=True)
+        self.assertIsNone(verified)
+        self.assertEqual(error.status,409)
+        self.assertTrue(has_unbound(self.path))
+
+    async def test_real_verifier_rejects_unconfirmed_payment(self):
+        self.lost_response()
+        with self.fake_sdk():
+            verified,error=await self.verifier()("pay",allow_recovery=True)
+        self.assertIsNone(verified)
+        self.assertEqual(error.status,403)
+        self.assertTrue(has_unbound(self.path))
+
+
+    async def test_success_handler_settles_before_fulfillment_and_is_idempotent(self):
+        self.checkout()
+        from aiohttp import web
+        from balance_ledger import is_registered
+        from unittest.mock import patch
+        queue=Mock()
+        async def fulfill(pid,data):
+            self.assertEqual(self.query("SELECT state FROM promo_reservations"),[("consumed",)])
+            self.assertEqual(self.query("SELECT value FROM settings"),[("",)])
+            return True
+        fulfill=AsyncMock(side_effect=fulfill)
+        fake_fulfill=ModuleType("payment_fulfillment")
+        fake_fulfill.process_verified_payment=fulfill
+        fake_fulfill._telegram_notify=AsyncMock()
+        fake_tax=ModuleType("tax_fulfillment")
+        fake_tax.queue_verified=queue
+        fn=load_functions("webhook.py",{"process_payment_success"},
+            dict(DB_PATH=self.path,asyncio=asyncio,is_registered=is_registered))["process_payment_success"]
+        data={"object":{**self.verified(),"refunded_amount":None}}
+        with patch.dict(sys.modules,{"payment_fulfillment":fake_fulfill,"tax_fulfillment":fake_tax}):
+            self.assertTrue(await fn("pay",data))
+            self.assertTrue(await fn("pay",data))
+        self.assertEqual(queue.call_count,2)
+        self.assertEqual(fulfill.await_count,2)
+        self.assertEqual(self.query("SELECT state FROM promo_reservations"),[("consumed",)])
+
+    async def test_cancellation_handler_recovers_unbound_order_then_releases(self):
+        self.lost_response()
+        self.payment.status="canceled"
+        from aiohttp import web
+        from balance_ledger import is_registered
+        fn=load_functions("webhook.py",{"handle_payment_change"},
+            dict(DB_PATH=self.path,asyncio=asyncio,is_registered=is_registered,
+                 verify_provider_payment=self.verifier(),web=web,logger=Mock()))["handle_payment_change"]
+        with self.fake_sdk():
+            response=await fn("payment.canceled",{"id":"pay"})
+            replay=await fn("payment.canceled",{"id":"pay"})
+        self.assertEqual((response.status,replay.status),(200,200))
+        self.assertEqual(self.query("SELECT state FROM promo_reservations"),[("released",)])
+        self.assertEqual(self.query("SELECT status FROM payments WHERE payment_id='pay'"),[("canceled",)])
+        self.provider.create.assert_called_once()

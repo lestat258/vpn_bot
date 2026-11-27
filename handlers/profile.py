@@ -521,13 +521,20 @@ def promo_menu_content(owner):
     status = trigger_manager.get_user_trigger_status(owner)
 
     text = "🎫 <b>Промокоды и достижения</b>\n\n"
-    from promo_reservations import open_reservation
+    from promo_reservations import open_reservation, manual_discount_status
     pending = open_reservation(DB_PATH,owner)
+    manual = manual_discount_status(DB_PATH,owner)
     if pending:
         text += "⏳ Скидка зарезервирована в ожидающем счёте.\n\n"
 
+    if manual:
+        discount, deadline = manual
+        text += f"🏷️ Ручной промокод: <b>{escape(discount)}</b>\n"
+        if deadline:
+            text += f"Срок действия: {escape(deadline[:10])}\n"
+        text += "\n"
     if active:
-        text += "🟢 <b>Ваши промокоды:</b>\n\n"
+        text += "🟢 <b>Ваши награды:</b>\n\n"
         for promo in active:
             days_left = (datetime.fromisoformat(promo['expires_at']) - datetime.now()).days
             if promo['discount_percent'] > 0:
@@ -537,7 +544,7 @@ def promo_menu_content(owner):
             text += f"📌 <b>{promo['code']}</b> — {discount_text} (ещё {days_left} дн.)\n"
         text += "\n💡 Нажмите «Мои промокоды» для управления\n\n"
     else:
-        text += "📭 <b>У вас нет активных промокодов</b>\n\n"
+        text += "📭 <b>У вас нет активных наград</b>\n\n"
 
     if status:
         text += "🏆 <b>Прогресс достижений:</b>\n\n"

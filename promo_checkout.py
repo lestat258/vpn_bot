@@ -1,6 +1,7 @@
 """Provider integration for durable discount reservations."""
 import hashlib
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from contextlib import closing
 from balance_ledger import kopecks,rubles
 from promo_reservations import (
@@ -72,15 +73,58 @@ def create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,usernam
     return amount,discount,payment_link(payment)
 
 
+def recover_from_list(path,provider,row,*,max_pages=3):
+    """Bounded read-only search. Never release a reservation based on absence.
+    Require a unique exact marker and independently fetch the candidate.
+    """
+    created=datetime.fromisoformat(row["created_at"]).replace(tzinfo=timezone.utc)
+    params={"created_at.gte":(created-timedelta(minutes=5)).isoformat().replace("+00:00","Z"),"limit":100}
+    matches=set()
+    cursors=set()
+    for _ in range(max_pages):
+        page=provider.list(dict(params))
+        for item in page.items:
+            meta=getattr(item,"metadata",None)
+            if isinstance(meta,dict) and meta.get("promo_reservation_id")==row["checkout_id"]:
+                matches.add(provider_fields(item,metadata_for(row),payable(row)))
+        cursor=page.next_cursor
+        if not cursor:
+            break
+        if cursor in cursors:
+            return None
+        cursors.add(cursor)
+        params["cursor"]=cursor
+    else:
+        return None
+    if len(matches)!=1:
+        return None
+    pid=next(iter(matches))
+    payment=provider.find_one(pid)
+    if provider_fields(payment,metadata_for(row),payable(row))!=pid:
+        raise ReservationConflict("Wrong provider payment")
+    if not ((payment.status=="pending" and payment.paid is False)
+            or (payment.status=="succeeded" and payment.paid is True)
+            or (payment.status=="canceled" and payment.paid is False and getattr(payment,"captured_at",None) is None)):
+        return None
+    attach(path,row["checkout_id"],pid,payment.metadata,payment.amount.value)
+    return payment
+
+
 def check_open_checkout(path,provider,owner):
     """Read only the owner's attached provider order, except verified cancellation."""
     row=open_reservation(path,owner)
     if not row:
         return "none",None,None
     if row["state"]=="reserved":
-        return "review",payable(row),None
-    pid=row["payment_id"]
-    payment=provider.find_one(pid)
+        if not callable(getattr(provider,"list",None)):
+            return "review",payable(row),None
+        payment=recover_from_list(path,provider,row)
+        if payment is None:
+            return "review",payable(row),None
+        pid=payment.id
+    else:
+        pid=row["payment_id"]
+        payment=provider.find_one(pid)
     if provider_fields(payment,metadata_for(row),payable(row))!=pid:
         raise ReservationConflict("Wrong provider payment")
     validate_binding(path,pid,payment.metadata,payment.amount.value)
