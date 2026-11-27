@@ -20,58 +20,9 @@ from utils import generate_short_email, find_subid_by_email
 
 logger = logging.getLogger(__name__)
 
-def _client_state(api, email, uid, subid):
-    reply = api._request('GET', '/panel/api/clients/get/' + quote(email, safe=''))
-    if not reply or reply.get('success') is not True:
-        raise ValueError('Не удалось прочитать клиента панели')
-    payload = reply['obj']
-    client = payload['client']
-    if (not uid or not subid or client.get('email') != email
-            or uid not in (client.get('uuid'), client.get('id'))
-            or client.get('subId') != subid or client.get('enable') is not True
-            or not payload.get('inboundIds')):
-        raise ValueError('Проверка владельца и состояния ключа не пройдена')
-    return int(client['expiryTime']), sorted(payload['inboundIds'])
-
-
 def _renew(subscription_id, days, tariff_id):
-    if type(days) is not int or days <= 0:
-        raise ValueError('Срок продления должен быть положительным')
-    # Serialize renewals of this key across bot and webhook processes.
-    lock_path = Path(DB_PATH).with_name(f'.renew-{int(subscription_id)}.lock')
-    with lock_path.open('a') as lock, closing(sqlite3.connect(DB_PATH)) as db:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        row = db.execute("""
-            SELECT s.end_date, s.xui_email, s.xui_client_uid, s.xui_subid,
-                   v.url, v.api_token
-              FROM subscriptions s JOIN servers v ON v.id=s.server_id
-             WHERE s.id=?
-        """, (subscription_id,)).fetchone()
-        if not row:
-            raise ValueError('Подписка или её сервер не найдены')
-        end, email, uid, subid, url, token = row
-        api = XUIClient(url=url, api_token=token)
-        old_ms, inbounds = _client_state(api, email, uid, subid)
-        local_end = datetime.fromisoformat(end)
-        if old_ms <= 0 or abs(old_ms - int(local_end.timestamp() * 1000)) > 1:
-            raise ValueError('Срок в панели требует сверки')
-        target_ms = old_ms + days * 86400000
-        reply = api._request('POST', '/panel/api/clients/bulkAdjust',
-                             {'emails': [email], 'addDays': days}, retries=1)
-        after = _client_state(api, email, uid, subid)
-        if (not reply or reply.get('success') is not True
-                or (reply.get('obj') or {}).get('adjusted') != 1
-                or after != (target_ms, inbounds)):
-            raise ValueError('Панель не подтвердила продление, требуется сверка')
-        new_end = datetime.fromtimestamp(target_ms / 1000, tz=local_end.tzinfo)
-        with db:
-            updated = db.execute("""
-                UPDATE subscriptions SET end_date=?, tariff_id=COALESCE(?, tariff_id)
-                 WHERE id=? AND end_date=? AND xui_client_uid=? AND xui_subid=?
-            """, (new_end.isoformat(), tariff_id, subscription_id, end, uid, subid))
-            if updated.rowcount != 1:
-                raise ValueError('Подписка изменилась во время продления, требуется сверка')
-        return new_end
+    from subscription_renewal import renew_subscription
+    return renew_subscription(DB_PATH, subscription_id, days, tariff_id, XUIClient)
 
 
 class VPNService:
