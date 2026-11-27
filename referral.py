@@ -3,6 +3,7 @@
 """
 from runtime_config import DB_PATH
 import sqlite3
+from contextlib import closing
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -19,78 +20,76 @@ class ReferralManager:
             3: 5    # 3 уровень: +5 дней
         }
     
+    @staticmethod
+    def _chain(db, user_id):
+        """Follow the canonical parent IDs, nearest referrer first."""
+        seen = {user_id}
+        chain = []
+        current = user_id
+        while True:
+            row = db.execute("SELECT referrer_id FROM users WHERE telegram_id=?", (current,)).fetchone()
+            if not row or not row[0]:
+                return chain, True
+            parent = row[0]
+            if parent in seen or not db.execute(
+                    "SELECT 1 FROM users WHERE telegram_id=?", (parent,)).fetchone():
+                return chain, False
+            chain.append(parent)
+            seen.add(parent)
+            current = parent
+
     def get_referral_chain(self, user_id: int) -> List[int]:
-        """Получает цепочку рефералов пользователя"""
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        c.execute('SELECT referrer_path FROM users WHERE telegram_id = ?', (user_id,))
-        row = c.fetchone()
-        conn.close()
-        
-        if not row or not row[0]:
-            return []
-        
-        return [int(x) for x in row[0].split('|') if x]
-    
+        with closing(sqlite3.connect(self.db_path)) as db:
+            chain, valid = self._chain(db, user_id)
+            if not valid:
+                logger.warning("Invalid referral chain for user %s", user_id)
+                return []
+            return chain
+
     def add_referral(self, user_id: int, referrer_id: int) -> bool:
-        """Добавляет реферальную связь"""
-        if user_id == referrer_id:
+        """Register an existing, unassigned user under an existing referrer."""
+        if user_id <= 0 or referrer_id <= 0 or user_id == referrer_id:
             return False
-        
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        c.execute('SELECT referrer_id FROM users WHERE telegram_id = ?', (user_id,))
-        existing = c.fetchone()
-        
-        if existing and existing[0]:
-            conn.close()
-            return False
-        
-        c.execute('SELECT referrer_path FROM users WHERE telegram_id = ?', (referrer_id,))
-        referrer_path = c.fetchone()
-        
-        if referrer_path and referrer_path[0]:
-            path = f"{referrer_path[0]}|{referrer_id}"
-        else:
-            path = str(referrer_id)
-        
-        c.execute('''
-            UPDATE users 
-            SET referrer_id = ?, referrer_path = ?
-            WHERE telegram_id = ?
-        ''', (referrer_id, path, user_id))
-        
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"✅ Реферал {user_id} добавлен к {referrer_id}, путь: {path}")
-        return True
-    
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT referrer_id FROM users WHERE telegram_id=?", (user_id,)).fetchone()
+            if not row or row[0]:
+                return False
+            if not db.execute("SELECT 1 FROM users WHERE telegram_id=?", (referrer_id,)).fetchone():
+                return False
+            chain, valid = self._chain(db, referrer_id)
+            if not valid or user_id in chain:
+                return False
+            updated = db.execute("""
+                UPDATE users SET referrer_id=?
+                WHERE telegram_id=? AND (referrer_id IS NULL OR referrer_id=0)
+            """, (referrer_id,user_id)).rowcount
+            return updated == 1
+
     def get_referrals_by_level(self, user_id: int) -> Dict[int, List[int]]:
-        """Получает рефералов по уровням"""
+        """Traverse at most three levels through the indexed parent column."""
         result = {1: [], 2: [], 3: []}
-        
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        c.execute('''
-            SELECT telegram_id, referrer_path
-            FROM users 
-            WHERE referrer_path IS NOT NULL AND referrer_path != ''
-        ''')
-        users = c.fetchall()
-        conn.close()
-        
-        for uid, path in users:
-            chain = [int(x) for x in path.split('|') if x]
-            if user_id in chain:
-                level = chain.index(user_id) + 1
-                if level <= 3:
-                    result[level].append(uid)
-        
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("BEGIN")
+            if not db.execute("SELECT 1 FROM users WHERE telegram_id=?", (user_id,)).fetchone():
+                return result
+            seen = {user_id}
+            parents = [user_id]
+            for level in (1, 2, 3):
+                children = []
+                for parent in parents:
+                    rows = db.execute(
+                        "SELECT telegram_id FROM users WHERE referrer_id=? ORDER BY telegram_id", (parent,))
+                    for (uid,) in rows:
+                        if uid not in seen:
+                            seen.add(uid)
+                            children.append(uid)
+                result[level] = children
+                parents = children
+                if not parents:
+                    break
         return result
-    
+
     def get_referral_stats(self, user_id: int) -> Dict:
         """Получает статистику рефералов"""
         referrals = self.get_referrals_by_level(user_id)
