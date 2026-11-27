@@ -2,6 +2,8 @@
 Обработчики платежей и тарифов
 """
 from runtime_config import DB_PATH
+from html import escape
+from subscription_renewal import renewable_subscriptions, renewal_tariff, expiry_presentation
 import logging
 import sqlite3
 from datetime import datetime, timedelta
@@ -109,8 +111,8 @@ async def process_tariff(callback: types.CallbackQuery):
         return
 
     # ============ ПРОВЕРКА НА АКТИВНУЮ ПОДПИСКУ ============
-    active_subs = get_active_subscriptions(callback.from_user.id)
-    logging.info(f"🔍 Найдено активных подписок: {len(active_subs)}")
+    active_subs = renewable_subscriptions(DB_PATH, callback.from_user.id)
+    logging.info(f"🔍 Найдено ключей для продления: {len(active_subs)}")
 
     # ============ ПОКАЗЫВАЕМ ДВЕ КНОПКИ ============
     if active_subs and price > 0:
@@ -128,7 +130,7 @@ async def process_tariff(callback: types.CallbackQuery):
 
         await callback.message.answer(
             f"📋 <b>{name}</b>\n\n"
-            f"У вас уже есть активная подписка.\n"
+            f"У вас уже есть ключ.\n"
             f"Выберите действие:",
             reply_markup=kb,
             parse_mode="HTML"
@@ -148,7 +150,7 @@ async def handle_renew_select(callback: types.CallbackQuery):
     """Показывает список активных подписок для выбора, какую продлить"""
     tariff_id = int(callback.data.split("_")[2])
 
-    tariff = get_tariff_by_id(tariff_id)
+    tariff = renewal_tariff(DB_PATH, tariff_id)
 
     if not tariff:
         await callback.message.answer("❌ Тариф не найден", parse_mode="HTML")
@@ -157,11 +159,11 @@ async def handle_renew_select(callback: types.CallbackQuery):
 
     tariff_id, name, price, days, traffic_gb, ip_limit = tariff
 
-    active_subs = get_active_subscriptions(callback.from_user.id)
+    active_subs = renewable_subscriptions(DB_PATH, callback.from_user.id)
 
     if not active_subs:
         await callback.message.answer(
-            "❌ У вас нет активных подписок для продления.\n\n"
+            "❌ У вас нет доступных подписок для продления.\n\n"
             "Вы можете купить новый ключ.",
             reply_markup=get_tariffs_keyboard(),
             parse_mode="HTML"
@@ -171,11 +173,11 @@ async def handle_renew_select(callback: types.CallbackQuery):
 
     buttons = []
     for sub in active_subs:
-        sub_id, tariff_id_sub, xui_email, end_date, tariff_name_sub = sub
-        days_left = (datetime.fromisoformat(end_date) - datetime.now()).days
-        status = "🔴" if days_left <= 0 else "🟢"
+        sub_id, end_date, tariff_name_sub = sub
+        current, date_label, _ = expiry_presentation(end_date)
+        status = "🟢" if current else "🔴"
         buttons.append([types.InlineKeyboardButton(
-            text=f"{status} {tariff_name_sub} (до {end_date[:10]}, {days_left} дн.)",
+            text=f"{status} №{sub_id} {tariff_name_sub} ({'до' if current else 'истёк'} {date_label})",
             callback_data=f"renew_choose_{tariff_id}_{sub_id}"
         )])
 
@@ -188,7 +190,7 @@ async def handle_renew_select(callback: types.CallbackQuery):
 
     await callback.message.answer(
         f"📋 <b>Выберите подписку для продления</b>\n\n"
-        f"Выберите, какую из активных подписок вы хотите продлить:",
+        f"Выберите, какую подписку вы хотите продлить:",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -198,34 +200,33 @@ async def handle_renew_select(callback: types.CallbackQuery):
 # ОБРАБОТЧИК ВЫБОРА КОНКРЕТНОЙ ПОДПИСКИ
 # ============================================================
 
+async def checkout_renewal(callback, *, direct):
+    prefix = "extend_tariff_" if direct else "renew_choose_"
+    try:
+        a,b = callback.data.removeprefix(prefix).split("_")
+        tariff_id,subscription_id = int(a),int(b)
+        if min(tariff_id,subscription_id)<=0:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Некорректный выбор", show_alert=True)
+        return
+    tariff = renewal_tariff(DB_PATH, tariff_id)
+    if not tariff or not renewable_subscriptions(DB_PATH,callback.from_user.id,subscription_id):
+        await callback.answer("Продление недоступно. Выберите ключ и тариф заново.",show_alert=True)
+        return
+    await process_payment(callback,*tariff,action="renew",subscription_id=subscription_id,
+        back_to=f"renew_from_key_{subscription_id}" if direct else f"renew_select_{tariff_id}")
+
+
+@router.callback_query(F.data.startswith("extend_tariff_"))
+async def handle_direct_renewal(callback: types.CallbackQuery):
+    await checkout_renewal(callback,direct=True)
+
+
 @router.callback_query(F.data.startswith("renew_choose_"))
 async def handle_renew_choose(callback: types.CallbackQuery):
-    """Обработчик выбора конкретной подписки для продления"""
-    parts = callback.data.split("_")
-    tariff_id = int(parts[2])
-    subscription_id = int(parts[3])
+    await checkout_renewal(callback,direct=False)
 
-    tariff = get_tariff_by_id(tariff_id)
-
-    if not tariff:
-        await callback.message.answer("❌ Тариф не найден", parse_mode="HTML")
-        await callback.answer()
-        return
-
-    tariff_id, name, price, days, traffic_gb, ip_limit = tariff
-
-    await process_payment(
-        callback,
-        tariff_id,
-        name,
-        price,
-        days,
-        traffic_gb,
-        ip_limit,
-        action='renew',
-        subscription_id=subscription_id,
-        back_to=f'renew_select_{tariff_id}'
-    )
 
 # ============================================================
 # ОБРАБОТЧИК ПОКУПКИ НОВОГО КЛЮЧА
@@ -326,6 +327,15 @@ async def create_free_subscription(callback, tariff_id, name, days, traffic_gb, 
 
 async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip_limit, action='new_key', subscription_id=None, back_to='back_to_tariffs'):
     """Обрабатывает создание платежа"""
+    target_text = ""
+    if action == "renew":
+        rows = renewable_subscriptions(DB_PATH, callback.from_user.id, subscription_id) if subscription_id is not None else []
+        if not rows or renewal_tariff(DB_PATH, tariff_id) != (tariff_id,name,price,days,traffic_gb,ip_limit):
+            await callback.answer("Продление недоступно", show_alert=True)
+            return
+        target_id, end_date, target_name = rows[0]
+        current,date_label,_ = expiry_presentation(end_date)
+        target_text = f"🔑 Продление ключа №{target_id}: {escape(target_name)} ({'до' if current else 'истёк'} {date_label})\n"
     discount_percent, discount_amount = get_promocode_discount(callback.from_user.id)
     applied_promo = get_applied_promocode(callback.from_user.id)
 
@@ -350,6 +360,9 @@ async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip
             applied_discount = discount_amount
             promo_code = None
 
+    if action == "renew" and final_price <= 0:
+        await callback.answer("Нулевая сумма продления не поддерживается. Обратитесь в поддержку.", show_alert=True)
+        return
     logging.info(f"💰 Цена: {price}, Скидка: {discount_percent}% / {discount_amount}₽, Итог: {final_price:.2f}")
 
     try:
@@ -389,8 +402,9 @@ async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip
         ])
 
         await callback.message.answer(
-            f"📋 <b>{name}</b>\n"
-            f"💰 {price:.0f}₽"
+            f"📋 <b>{escape(name)}</b>\n"
+            + target_text
+            + f"💰 {price:.0f}₽"
             + (f" → <b>{final_price:.0f}₽</b> (скидка {discount_percent}%)" if discount_percent > 0 or discount_amount > 0 else "")
             + f"\n📅 {days} дней\n\n"
             "Нажмите кнопку для оплаты:",
@@ -411,34 +425,17 @@ async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip
 # ПРОДЛЕНИЕ (ПРЯМОЙ ВЫЗОВ)
 # ============================================================
 
-@router.callback_query(F.data.startswith("renew_"))
+@router.callback_query(F.data.regexp(r"^renew_[0-9]+_[0-9]+$"))
 async def handle_renew(callback: types.CallbackQuery):
-    """Продление существующей подписки (прямой вызов)"""
-    parts = callback.data.split("_")
-    tariff_id = int(parts[1])
-    subscription_id = int(parts[2])
-
-    tariff = get_tariff_by_id(tariff_id)
-
-    if not tariff:
-        await callback.message.answer("❌ Тариф не найден", parse_mode="HTML")
-        await callback.answer()
+    """Legacy explicit-ID buttons; never infer a target."""
+    tariff_id,subscription_id=map(int,callback.data.split("_")[1:])
+    tariff=renewal_tariff(DB_PATH,tariff_id)
+    if not tariff or not renewable_subscriptions(DB_PATH,callback.from_user.id,subscription_id):
+        await callback.answer("Продление недоступно",show_alert=True)
         return
+    await process_payment(callback,*tariff,action="renew",subscription_id=subscription_id,
+                          back_to=f"renew_from_key_{subscription_id}")
 
-    tariff_id, name, price, days, traffic_gb, ip_limit = tariff
-
-    await process_payment(
-        callback,
-        tariff_id,
-        name,
-        price,
-        days,
-        traffic_gb,
-        ip_limit,
-        action='renew',
-        subscription_id=subscription_id,
-        back_to=f'renew_select_{tariff_id}'
-    )
 
 # ============================================================
 # НАВИГАЦИЯ
