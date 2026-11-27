@@ -15,9 +15,14 @@ unit=/etc/systemd/system/vpn-admin.service
 
 [[ ! -e $app_dir && ! -e $data_dir && ! -e /opt/vpn-bot && ! -e $unit ]] ||
     fail 'Найдена существующая установка VPN4US. Этот установщик предназначен для чистой установки.'
-if systemctl cat vpn-admin.service >/dev/null 2>&1 || id vpn4us >/dev/null 2>&1; then
-    fail 'Учётная запись vpn4us или служба админки уже существует.'
-fi
+if id vpn4us >/dev/null 2>&1; then fail 'Учётная запись vpn4us уже существует.'; fi
+for component in admin bot webhook; do
+    for suffix in service path; do
+        if systemctl cat "vpn-$component.$suffix" >/dev/null 2>&1; then
+            fail "Служба vpn-$component.$suffix уже существует."
+        fi
+    done
+done
 
 read -r -p 'Домен админки VPN4US: ' domain
 domain=${domain,,}
@@ -34,8 +39,8 @@ git -C "$source_dir" cat-file -e HEAD:deploy/setup_https.sh ||
 
 apt-get update
 apt-get install -y python3 python3-venv curl iproute2
-if [[ -n $(ss -H -ltn '( sport = :8000 )') ]]; then
-    fail 'Локальный порт 8000 уже занят.'
+if [[ -n $(ss -H -ltn '( sport = :8000 or sport = :8081 )') ]]; then
+    fail 'Локальный порт 8000 или 8081 уже занят.'
 fi
 
 umask 022
@@ -75,6 +80,7 @@ WorkingDirectory=$app_dir
 UMask=0077
 Environment=VPN4US_DATA_DIR=$data_dir
 Environment=VPN4US_ADMIN_BIND=127.0.0.1
+Environment=VPN4US_ACTIVATION_URL=https://$domain
 Environment=VPN4US_ADMIN_ALLOWED_HOSTS=$domain,localhost,127.0.0.1
 ExecStart=$app_dir/venv/bin/python $app_dir/admin.py
 Restart=on-failure
@@ -82,8 +88,38 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
+for component in bot webhook; do
+    cat > "/etc/systemd/system/vpn-$component.service" <<EOF
+[Unit]
+Description=VPN4US $component
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=4
+
+[Service]
+User=vpn4us
+WorkingDirectory=$app_dir
+UMask=0077
+Environment=VPN4US_DATA_DIR=$data_dir
+Environment=VPN4US_WEBHOOK_BIND=127.0.0.1
+ExecStart=$app_dir/venv/bin/python $app_dir/$component.py
+Restart=on-failure
+RestartSec=5
+EOF
+    cat > "/etc/systemd/system/vpn-$component.path" <<EOF
+[Unit]
+Description=Wait for VPN4US $component activation
+
+[Path]
+PathExists=$data_dir/services.enabled
+
+[Install]
+WantedBy=multi-user.target
+EOF
+done
 systemctl daemon-reload
-systemctl enable --now vpn-admin.service
+systemctl enable --now vpn-admin.service vpn-bot.path vpn-webhook.path
 for attempt in {1..15}; do
     if curl --noproxy '*' --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null; then
         break

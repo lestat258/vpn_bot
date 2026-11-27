@@ -3,11 +3,25 @@
 <div class="page-header"><h2>⚙️ Настройки</h2></div>
 <div class="card"><div class="card-header">Конфигурация бота и платежей</div><div class="card-body">
     <form method="POST" action="/settings">
-        <div class="mb-3"><label class="form-label">Токен Telegram бота</label><input name="bot_token" class="form-control" value="{{ settings.get('bot_token', '') }}"></div>
+        <div class="mb-3"><label class="form-label">Токен Telegram бота</label><input name="bot_token" type="password" autocomplete="new-password" class="form-control" placeholder="{{ 'Сохранено' if 'bot_token' in saved_secrets else '' }}"></div>
         <div class="mb-3"><label class="form-label">Shop ID ЮKassa</label><input name="yookassa_shop_id" class="form-control" value="{{ settings.get('yookassa_shop_id', '') }}"></div>
-        <div class="mb-3"><label class="form-label">Секретный ключ ЮKassa</label><input name="yookassa_secret_key" class="form-control" value="{{ settings.get('yookassa_secret_key', '') }}"></div>
+        <div class="mb-3"><label class="form-label">Секретный ключ ЮKassa</label><input name="yookassa_secret_key" type="password" autocomplete="new-password" class="form-control" placeholder="{{ 'Сохранено' if 'yookassa_secret_key' in saved_secrets else '' }}"></div>
         <div class="mb-3"><label class="form-label">Telegram ID администратора</label><input name="admin_id" class="form-control" value="{{ settings.get('admin_id', '') }}"></div>
         <button type="submit" class="btn btn-primary">💾 Сохранить</button>
     </form>
 </div></div>
+{% if activation_token %}
+<div class="card"><div class="card-header">Запуск бота и приём платежей</div><div class="card-body">
+    <p>{{ service_status }}</p>
+    <p>URL уведомлений ЮKassa <code>{{ webhook_url }}</code></p>
+    {% if activation_errors %}
+    <ul>{% for error in activation_errors %}<li>{{ error }}</li>{% endfor %}</ul>
+    {% else %}
+    <form method="POST" action="/settings/activate">
+        <input type="hidden" name="csrf" value="{{ activation_token }}">
+        <button type="submit" class="btn btn-primary">Запустить бота и webhook</button>
+    </form>
+    {% endif %}
+</div></div>
+{% endif %}
 {% endblock %}

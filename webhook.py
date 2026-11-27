@@ -4,6 +4,7 @@ Webhook сервер для обработки платежей ЮKassa
 """
 from runtime_config import DB_PATH
 import logging
+import os
 import json
 import sqlite3
 import asyncio
@@ -406,4 +407,4 @@ if __name__ == "__main__":
     app.router.add_get('/health', lambda r: web.Response(text='OK'))
     
     logger.info("🚀 Webhook server started on port 8081")
-    web.run_app(app, host='0.0.0.0', port=8081)
+    web.run_app(app, host=os.environ.get("VPN4US_WEBHOOK_BIND", "0.0.0.0"), port=8081)
