@@ -1,5 +1,5 @@
 from runtime_config import DB_PATH
-from screen_navigation import render_screen, render_command
+from screen_navigation import render_screen, render_command, render_home
 from subscription_renewal import expiry_presentation
 from html import escape
 from services.vpn_service import vpn_service
@@ -139,16 +139,11 @@ async def cmd_start(message: types.Message):
         "Меню находится в клавиатуре (≡) — выберите нужный раздел или сразу установите VPN."
     )
 
-    start_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-    [types.InlineKeyboardButton(text="Главное меню", callback_data="start_menu")]
-])
-
-    # /start must recover even when Telegram cleared history only on the
-    # user's side and the stored screen ID still accepts edit requests.
-    await render_command(message,welcome_text,
-                         keyboard=get_main_keyboard(message.from_user.id),
-                         refresh_keyboard=True, reply_markup=start_kb,
-                         parse_mode="HTML", disable_web_page_preview=True)
+    # The welcome itself carries the permanent keyboard. Do not send a
+    # second service message or a redundant inline main-menu button.
+    await render_home(message,welcome_text,
+                      keyboard=get_main_keyboard(message.from_user.id),
+                      parse_mode="HTML", disable_web_page_preview=True)
 
 @router.callback_query(F.data == "start_menu")
 async def start_menu(callback: types.CallbackQuery):
@@ -249,12 +244,8 @@ async def admin_panel_button(message: types.Message):
 
 @router.message(F.text == "/menu")
 async def refresh_menu(message: types.Message):
-    kb = get_main_keyboard(message.from_user.id)
-    await render_command(message,
-        "Главное меню:",
-        keyboard=kb, refresh_keyboard=True,
-        reply_markup=kb
-    )
+    await render_home(message,"Главное меню VPN4US",
+                      keyboard=get_main_keyboard(message.from_user.id))
 
 # ============ ОБРАБОТКА УСТРОЙСТВ ============
 

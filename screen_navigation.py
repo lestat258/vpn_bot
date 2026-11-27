@@ -133,7 +133,7 @@ async def _ensure_keyboard(message,key,keyboard,*,refresh=False):
     if previous is not None and not refresh:
         return False
     anchor=await message.answer(
-        "⌨️ Главное меню VPN4US. Если клавиатура скрыта, отправьте /menu.",
+        "Главное меню VPN4US",
         reply_markup=keyboard)
     mid=getattr(anchor,"message_id",None)
     if not isinstance(mid,int) or mid<=0:
@@ -142,6 +142,38 @@ async def _ensure_keyboard(message,key,keyboard,*,refresh=False):
     if previous is not None and previous!=mid:
         await _retire_id(message.bot,key[1],previous)
     return True
+
+
+async def render_home(message,text,*,keyboard,**kwargs):
+    """One visible home message doubles as the durable keyboard anchor.
+
+    Always send a fresh home on /start or /menu, even after local history
+    deletion. Create the active inline screen only on the next navigation.
+    """
+    key=_key(message,command=True)
+    if key is None:
+        return await message.answer(text,reply_markup=keyboard,**kwargs)
+    async with _lock(key):
+        old_anchor=_read_anchor(key)
+        old_screen=_read(key)
+        anchor=await message.answer(text,reply_markup=keyboard,**kwargs)
+        mid=getattr(anchor,"message_id",None)
+        if not isinstance(mid,int) or mid<=0:
+            raise RuntimeError("Home message ID unavailable")
+        with closing(_screen_db()) as db,db:
+            db.execute("""INSERT INTO keyboard_anchors(bot_id,chat_id,message_id)
+                VALUES(?,?,?) ON CONFLICT(bot_id,chat_id) DO UPDATE
+                SET message_id=excluded.message_id""",(*key,mid))
+            db.execute("DELETE FROM active_screens WHERE bot_id=? AND chat_id=?",key)
+        # Only previously registered UI messages are retired. Never treat
+        # the new anchor as an editable active screen.
+        retired=set()
+        for old in (old_anchor,old_screen[0] if old_screen else None):
+            if old is not None and old!=mid and old not in retired:
+                await _retire_id(message.bot,key[1],old)
+                retired.add(old)
+        await _clean_command(message)
+        return anchor
 
 
 MENU_COMMANDS=frozenset((
