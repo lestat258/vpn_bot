@@ -1,4 +1,7 @@
 from runtime_config import DB_PATH
+import asyncio
+import hashlib
+from balance_ledger import validate_deposit_amount, deposit_metadata, register_deposit, rubles
 from subscription_renewal import expiry_presentation, renewable_subscriptions
 from services.vpn_service import vpn_service
 """
@@ -380,101 +383,66 @@ async def deposit_custom(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(CustomDeposit.amount)
     await callback.answer()
 
+async def create_deposit_payment(bot, owner, amount, request_key):
+    from yookassa import Payment
+    username=(await bot.get_me()).username
+    if not username:
+        raise RuntimeError("Bot username unavailable")
+    value=rubles(amount)
+    # Deterministic for repeated delivery of the same Telegram event.
+    key=hashlib.sha256(f"vpn4us-deposit:{owner}:{request_key}".encode()).hexdigest()
+    payment=await asyncio.to_thread(Payment.create,{
+        "amount":{"value":f"{value:.2f}","currency":"RUB"},
+        "confirmation":{"type":"redirect","return_url":f"https://t.me/{username}"},
+        "capture":True,"description":f"Пополнение баланса на {value:.2f} ₽",
+        "metadata":deposit_metadata(owner,amount)
+    },key)
+    url=payment.confirmation.confirmation_url
+    if not isinstance(url,str) or not url.startswith("https://"):
+        raise RuntimeError("Invalid confirmation URL")
+    await asyncio.to_thread(register_deposit,DB_PATH,payment.id,owner,amount)
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text=f"💳 Оплатить {value:.2f} ₽",url=url)],
+        [types.InlineKeyboardButton(text="🔙 Назад",callback_data="deposit")]
+    ])
+
+
 @router.message(CustomDeposit.amount)
 async def deposit_custom_amount(message: types.Message, state: FSMContext):
-    if message.text.lower() in ['/cancel', 'отмена', 'cancel']:
+    raw=(message.text or "").strip()
+    if raw.lower() in ("/cancel","отмена","cancel"):
         await state.clear()
-        await message.answer("❌ Пополнение отменено.", parse_mode="HTML")
+        await message.answer("❌ Пополнение отменено.")
         return
-
     try:
-        amount = float(message.text.replace(',', '.'))
-        if amount < 10:
-            await message.answer("❌ Минимальная сумма: <b>10 ₽</b>", parse_mode="HTML")
-            return
-        if amount > 100000:
-            await message.answer("❌ Максимальная сумма: <b>100000 ₽</b>", parse_mode="HTML")
-            return
-
-        amount = round(amount, 2)
-        from yookassa import Payment
-
-        payment = Payment.create({
-            "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
-            "confirmation": {"type": "redirect", "return_url": "https://t.me/lestat258_bot"},
-            "capture": True,
-            "description": f"Пополнение баланса на {amount:.2f}₽",
-            "metadata": {
-                "telegram_id": message.from_user.id,
-                "type": "deposit",
-                "amount": amount
-            }
-        })
-
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('INSERT INTO payments (payment_id, telegram_id, tariff_id, amount_rub, status) VALUES (?, ?, ?, ?, ?)',
-                  (payment.id, message.from_user.id, 0, amount, 'pending'))
-        conn.commit()
-        conn.close()
-
-        kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text=f"💳 Оплатить {amount:.2f}₽", url=payment.confirmation.confirmation_url)],
-            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="deposit")]
-        ])
-
-        await message.answer(
-            f"💳 <b>Пополнение баланса</b>\n\n"
-            f"Сумма: <b>{amount:.2f} ₽</b>\n\n"
-            f"Нажмите кнопку для оплаты:",
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
-        await state.clear()
+        amount=validate_deposit_amount(raw.replace(",","."))
     except ValueError:
-        await message.answer("❌ Введите число. Пример: 150", parse_mode="HTML")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}", parse_mode="HTML")
+        await message.answer("Введите сумму от 10 до 100000 ₽, не более двух знаков после запятой.")
+        return
+    try:
+        kb=await create_deposit_payment(message.bot,message.from_user.id,amount,
+                                       f"message:{message.chat.id}:{message.message_id}")
+        await message.answer(f"💳 Пополнение баланса: {rubles(amount):.2f} ₽\nНажмите кнопку для оплаты.",reply_markup=kb)
         await state.clear()
+    except Exception:
+        logging.error("Deposit creation failed")
+        await message.answer("Не удалось подготовить платёж. Обратитесь в поддержку.")
+        await state.clear()
+
 
 @router.callback_query(F.data.startswith("deposit_"))
 async def deposit_process(callback: types.CallbackQuery):
-    if callback.data == "deposit_custom":
+    if callback.data=="deposit_custom":
         return
-    amount = int(callback.data.replace("deposit_", ""))
     try:
-        from yookassa import Payment
-        payment = Payment.create({
-            "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
-            "confirmation": {"type": "redirect", "return_url": "https://t.me/lestat258_bot"},
-            "capture": True,
-            "description": f"Пополнение баланса на {amount}₽",
-            "metadata": {
-                "telegram_id": callback.from_user.id,
-                "type": "deposit",
-                "amount": amount
-            }
-        })
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('INSERT INTO payments (payment_id, telegram_id, tariff_id, amount_rub, status) VALUES (?, ?, ?, ?, ?)',
-                  (payment.id, callback.from_user.id, 0, amount, 'pending'))
-        conn.commit()
-        conn.close()
-        kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text=f"💳 Оплатить {amount}₽", url=payment.confirmation.confirmation_url)],
-            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="deposit")]
-        ])
-        await callback.message.edit_text(
-            f"💳 <b>Пополнение баланса</b>\n\n"
-            f"Сумма: <b>{amount} ₽</b>\n\n"
-            f"Нажмите кнопку для оплаты:",
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        await callback.message.edit_text(f"❌ Ошибка: {e}", reply_markup=get_back_keyboard("deposit"))
+        amount=validate_deposit_amount(callback.data.removeprefix("deposit_"))
+        kb=await create_deposit_payment(callback.bot,callback.from_user.id,amount,f"callback:{callback.id}")
+        await callback.message.edit_text(f"💳 Пополнение баланса: {rubles(amount):.2f} ₽\nНажмите кнопку для оплаты.",reply_markup=kb)
+    except Exception:
+        logging.error("Deposit creation failed")
+        await callback.message.answer("Не удалось подготовить платёж. Обратитесь в поддержку.")
     await callback.answer()
+
 
 @router.message(Command("cancel"))
 async def cancel_deposit(message: types.Message, state: FSMContext):

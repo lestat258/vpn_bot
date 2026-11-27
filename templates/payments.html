@@ -105,7 +105,7 @@
         <div class="table-wrapper payment-desktop" style="overflow-x:auto">
             <table class="table" style="min-width:940px">
                 <thead><tr><th>Заказ</th><th>Пользователь / тариф</th><th>Сумма</th>
-                    <th>Оплата / ЮKassa</th><th>VPN</th><th>Чек ФНС</th><th>Возврат</th><th>Создан</th></tr></thead>
+                    <th>Оплата / ЮKassa</th><th>Исполнение</th><th>Чек ФНС</th><th>Возврат</th><th>Создан</th></tr></thead>
                 <tbody>
                 {% for p in payments %}
                 <tr>
@@ -134,7 +134,7 @@
                 {% if not p.is_new %}<span class="badge badge-secondary">История / вне контура</span>{% endif %}
                 <dl>
                     <div><dt>ЮKassa</dt><dd>{{ state(p.provider_display) }}</dd></div>
-                    <div><dt>VPN</dt><dd>{{ state(p.vpn_display) }}{% if p.subscription_id %}<br>Подписка #{{ p.subscription_id }}{% endif %}</dd></div>
+                    <div><dt>Исполнение</dt><dd>{{ state(p.vpn_display) }}{% if p.subscription_id %}<br>Подписка #{{ p.subscription_id }}{% endif %}</dd></div>
                     <div><dt>Чек ФНС</dt><dd>{{ state(p.tax_display) }}{% if p.receipt_link %}<br><a href="{{ p.receipt_link }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Открыть чек</a>{% endif %}</dd></div>
                     <div><dt>Возврат</dt><dd>{{ state(p.refund_display) }}</dd></div>
                 </dl>

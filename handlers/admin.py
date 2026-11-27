@@ -2,6 +2,7 @@
 Административные хендлеры бота
 """
 from runtime_config import BACKUP_DIR, DB_PATH
+from balance_ledger import admin_adjust, rubles, kopecks
 import logging
 import sqlite3
 import json
@@ -511,30 +512,31 @@ async def admin_deposit_start(callback: types.CallbackQuery, state: FSMContext):
 
 @router.message(AdminDeposit.amount)
 async def admin_deposit_process(message: types.Message, state: FSMContext):
+    if message.from_user.id!=ADMIN_ID:
+        await state.clear()
+        await message.answer("⛔ Доступ запрещён")
+        return
+    raw=(message.text or "").strip()
+    if raw=="/cancel":
+        await state.clear()
+        await message.answer("❌ Операция отменена")
+        return
     try:
-        amount = float(message.text)
-        data = await state.get_data()
-        user_id = data.get('user_id')
-
-        if not user_id:
-            await message.answer("❌ Ошибка: пользователь не найден")
-            await state.clear()
-            return
-
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('UPDATE users SET balance = balance + ? WHERE telegram_id = ?', (amount, user_id))
-        c.execute('SELECT balance FROM users WHERE telegram_id = ?', (user_id,))
-        new_balance = c.fetchone()[0]
-        conn.commit()
-        conn.close()
-
-        await message.answer(f"✅ Баланс пополнен на <b>{amount:.2f} ₽</b>\n\nНовый баланс: <b>{new_balance:.2f} ₽</b>", parse_mode="HTML")
+        data=await state.get_data()
+        owner=int(data["user_id"])
+        amount=raw.replace(",",".")
+        n=kopecks(amount,positive=True,maximum=10000000)
+        balance,changed=await asyncio.to_thread(admin_adjust,DB_PATH,
+            f"admin:{message.chat.id}:{message.message_id}",owner,message.from_user.id,amount,withdraw=False)
         await state.clear()
-
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"✅ Пополнение: {rubles(n):.2f} ₽\nБаланс после операции: {rubles(balance):.2f} ₽")
+    except (ValueError,KeyError,TypeError):
+        await message.answer("Операция недоступна: проверьте сумму, остаток и наличие блокировки средств.")
+    except Exception:
+        logging.error("Administrative balance operation requires review")
         await state.clear()
+        await message.answer("Результат операции не подтверждён. Проверьте журнал перед повтором.")
+
 
 @router.callback_query(F.data.startswith("user_withdraw_"))
 async def admin_withdraw_start(callback: types.CallbackQuery, state: FSMContext):
@@ -555,41 +557,31 @@ async def admin_withdraw_start(callback: types.CallbackQuery, state: FSMContext)
 
 @router.message(AdminWithdraw.amount)
 async def admin_withdraw_process(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
+    if message.from_user.id!=ADMIN_ID:
+        await state.clear()
+        await message.answer("⛔ Доступ запрещён")
+        return
+    raw=(message.text or "").strip()
+    if raw=="/cancel":
         await state.clear()
         await message.answer("❌ Операция отменена")
         return
-
     try:
-        amount = float(message.text)
-        if amount <= 0:
-            await message.answer("❌ Сумма должна быть больше 0")
-            return
-
-        data = await state.get_data()
-        user_id = data['user_id']
-
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('SELECT balance FROM users WHERE telegram_id = ?', (user_id,))
-        current_balance = c.fetchone()[0] or 0
-
-        if amount > current_balance:
-            await message.answer(f"❌ Недостаточно средств!\n\nТекущий баланс: <b>{current_balance:.2f} ₽</b>", parse_mode="HTML")
-            return
-
-        c.execute('UPDATE users SET balance = balance - ? WHERE telegram_id = ?', (amount, user_id))
-        c.execute('SELECT balance FROM users WHERE telegram_id = ?', (user_id,))
-        new_balance = c.fetchone()[0]
-        conn.commit()
-        conn.close()
-
-        await message.answer(f"✅ С баланса списано <b>{amount:.2f} ₽</b>\n\nНовый баланс: <b>{new_balance:.2f} ₽</b>", parse_mode="HTML")
+        data=await state.get_data()
+        owner=int(data["user_id"])
+        amount=raw.replace(",",".")
+        n=kopecks(amount,positive=True,maximum=10000000)
+        balance,changed=await asyncio.to_thread(admin_adjust,DB_PATH,
+            f"admin:{message.chat.id}:{message.message_id}",owner,message.from_user.id,amount,withdraw=True)
         await state.clear()
-
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"✅ Списание: {rubles(n):.2f} ₽\nБаланс после операции: {rubles(balance):.2f} ₽")
+    except (ValueError,KeyError,TypeError):
+        await message.answer("Операция недоступна: проверьте сумму, остаток и наличие блокировки средств.")
+    except Exception:
+        logging.error("Administrative balance operation requires review")
         await state.clear()
+        await message.answer("Результат операции не подтверждён. Проверьте журнал перед повтором.")
+
 
 @router.callback_query(F.data.startswith("user_block_"))
 async def admin_block_user(callback: types.CallbackQuery):

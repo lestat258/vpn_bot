@@ -9,6 +9,7 @@ import uuid
 from decimal import Decimal
 from pathlib import Path
 from tax_fulfillment import transaction, credentials, disable_income_retry, public_receipt_url
+from balance_ledger import deposit_exists
 
 LOG = logging.getLogger(__name__)
 CUTOFF = "2026-11-26T12:15:00Z"
@@ -23,9 +24,11 @@ def money(value):
 
 
 def eligible_row(db, payment_id):
+    if deposit_exists(db,payment_id):
+        return db.execute("SELECT * FROM payments WHERE payment_id=? AND tariff_id=0 AND amount_rub>0",(payment_id,)).fetchone()
     return db.execute("""
         SELECT * FROM payments WHERE payment_id=? AND id>?
-          AND datetime(created_at)>=datetime(?) AND amount_rub>0
+          AND datetime(created_at)>=datetime(?) AND amount_rub>0 AND tariff_id<>0
     """, (payment_id, LAST_HISTORICAL_ID, CUTOFF)).fetchone()
 
 
