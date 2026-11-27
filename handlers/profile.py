@@ -439,7 +439,7 @@ async def deposit_custom_amount(message: types.Message, state: FSMContext):
     if raw.lower() in ("/cancel", "отмена", "cancel"):
         await state.clear()
         text, kb = deposit_menu_content(message.from_user.id, "Пополнение отменено.")
-        await render_command(message, text, reply_markup=kb, parse_mode="HTML")
+        await render_command(message, text, reply_markup=kb, parse_mode="HTML", clean_cancel=True)
         return
     try:
         amount = validate_deposit_amount(raw.replace(",", "."))
@@ -510,18 +510,15 @@ async def toggle_auto_renew(callback: types.CallbackQuery):
 
 # ============ ПРОМОКОДЫ И ДОСТИЖЕНИЯ ============
 
-@router.callback_query(F.data == "promo_achievements")
-async def promo_achievements_menu(callback: types.CallbackQuery, state: FSMContext=None):
-    """Объединённое меню промокодов и достижений (главное меню раздела)"""
-    if state is not None and await state.get_state()==EnterPromocode.waiting.state:
-        await state.clear()
+def promo_menu_content(owner):
+    """Build the same parent menu for callbacks and text cancellation."""
     from trigger_manager import trigger_manager
     from datetime import datetime
 
-    trigger_manager.cleanup_expired_promocodes(callback.from_user.id)
+    trigger_manager.cleanup_expired_promocodes(owner)
 
-    active = trigger_manager.get_user_promocodes(callback.from_user.id)
-    status = trigger_manager.get_user_trigger_status(callback.from_user.id)
+    active = trigger_manager.get_user_promocodes(owner)
+    status = trigger_manager.get_user_trigger_status(owner)
 
     text = "🎫 <b>Промокоды и достижения</b>\n\n"
 
@@ -573,6 +570,14 @@ async def promo_achievements_menu(callback: types.CallbackQuery, state: FSMConte
         [types.InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="back_to_profile")]
     ])
 
+    return text, kb
+
+
+@router.callback_query(F.data == "promo_achievements")
+async def promo_achievements_menu(callback: types.CallbackQuery, state: FSMContext=None):
+    if state is not None and await state.get_state()==EnterPromocode.waiting.state:
+        await state.clear()
+    text, kb = promo_menu_content(callback.from_user.id)
     await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
@@ -806,91 +811,29 @@ async def achievements_help(callback: types.CallbackQuery):
     await callback.answer()
 
 
+PROMO_PROMPT = (
+    "🏷️ <b>Ввести промокод</b>\n\n"
+    "Введите промокод, чтобы получить скидку на подписку.\n"
+    "Промокоды действуют ограниченное время.\n\n"
+    "✏️ Отправьте код промокода в этом чате.\n"
+    "Или отправьте /cancel для отмены."
+)
+
+
 @router.callback_query(F.data == "profile_promocode")
 async def profile_promocode(callback: types.CallbackQuery, state: FSMContext):
-    """Ввод промокода"""
-    await state.set_state(EnterPromocode.waiting)  # ← ВАЖНО!
-    
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")]
-    ])
-
-    await render_screen(callback.message, 
-        "🏷️ <b>Ввести промокод</b>\n\n"
-        "Введите промокод, чтобы получить скидку на подписку.\n"
-        "Промокоды действуют ограниченное время.\n\n"
-        "✏️ Отправьте код промокода в этом чате.\n"
-        "Или отправьте /cancel для отмены.",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+    if await state.get_state() is not None:
+        await callback.answer("Сначала завершите текущий ввод.", show_alert=True)
+        return
+    if not is_current_screen(callback.message, getattr(callback.message, "message_id", None)):
+        await callback.answer("Откройте актуальное меню промокодов.", show_alert=True)
+        return
+    result = await render_screen(callback.message, PROMO_PROMPT,
+        reply_markup=get_back_keyboard("promo_achievements"), parse_mode="HTML")
+    mid = getattr(result, "message_id", None)
+    if not is_current_screen(callback.message, mid):
+        await callback.answer("Не удалось открыть форму. Попробуйте ещё раз.", show_alert=True)
+        return
+    await state.set_data({FORM_SCREEN: mid})
+    await state.set_state(EnterPromocode.waiting)
     await callback.answer()
-
-
-# @router.message(F.text)  # ВРЕМЕННО ОТКЛЮЧЕНО
-async def process_promocode_input(message: types.Message, state: FSMContext):
-    """Обработка введённого промокода"""
-    if message.text.startswith('/'):
-        return
-
-    code = message.text.strip().upper()
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute('''
-        SELECT id, discount_percent, discount_amount, valid_until, max_uses, used_count
-        FROM promocodes
-        WHERE code = ? AND is_active = 1
-    ''', (code,))
-    promocode = c.fetchone()
-
-    if not promocode:
-        await message.answer("❌ Промокод не найден или неактивен", parse_mode="HTML")
-        conn.close()
-        return
-
-    promocode_id, discount_percent, discount_amount, valid_until, max_uses, used_count = promocode
-
-    if valid_until and datetime.now() > datetime.fromisoformat(valid_until):
-        await message.answer("❌ Срок действия промокода истек", parse_mode="HTML")
-        conn.close()
-        return
-
-    if used_count >= max_uses:
-        await message.answer("❌ Промокод уже использован максимальное количество раз", parse_mode="HTML")
-        conn.close()
-        return
-
-    c.execute('SELECT id FROM promocode_uses WHERE promocode_id = ? AND user_id = ?',
-              (promocode_id, message.from_user.id))
-    if c.fetchone():
-        await message.answer("❌ Вы уже использовали этот промокод", parse_mode="HTML")
-        conn.close()
-        return
-
-    c.execute('INSERT INTO promocode_uses (promocode_id, user_id) VALUES (?, ?)',
-              (promocode_id, message.from_user.id))
-    c.execute('UPDATE promocodes SET used_count = used_count + 1 WHERE id = ?', (promocode_id,))
-    conn.commit()
-    conn.close()
-
-    if discount_percent > 0:
-        set_setting(f'promocode_user_{message.from_user.id}', f'{discount_percent}|0')
-        await message.answer(
-            f"✅ <b>Промокод активирован!</b>\n\n"
-            f"🎁 Скидка: <b>{discount_percent}%</b>\n"
-            f"💡 Скидка будет применена к следующей покупке.",
-            parse_mode="HTML"
-        )
-    elif discount_amount > 0:
-        set_setting(f'promocode_user_{message.from_user.id}', f'0|{discount_amount}')
-        await message.answer(
-            f"✅ <b>Промокод активирован!</b>\n\n"
-            f"🎁 Скидка: <b>{discount_amount} ₽</b>\n"
-            f"💡 Скидка будет применена к следующей покупке.",
-            parse_mode="HTML"
-        )
-
-    # Возвращаемся в главное меню промокодов
-    await promo_achievements_menu(message)

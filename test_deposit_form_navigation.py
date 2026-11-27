@@ -79,7 +79,7 @@ class DepositFormTests(unittest.IsolatedAsyncioTestCase):
         self.message.text="/cancel"
         await self.env["deposit_custom_amount"](self.message,self.state)
         self.state.clear.assert_awaited_once()
-        self.command.assert_awaited_once_with(self.message,"Пополнение отменено.",reply_markup="menu keyboard",parse_mode="HTML")
+        self.command.assert_awaited_once_with(self.message,"Пополнение отменено.",reply_markup="menu keyboard",parse_mode="HTML",clean_cancel=True)
         self.pay.assert_not_awaited()
 
     async def test_cancel_button_restores_menu(self):
