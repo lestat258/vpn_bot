@@ -1,5 +1,5 @@
 from runtime_config import DB_PATH
-from subscription_renewal import expiry_presentation
+from subscription_renewal import expiry_presentation, renewable_subscriptions
 from services.vpn_service import vpn_service
 """
 Обработчики профиля и ключей
@@ -41,7 +41,6 @@ router = Router()
 
 ADMIN_ID = int(get_setting('admin_id') or 812021055)
 
-renew_temp = {}
 
 # ============ ПРОФИЛЬ ============
 
@@ -298,23 +297,26 @@ async def render_key_detail(callback: types.CallbackQuery, sub_id: int):
 
 @router.callback_query(F.data.startswith("renew_from_key_"))
 async def renew_from_key(callback: types.CallbackQuery):
-    sub_id = int(callback.data.replace("renew_from_key_", ""))
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""SELECT s.telegram_id FROM subscriptions s JOIN users u ON u.telegram_id=s.telegram_id
-        WHERE s.id=? AND s.is_active=1 AND s.managed_by_vpn4us=1 AND u.is_blocked=0""", (sub_id,))
-    sub = c.fetchone()
-    conn.close()
-
-    if not sub or sub[0] != callback.from_user.id:
-        await callback.answer("⛔ Доступ запрещён")
+    try:
+        sub_id = int(callback.data.removeprefix("renew_from_key_"))
+        if sub_id <= 0:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Некорректный ключ", show_alert=True)
         return
-
-    renew_temp[callback.from_user.id] = sub_id
+    rows = renewable_subscriptions(DB_PATH, callback.from_user.id, sub_id)
+    if not rows:
+        await callback.answer("⛔ Продление недоступно. Обратитесь в поддержку.", show_alert=True)
+        return
+    _, end_date, name = rows[0]
+    current, date_label, _ = expiry_presentation(end_date)
+    status = "до" if current else "истёк"
     await callback.message.answer(
-        "📋 <b>Выберите тариф для продления</b>\n\n"
-        "Действующий ключ продлевается от даты окончания, просроченный — от текущего времени с округлением в пользу пользователя.",
-        reply_markup=get_tariffs_keyboard(),
+        f"📋 <b>Выберите тариф для продления</b>\n\n"
+        f"🔑 Ключ №{sub_id}: {escape(name)} ({status} {date_label})\n\n"
+        "Действующий ключ продлевается от даты окончания, просроченный — "
+        "от текущего времени с округлением в пользу пользователя.",
+        reply_markup=get_tariffs_keyboard(subscription_id=sub_id),
         parse_mode="HTML"
     )
     await callback.answer()

@@ -106,3 +106,27 @@ def expiry_presentation(end_date, *, now=None):
     if seconds<=0:
         return False,end.strftime("%d.%m.%Y"),"Срок действия истёк"
     return True,end.strftime("%d.%m.%Y"),("Менее суток" if seconds<86400 else f"{int(seconds//86400)} дн.")
+
+
+def renewable_subscriptions(path, owner, subscription_id=None):
+    """Only locally managed, unblocked keys; expiration is not a block."""
+    sql="""SELECT s.id,s.end_date,t.name FROM subscriptions s
+        JOIN users u ON u.telegram_id=s.telegram_id
+        JOIN servers v ON v.id=s.server_id
+        JOIN tariffs t ON t.id=s.tariff_id
+        WHERE s.telegram_id=? AND s.is_active=1 AND s.managed_by_vpn4us=1
+          AND u.is_blocked=0 AND v.is_active=1"""
+    params=[owner]
+    if subscription_id is not None:
+        sql+=" AND s.id=?"
+        params.append(subscription_id)
+    sql+=" ORDER BY s.end_date DESC,s.id DESC"
+    with closing(sqlite3.connect(path)) as db:
+        return db.execute(sql,params).fetchall()
+
+
+def renewal_tariff(path, tariff_id):
+    with closing(sqlite3.connect(path)) as db:
+        return db.execute("""SELECT id,name,price_rub,duration_days,traffic_gb,ip_limit
+          FROM tariffs WHERE id=? AND is_active=1 AND price_rub>0 AND duration_days>0""",
+          (tariff_id,)).fetchone()

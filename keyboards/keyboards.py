@@ -43,11 +43,14 @@ def get_device_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_tariffs_keyboard():
+def get_tariffs_keyboard(subscription_id=None):
     """Клавиатура выбора тарифа"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('SELECT id, name, price_rub, duration_days FROM tariffs WHERE is_active = 1 ORDER BY price_rub')
+    query = 'SELECT id, name, price_rub, duration_days FROM tariffs WHERE is_active = 1'
+    if subscription_id is not None:
+        query += ' AND price_rub>0 AND duration_days>0'
+    c.execute(query + ' ORDER BY price_rub')
     tariffs = c.fetchall()
     conn.close()
 
@@ -55,9 +58,11 @@ def get_tariffs_keyboard():
     for t in tariffs:
         buttons.append([InlineKeyboardButton(
             text=f"📦 {t[1]} — {t[2]:.0f} ₽ / {t[3]} дн.",
-            callback_data=f"tariff_{t[0]}"
+            callback_data=(f"tariff_{t[0]}" if subscription_id is None
+                           else f"extend_tariff_{t[0]}_{subscription_id}")
         )])
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад",
+        callback_data=("back_to_main" if subscription_id is None else f"key_{subscription_id}"))])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_admin_keyboard():
