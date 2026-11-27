@@ -1,5 +1,7 @@
 from runtime_config import DB_PATH
 from screen_navigation import render_screen, render_command, render_home
+from form_navigation import FORM_SCREEN, PROMO_STATE, current_form_input
+from contextlib import closing
 from subscription_renewal import expiry_presentation
 from html import escape
 from services.vpn_service import vpn_service
@@ -471,99 +473,69 @@ async def back_to_main(callback: types.CallbackQuery):
 
 # ============ ОБРАБОТКА ПРОМОКОДОВ (ИСПРАВЛЕНА) ============
 
-@router.message(F.text, EnterPromocode.waiting)
+async def promo_input_error(message, state, error):
+    from handlers.profile import PROMO_PROMPT
+    result = await render_command(message, error + "\n\n" + PROMO_PROMPT,
+        reply_markup=get_back_keyboard("promo_achievements"), parse_mode="HTML")
+    mid = getattr(result, "message_id", None)
+    if mid is not None:
+        await state.update_data({FORM_SCREEN: mid})
+
+
+@router.message(EnterPromocode.waiting)
 async def process_promocode_input(message: types.Message, state: FSMContext):
-    """
-    Обработка введённого промокода.
-    Срабатывает ТОЛЬКО когда пользователь в состоянии EnterPromocode.waiting.
-    """
-    code = message.text.strip().upper()
-    
-    # Проверяем, что это не команда
-    if code.startswith('/'):
+    if not await current_form_input(message, state, PROMO_STATE):
         await state.clear()
-        await message.answer("❌ Ввод промокода отменён.", parse_mode="HTML")
+        await message.answer("Ввод завершён. Откройте промокоды заново.")
+        return
+    code = (message.text or "").strip().upper()
+    if code.startswith("/") or code in ("ОТМЕНА", "CANCEL"):
+        from handlers.profile import promo_menu_content
+        await state.clear()
+        text, kb = promo_menu_content(message.from_user.id)
+        await render_command(message, "Ввод промокода отменён.\n\n" + text,
+                             reply_markup=kb, parse_mode="HTML", clean_cancel=True)
         return
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute('''
-        SELECT id, discount_percent, discount_amount, valid_until, max_uses, used_count
-        FROM promocodes
-        WHERE code = ? AND is_active = 1
-    ''', (code,))
-    promocode = c.fetchone()
-
-    if not promocode:
-        await message.answer("❌ Промокод не найден или неактивен", parse_mode="HTML")
-        conn.close()
-        await state.clear()
+    # Keep the existing manual-discount lifecycle in this UI change.
+    # The two writes are now committed together; checkout reservation and
+    # consumption of discounts belong to a separate financial change.
+    owner = message.from_user.id
+    error = None
+    discount_text = None
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        c = conn.cursor()
+        c.execute("""
+            SELECT id, discount_percent, discount_amount, valid_until, max_uses, used_count
+            FROM promocodes WHERE code = ? AND is_active = 1
+        """, (code,))
+        promo = c.fetchone()
+        if not promo:
+            error = "❌ Промокод не найден или неактивен"
+        else:
+            pid, percent, amount, valid_until, max_uses, used_count = promo
+            if valid_until and datetime.now() > datetime.fromisoformat(valid_until):
+                error = "❌ Срок действия промокода истёк"
+            elif used_count >= max_uses:
+                error = "❌ Промокод уже использован максимальное количество раз"
+            elif c.execute("SELECT id FROM promocode_uses WHERE promocode_id=? AND user_id=?", (pid, owner)).fetchone():
+                error = "❌ Вы уже использовали этот промокод"
+            elif percent > 0:
+                value, discount_text = f"{percent}|0", f"{percent}%"
+            elif amount > 0:
+                value, discount_text = f"0|{amount}", f"{amount} ₽"
+            else:
+                error = "❌ Промокод не содержит скидку"
+            if error is None:
+                c.execute("INSERT INTO promocode_uses (promocode_id,user_id) VALUES (?,?)", (pid, owner))
+                c.execute("UPDATE promocodes SET used_count=used_count+1 WHERE id=?", (pid,))
+                c.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
+                          (f"promocode_user_{owner}", value))
+    if error is not None:
+        await promo_input_error(message, state, error)
         return
-
-    promocode_id, discount_percent, discount_amount, valid_until, max_uses, used_count = promocode
-
-    if valid_until and datetime.now() > datetime.fromisoformat(valid_until):
-        await message.answer("❌ Срок действия промокода истек", parse_mode="HTML")
-        conn.close()
-        await state.clear()
-        return
-
-    if used_count >= max_uses:
-        await message.answer("❌ Промокод уже использован максимальное количество раз", parse_mode="HTML")
-        conn.close()
-        await state.clear()
-        return
-
-    c.execute('SELECT id FROM promocode_uses WHERE promocode_id = ? AND user_id = ?',
-              (promocode_id, message.from_user.id))
-    if c.fetchone():
-        await message.answer("❌ Вы уже использовали этот промокод", parse_mode="HTML")
-        conn.close()
-        await state.clear()
-        return
-
-    c.execute('INSERT INTO promocode_uses (promocode_id, user_id) VALUES (?, ?)',
-              (promocode_id, message.from_user.id))
-    c.execute('UPDATE promocodes SET used_count = used_count + 1 WHERE id = ?', (promocode_id,))
-    conn.commit()
-    conn.close()
-
-    # Сохраняем промокод в настройках пользователя
-    if discount_percent > 0:
-        set_setting(f'promocode_user_{message.from_user.id}', f'{discount_percent}|0')
-        await message.answer(
-            f"✅ <b>Промокод активирован!</b>\n\n"
-            f"🎁 Скидка: <b>{discount_percent}%</b>\n"
-            f"💡 Скидка будет применена к следующей покупке.",
-            parse_mode="HTML"
-        )
-    elif discount_amount > 0:
-        set_setting(f'promocode_user_{message.from_user.id}', f'0|{discount_amount}')
-        await message.answer(
-            f"✅ <b>Промокод активирован!</b>\n\n"
-            f"🎁 Скидка: <b>{discount_amount} ₽</b>\n"
-            f"💡 Скидка будет применена к следующей покупке.",
-            parse_mode="HTML"
-        )
-
-    # Очищаем состояние
     await state.clear()
-    
-    # Возвращаемся в главное меню
-    await message.answer(
-        "Главное меню:",
-        reply_markup=get_main_keyboard(message.from_user.id),
-        parse_mode="HTML"
-    )
-
-@router.message(Command("cancel"), EnterPromocode.waiting)
-async def cancel_promocode_input(message: types.Message, state: FSMContext):
-    """Отмена ввода промокода"""
-    await state.clear()
-    await message.answer(
-        "❌ Ввод промокода отменён.",
-        reply_markup=get_main_keyboard(message.from_user.id),
-        parse_mode="HTML"
-    )
-
+    await render_command(message,
+        f"✅ <b>Промокод активирован!</b>\n\n🎁 Скидка: <b>{discount_text}</b>",
+        reply_markup=get_back_keyboard("promo_achievements"), parse_mode="HTML")

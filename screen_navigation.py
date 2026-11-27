@@ -259,7 +259,7 @@ async def _render_command_locked(message,key,text,kwargs,*,force_new=False):
     return result
 
 
-async def render_command(message,text,*,keyboard=None,refresh_keyboard=False,**kwargs):
+async def render_command(message,text,*,keyboard=None,refresh_keyboard=False,clean_cancel=False,**kwargs):
     """Open a menu; optionally maintain its separate keyboard and clean the command."""
     key=_key(message,command=True)
     if key is None:
@@ -271,7 +271,12 @@ async def render_command(message,text,*,keyboard=None,refresh_keyboard=False,**k
             if isinstance(kwargs.get("reply_markup"),ReplyKeyboardMarkup):
                 kwargs.pop("reply_markup")
         result=await _render_command_locked(message,key,text,kwargs,force_new=added)
-        if keyboard is not None:
+        if clean_cancel and getattr(message,"text",None)=="/cancel":
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                LOG.info("Cancellation command could not be removed")
+        elif keyboard is not None:
             await _clean_command(message)
         return result
 
