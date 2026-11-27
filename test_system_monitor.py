@@ -60,9 +60,29 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([e["kind"] for e in self.events()],["recovered","opened"])
         for t in (240,300,360):
             self.tick(t,**{"panel:1":"Не подтверждён"})
-        record_cycle(self.path,{},now=420,checked_panel_ids=set())
+        record_cycle(self.path,{},now=420,checked_keys=set())
         self.assertEqual(self.events()[0]["kind"],"removed")
         self.assertEqual(self.events()[0]["delivery"],"not_required")
+
+    def test_removed_linked_node_does_not_remove_other_states(self):
+        keys = {"panel:1:linked:2", "node:1:linked:2:disk", "panel:1"}
+        for t in (0,60,120):
+            record_cycle(self.path,{
+                "panel:1:linked:2":("Linked node","Не подтверждён"),
+                "node:1:linked:2:disk":("Linked disk",90),
+                "panel:1":("Parent","API доступен"),
+                "disk":("Local disk",10),
+            },now=t,checked_keys=keys)
+        self.assertEqual(len(self.events()),2)
+        record_cycle(self.path,{},now=180,checked_keys=None)
+        self.assertEqual(len(self.events()),2)
+        record_cycle(self.path,{"panel:1":("Parent","API доступен")},
+                     now=240,checked_keys={"panel:1"})
+        events=self.events()
+        self.assertEqual([e["kind"] for e in events[:2]],["removed","removed"])
+        self.assertTrue(all(e["delivery"]=="not_required" for e in events[:2]))
+        self.assertEqual({r["label"] for r in history(self.path)["states"]},
+                         {"Parent","Local disk"})
 
     async def test_delivery_dedup_and_recovery(self):
         self.tick(0,disk=90)
