@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Read-only audit of bot-owned subscriptions vs per-server inbound policies."""
+from runtime_config import DB_PATH
 import argparse
 from pathlib import Path
 import sqlite3
 from subscription_sync_plan import build_plan
 from services.xui_client import XUIClient
 
-DB = Path(__file__).resolve().parent / 'data.db'
+DB = Path(DB_PATH)
 
 
 def main():

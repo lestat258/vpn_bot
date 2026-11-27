@@ -1,4 +1,5 @@
 """Модуль управления бэкапами"""
+from runtime_config import DB_PATH, TEMPLATE_DIR
 import json
 from fastapi import APIRouter, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, PlainTextResponse
@@ -9,7 +10,7 @@ from database import get_all_settings, set_setting
 from backup_manager import backup_manager
 
 backup_router = APIRouter(tags=["backup"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 @backup_router.get("/backup", response_class=HTMLResponse)
 async def backup_page(request: Request):
@@ -74,7 +75,7 @@ async def download_db(request: Request):
         return RedirectResponse("/")
     log_admin_action(812021055, 'download_db', 'Скачивание БД')
     return FileResponse(
-        path="/opt/vpn-bot/data.db",
+        path=DB_PATH,
         filename="vpn-bot-backup.db",
         media_type="application/octet-stream"
     )

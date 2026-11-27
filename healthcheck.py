@@ -3,6 +3,7 @@
 Healthcheck сервер для мониторинга состояния бота
 """
 
+from runtime_config import DB_PATH
 from fastapi import FastAPI
 from datetime import datetime
 import sqlite3
@@ -21,7 +22,7 @@ async def health():
 
     # Проверка базы данных
     try:
-        conn = sqlite3.connect('/opt/vpn-bot/data.db')
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('SELECT 1')
         conn.close()
@@ -60,7 +61,7 @@ async def health():
 async def health_db():
     """Проверка только базы данных"""
     try:
-        conn = sqlite3.connect('/opt/vpn-bot/data.db')
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('SELECT 1')
         conn.close()

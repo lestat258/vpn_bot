@@ -1,6 +1,7 @@
 """
 Модуль управления триггерами для промокодов
 """
+from runtime_config import DB_PATH
 import sqlite3
 import json
 import logging
@@ -8,7 +9,6 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
-DB_PATH = '/opt/vpn-bot/data.db'
 
 class TriggerManager:
     def __init__(self):

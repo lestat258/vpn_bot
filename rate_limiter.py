@@ -7,6 +7,7 @@
 - Настраиваемых лимитов
 - Статистики
 """
+from runtime_config import DB_PATH
 import time
 import sqlite3
 import logging
@@ -19,7 +20,6 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 logger = logging.getLogger(__name__)
-DB_PATH = '/opt/vpn-bot/data.db'
 
 # ============================================================
 # НАСТРОЙКИ

@@ -3,6 +3,7 @@
 Модуль уведомлений для администратора и пользователей
 """
 
+from runtime_config import DB_PATH
 import logging
 import sqlite3
 from datetime import datetime, timedelta
@@ -40,7 +41,7 @@ class NotificationManager:
     def _notification_sent_today(self, subscription_id, notification_type):
         """Проверяет, отправлялось ли уведомление сегодня"""
         try:
-            conn = sqlite3.connect('/opt/vpn-bot/data.db')
+            conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute('''
                 SELECT COUNT(*) FROM notifications
@@ -57,7 +58,7 @@ class NotificationManager:
     def _mark_notification_sent(self, subscription_id, notification_type):
         """Отмечает уведомление как отправленное"""
         try:
-            conn = sqlite3.connect('/opt/vpn-bot/data.db')
+            conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute('''
                 INSERT INTO notifications (subscription_id, type)
@@ -70,7 +71,7 @@ class NotificationManager:
 
     async def check_expiring_subscriptions(self):
         """Проверяет подписки, истекающие скоро, и отправляет уведомления"""
-        conn = sqlite3.connect('/opt/vpn-bot/data.db')
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
 
         # Подписки, истекающие через 3 дня
@@ -194,7 +195,7 @@ class NotificationManager:
 
         # Проверяем базу данных
         try:
-            conn = sqlite3.connect('/opt/vpn-bot/data.db')
+            conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute('SELECT 1')
             conn.close()
@@ -203,7 +204,7 @@ class NotificationManager:
 
         # Проверяем серверы
         try:
-            conn = sqlite3.connect('/opt/vpn-bot/data.db')
+            conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute('SELECT name, status FROM servers WHERE is_active = 1 AND status != "online"')
             offline_servers = c.fetchall()

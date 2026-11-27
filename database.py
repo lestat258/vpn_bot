@@ -6,6 +6,7 @@
 - Контекстный менеджер для безопасной работы
 - Индексы для оптимизации запросов
 """
+from runtime_config import DB_PATH
 import sqlite3
 import logging
 import os
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 # КОНФИГУРАЦИЯ
 # ============================================================
 
-DB_PATH = "/opt/vpn-bot/data.db"
+
 SCHEMA_VERSION = 5  # Текущая версия схемы
 
 # ============================================================

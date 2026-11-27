@@ -1,6 +1,7 @@
 """
 Обработчики платежей и тарифов
 """
+from runtime_config import DB_PATH
 import logging
 import sqlite3
 from datetime import datetime, timedelta
@@ -20,7 +21,7 @@ from yookassa import Payment
 from server_manager import server_manager
 from referral import referral_manager
 
-DB_PATH = '/opt/vpn-bot/data.db'
+
 ADMIN_ID = int(get_setting('admin_id') or 812021055)
 
 router = Router()

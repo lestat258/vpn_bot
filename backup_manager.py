@@ -2,6 +2,7 @@
 """
 Модуль управления бэкапами — ПОЛНАЯ ВЕРСИЯ
 """
+from runtime_config import APP_DIR, BACKUP_DIR, DB_PATH
 import os
 import json
 import sqlite3
@@ -20,8 +21,7 @@ try:
 except AttributeError:
     pass
 
-DB_PATH = "/opt/vpn-bot/data.db"
-BACKUP_DIR = "/opt/vpn-bot/backups"
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ class BackupManager:
         """Создаёт ПОЛНЫЙ бэкап всего проекта (как ручной)"""
         import glob
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        project_dir = "/opt/vpn-bot"
+        project_dir = str(APP_DIR)
         backup_name = f"project_backup_{timestamp}.tar.gz"
         backup_path = os.path.join(BACKUP_DIR, backup_name)
 
@@ -148,7 +148,7 @@ class BackupManager:
                         os.remove(crontab_file)
 
                 # 4. .env файл (если есть)
-                env_file = "/opt/vpn-bot/.env"
+                env_file = str(APP_DIR / ".env")
                 if os.path.exists(env_file):
                     tar.add(env_file, arcname=".env")
                     logger.info("✅ Добавлен .env")
@@ -157,7 +157,7 @@ class BackupManager:
                 dump_file = "/tmp/data-dump.sql"
                 try:
                     result = subprocess.run(
-                        ["sqlite3", "/opt/vpn-bot/data.db", ".dump"],
+                        ["sqlite3", DB_PATH, ".dump"],
                         capture_output=True,
                         text=True
                     )

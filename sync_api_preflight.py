@@ -4,14 +4,14 @@
 READ-ONLY. No API mutation methods and no SQLite writes. This tool does NOT
 install or enable automatic synchronization.
 """
+from runtime_config import DB_PATH
 import argparse
 import re
 import sqlite3
 from pathlib import Path
 from urllib.parse import urlsplit
 
-ROOT = Path(__file__).resolve().parent
-DB = ROOT / 'data.db'
+DB = Path(DB_PATH)
 
 
 class PreflightError(RuntimeError):

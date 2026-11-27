@@ -1,4 +1,5 @@
 """Authenticated journal and explicit, read-only external status check."""
+from runtime_config import DB_PATH, TEMPLATE_DIR
 import asyncio
 import hashlib
 import hmac
@@ -14,8 +15,8 @@ from payment_receipt_resend import resend_order
 from .auth import check_auth
 
 payments_router = APIRouter(tags=["payments"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
-DB = "/opt/vpn-bot/data.db"
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
+DB = DB_PATH
 _check_lock = asyncio.Lock()
 _resend_until = 0.0
 _csrf_key = secrets.token_bytes(32)

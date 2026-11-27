@@ -1,3 +1,4 @@
+from runtime_config import DB_PATH, TEMPLATE_DIR
 from fastapi.responses import RedirectResponse
 """Модуль аналитики"""
 from fastapi import APIRouter, Request
@@ -8,7 +9,7 @@ import sqlite3
 from .auth import check_auth
 
 analytics_router = APIRouter(tags=["analytics"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 @analytics_router.get("/analytics", response_class=HTMLResponse)
 async def analytics_page(request: Request):
@@ -16,7 +17,7 @@ async def analytics_page(request: Request):
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
     c.execute('''SELECT DATE(created_at), COUNT(*)

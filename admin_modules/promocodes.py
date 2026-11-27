@@ -1,3 +1,4 @@
+from runtime_config import DB_PATH, TEMPLATE_DIR
 from fastapi.responses import RedirectResponse
 """Модуль управления промокодами и достижениями"""
 import json
@@ -9,13 +10,13 @@ import sqlite3
 from .auth import check_auth, log_admin_action
 
 promocodes_router = APIRouter(tags=["promocodes"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 @promocodes_router.get("/promocodes", response_class=HTMLResponse)
 async def promocodes_page(request: Request):
     if not check_auth(request):
         return RedirectResponse("/")
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT id, code, discount_percent, discount_amount, valid_until, max_uses, used_count, trigger_type, is_active FROM promocodes WHERE trigger_type = "manual" ORDER BY created_at DESC')
     promocodes = c.fetchall()
@@ -42,7 +43,7 @@ async def add_promocode(request: Request):
     discount_amount = float(form.get('discount_amount', 0) or 0)
     valid_until = form.get('valid_until') or None
     max_uses = int(form.get('max_uses', 1) or 1)
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""INSERT INTO promocodes
                  (code, discount_percent, discount_amount, valid_until, max_uses, trigger_type, trigger_params, is_active)
@@ -58,7 +59,7 @@ async def add_promocode(request: Request):
 async def delete_promocode(request: Request, promocode_id: int):
     if not check_auth(request):
         return RedirectResponse("/")
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT code FROM promocodes WHERE id = ?', (promocode_id,))
     promo = c.fetchone()
@@ -76,7 +77,7 @@ async def delete_promocode(request: Request, promocode_id: int):
 async def edit_promocode_page(request: Request, promocode_id: int):
     if not check_auth(request):
         return RedirectResponse("/")
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT id, code, discount_percent, discount_amount, valid_until, max_uses, used_count, trigger_type, is_active, created_at FROM promocodes WHERE id = ?', (promocode_id,))
     promo = c.fetchone()
@@ -94,7 +95,7 @@ async def edit_promocode(request: Request, promocode_id: int,
                          is_active: int = Form(...)):
     if not check_auth(request):
         return RedirectResponse("/")
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT code FROM promocodes WHERE id = ?', (promocode_id,))
     promo = c.fetchone()
@@ -120,7 +121,7 @@ async def edit_promocode(request: Request, promocode_id: int,
 async def achievements_page(request: Request):
     if not check_auth(request):
         return RedirectResponse("/")
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''SELECT id, code, discount_percent, discount_amount, trigger_type, trigger_params, max_uses, used_count, is_active
                  FROM promocodes WHERE trigger_type != 'manual' ORDER BY trigger_type, id''')
@@ -161,7 +162,7 @@ async def achievements_page(request: Request):
 async def achievement_toggle(request: Request, promo_id: int):
     if not check_auth(request):
         return RedirectResponse("/")
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT is_active FROM promocodes WHERE id = ? AND trigger_type != "manual"', (promo_id,))
     promo = c.fetchone()

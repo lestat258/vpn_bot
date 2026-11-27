@@ -1,3 +1,4 @@
+from runtime_config import DB_PATH
 from services.vpn_service import vpn_service
 """
 Обработчики профиля и ключей
@@ -36,7 +37,7 @@ from services.vpn_service import vpn_service
 from xui_client import XUIClient
 
 router = Router()
-DB_PATH = '/opt/vpn-bot/data.db'
+
 ADMIN_ID = int(get_setting('admin_id') or 812021055)
 
 renew_temp = {}

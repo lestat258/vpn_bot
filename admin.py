@@ -2,6 +2,7 @@
 """
 Админ-панель VPN Bot (МОДУЛЬНАЯ ВЕРСИЯ)
 """
+from runtime_config import ADMIN_ALLOWED_HOSTS, ADMIN_CORS_ORIGINS, TEMPLATE_DIR
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
@@ -31,12 +32,12 @@ from admin_modules import (
 )
 
 app = FastAPI(title="VPN Bot Admin", version="2.0")
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://bot.vpn4us.ru", "http://localhost:8000", "http://127.0.0.1:8000"],
+    allow_origins=ADMIN_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -45,7 +46,7 @@ app.add_middleware(
 # Trusted Hosts
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["bot.vpn4us.ru", "admin.vpn4us.ru", "node1.vpn4us.ru", "localhost", "127.0.0.1", "31.77.142.92"]
+    allowed_hosts=ADMIN_ALLOWED_HOSTS
 )
 
 # ============================================================
@@ -75,7 +76,7 @@ app.include_router(rate_limits_router)   # /rate-limits
 if __name__ == "__main__":
     init_db()
     print("=" * 50)
-    print("🔐 Админ-панель: https://bot.vpn4us.ru")
+    print("🔐 Админ-панель VPN4US")
     print("📊 Доступные страницы:")
     print("  - /dashboard - Дашборд")
     print("  - /users - Пользователи")

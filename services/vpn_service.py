@@ -1,6 +1,7 @@
 """
 Сервис для работы с VPN (создание, продление, управление подписками)
 """
+from runtime_config import DB_PATH
 import fcntl
 import logging
 from contextlib import closing
@@ -18,8 +19,6 @@ from server_manager import server_manager
 from utils import generate_short_email, find_subid_by_email
 
 logger = logging.getLogger(__name__)
-DB_PATH = '/opt/vpn-bot/data.db'
-
 
 def _client_state(api, email, uid, subid):
     reply = api._request('GET', '/panel/api/clients/get/' + quote(email, safe=''))

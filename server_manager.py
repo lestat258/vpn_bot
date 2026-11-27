@@ -2,6 +2,7 @@
 Модуль управления серверами и балансировки
 """
 
+from runtime_config import DB_PATH
 import sqlite3
 import logging
 import json
@@ -14,7 +15,6 @@ from encryption import decrypt
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('ServerManager')
 
-DB_PATH = '/opt/vpn-bot/data.db'
 
 class ServerManager:
     def __init__(self):

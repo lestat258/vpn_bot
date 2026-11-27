@@ -1,3 +1,4 @@
+from runtime_config import DB_PATH, TEMPLATE_DIR
 from fastapi.responses import RedirectResponse
 """Модуль защиты от спама"""
 from fastapi import APIRouter, Request
@@ -9,7 +10,7 @@ from .auth import check_auth, log_admin_action
 from rate_limiter import rate_limiter
 
 rate_limits_router = APIRouter(tags=["rate_limits"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 @rate_limits_router.get("/rate-limits", response_class=HTMLResponse)
 async def rate_limits_page(request: Request):
@@ -17,7 +18,7 @@ async def rate_limits_page(request: Request):
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
         SELECT user_id, action_type, request_count, is_blocked, blocked_until

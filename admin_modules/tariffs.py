@@ -1,3 +1,4 @@
+from runtime_config import DB_PATH, TEMPLATE_DIR
 from fastapi.responses import RedirectResponse
 """Модуль управления тарифами"""
 from fastapi import APIRouter, Request, Form
@@ -8,7 +9,7 @@ import sqlite3
 from .auth import check_auth, log_admin_action
 
 tariffs_router = APIRouter(tags=["tariffs"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 @tariffs_router.get("/tariffs", response_class=HTMLResponse)
 async def tariffs_page(request: Request):
@@ -16,7 +17,7 @@ async def tariffs_page(request: Request):
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT id, name, price_rub, duration_days, traffic_gb, ip_limit, is_active FROM tariffs')
     tariffs = c.fetchall()
@@ -39,7 +40,7 @@ async def add_tariff(request: Request, name: str = Form(...), price_rub: float =
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('INSERT INTO tariffs (name, price_rub, duration_days, traffic_gb, ip_limit) VALUES (?, ?, ?, ?, ?)',
               (name, price_rub, duration_days, traffic_gb, ip_limit))
@@ -55,7 +56,7 @@ async def edit_tariff_page(request: Request, tariff_id: int):
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT id, name, price_rub, duration_days, traffic_gb, ip_limit, is_active FROM tariffs WHERE id = ?', (tariff_id,))
     tariff = c.fetchone()
@@ -78,7 +79,7 @@ async def edit_tariff(request: Request, tariff_id: int,
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''UPDATE tariffs
                  SET name = ?, price_rub = ?, duration_days = ?, traffic_gb = ?, ip_limit = ?, is_active = ?
@@ -96,7 +97,7 @@ async def delete_tariff(request: Request, tariff_id: int):
     if not check_auth(request):
         return RedirectResponse("/")
 
-    conn = sqlite3.connect('/opt/vpn-bot/data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT COUNT(*) FROM subscriptions WHERE tariff_id = ? AND is_active = 1', (tariff_id,))
     count = c.fetchone()[0]

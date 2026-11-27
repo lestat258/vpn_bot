@@ -1,3 +1,4 @@
+from runtime_config import DB_PATH
 from services.vpn_service import vpn_service
 """
 Пользовательские хендлеры бота
@@ -44,7 +45,7 @@ from server_manager import server_manager
 from yookassa import Payment
 
 router = Router()
-DB_PATH = '/opt/vpn-bot/data.db'
+
 ADMIN_ID = int(get_setting('admin_id') or 812021055)
 
 # Временное хранилище для продления

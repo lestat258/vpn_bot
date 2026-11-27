@@ -2,6 +2,7 @@
 Модуль двухфакторной аутентификации (2FA) для админки
 Использует TOTP (Time-based One-Time Password)
 """
+from runtime_config import DB_PATH
 import pyotp
 import qrcode
 import sqlite3
@@ -11,7 +12,7 @@ from base64 import b64encode
 from datetime import datetime
 from database import get_setting, set_setting
 
-DB_PATH = '/opt/vpn-bot/data.db'
+
 logger = logging.getLogger(__name__)
 
 class TwoFactorAuth:

@@ -5,6 +5,7 @@
 - Авто-продление подписки
 """
 
+from runtime_config import DB_PATH
 import sqlite3
 import logging
 import asyncio
@@ -15,7 +16,6 @@ from database import get_setting
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('Automation')
 
-DB_PATH = '/opt/vpn-bot/data.db'
 
 class AutomationManager:
     def __init__(self):

@@ -1,4 +1,5 @@
 """Authenticated read-only dashboard."""
+from runtime_config import DB_PATH, TEMPLATE_DIR
 import asyncio
 import time
 from fastapi import APIRouter, Request
@@ -8,8 +9,8 @@ from .auth import check_auth
 from dashboard_metrics import dashboard_data, local_metrics, probe_panels
 
 dashboard_router = APIRouter(tags=["dashboard"])
-templates = Jinja2Templates(directory="/opt/vpn-bot/templates")
-DB = "/opt/vpn-bot/data.db"
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
+DB = DB_PATH
 HEADERS = {"Cache-Control":"no-store","Referrer-Policy":"no-referrer"}
 _panel_lock=asyncio.Lock()
 _panel_cache=None

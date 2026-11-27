@@ -1,4 +1,5 @@
 """Read-only dashboard snapshots; no payment reconciliation or server mutations."""
+from runtime_config import DATA_DIR
 import asyncio
 import base64
 import json
@@ -42,7 +43,7 @@ def cpu_percent(before, after):
     return round(100*(total-idle)/total,1)
 
 
-def local_metrics(proc="/proc", disk_path="/opt/vpn-bot"):
+def local_metrics(proc="/proc", disk_path=DATA_DIR):
     proc = Path(proc)
     data = dict.fromkeys(("cpu","memory","disk","uptime"),UNKNOWN)
     data["percent"] = dict.fromkeys(("cpu","memory","disk"))

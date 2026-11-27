@@ -1,11 +1,11 @@
 """
 Все клавиатуры для бота
 """
+from runtime_config import DB_PATH
 import sqlite3
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from datetime import datetime
 
-DB_PATH = '/opt/vpn-bot/data.db'
 
 def get_main_keyboard(telegram_id=None):
     """Главная клавиатура"""
