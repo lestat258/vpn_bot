@@ -136,6 +136,8 @@ async def process_payment_success(payment_id, data):
     # Commit verified fiscal work before fulfillment. The dedicated worker
     # independently rechecks YooKassa and never blocks the VPN response.
     from refund_fulfillment import scope, record_refund, money
+    from promo_reservations import settle_verified_success
+    await asyncio.to_thread(settle_verified_success, DB_PATH, payment_id, data["object"])
     if await asyncio.to_thread(scope, DB_PATH, payment_id) == "new":
         refunded = data["object"].get("refunded_amount")
         if refunded is not None and money(refunded.value) > 0:
@@ -231,10 +233,17 @@ async def verify_provider_payment(payment_id, expected_status='succeeded'):
                 rows[0]["telegram_id"],kopecks(rows[0]["amount_rub"]),metadata):
             return None,web.Response(status=403,text="Deposit metadata mismatch")
 
+    from promo_reservations import validate_binding, ReservationConflict
+    try:
+        await asyncio.to_thread(validate_binding, DB_PATH, payment_id, metadata, actual)
+    except (ReservationConflict, ValueError):
+        return None, web.Response(status=403, text="Discount order mismatch")
+
     verified_data = {
         "object": {
             "id": payment_id,
             "metadata": metadata,
+            "amount_rub": str(actual),
             "captured_at": getattr(verified, "captured_at", None),
             "refunded_amount": getattr(verified, "refunded_amount", None)
         }
@@ -300,7 +309,8 @@ async def handle_payment_change(event, obj):
             state=await asyncio.to_thread(record_deposit_change,DB_PATH,payment_id,
                                           verified["object"]["metadata"],canceled=True)
         else:
-            state = await asyncio.to_thread(record_canceled, DB_PATH, payment_id)
+            state = await asyncio.to_thread(record_canceled, DB_PATH, payment_id,
+                metadata=verified["object"]["metadata"], amount=verified["object"]["amount_rub"])
     else:
         refund = await fetch_verified_refund(object_id)
         if (str(getattr(refund,"id","")) != object_id
@@ -319,6 +329,8 @@ async def handle_payment_change(event, obj):
             state=await asyncio.to_thread(record_deposit_change,DB_PATH,payment_id,
                                           verified["object"]["metadata"],refund=aggregate.value)
         else:
+            from promo_reservations import settle_verified_success
+            await asyncio.to_thread(settle_verified_success, DB_PATH, payment_id, verified["object"])
             state = await asyncio.to_thread(record_refund, DB_PATH, payment_id, money(aggregate.value))
     if state.endswith("review"):
         logger.warning("Payment change requires manual reconciliation")

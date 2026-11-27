@@ -10,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from tax_fulfillment import transaction, credentials, disable_income_retry, public_receipt_url
 from balance_ledger import deposit_exists
+from promo_reservations import registered as promo_registered, settle as settle_promo
 
 LOG = logging.getLogger(__name__)
 CUTOFF = "2026-11-26T12:15:00Z"
@@ -26,6 +27,8 @@ def money(value):
 def eligible_row(db, payment_id):
     if deposit_exists(db,payment_id):
         return db.execute("SELECT * FROM payments WHERE payment_id=? AND tariff_id=0 AND amount_rub>0",(payment_id,)).fetchone()
+    if promo_registered(db,payment_id):
+        return db.execute("SELECT * FROM payments WHERE payment_id=? AND tariff_id>0 AND amount_rub>0",(payment_id,)).fetchone()
     return db.execute("""
         SELECT * FROM payments WHERE payment_id=? AND id>?
           AND datetime(created_at)>=datetime(?) AND amount_rub>0 AND tariff_id<>0
@@ -42,18 +45,22 @@ def scope(path, payment_id):
         ).fetchone() else "unknown"
 
 
-def record_canceled(path, payment_id):
+def record_canceled(path, payment_id, *, metadata=None, amount=None):
     """Caller has independently verified canceled, unpaid and matching payment."""
     with transaction(path) as db:
         p = eligible_row(db, payment_id)
         if not p:
             return "ignored"
         if p["status"] == "canceled":
+            if promo_registered(db,payment_id):
+                settle_promo(db,payment_id,metadata,amount,"canceled")
             return "done"
         if p["status"] != "pending" or db.execute(
             "SELECT 1 FROM payment_processing WHERE payment_id=?", (payment_id,)
         ).fetchone():
             return "needs_review"
+        if promo_registered(db,payment_id):
+            settle_promo(db,payment_id,metadata,amount,"canceled")
         db.execute("UPDATE payments SET status='canceled' WHERE payment_id=?", (payment_id,))
         db.execute("""
             INSERT INTO payment_processing(payment_id,payment_state,vpn_state,tax_state)

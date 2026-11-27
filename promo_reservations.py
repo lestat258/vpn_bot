@@ -242,3 +242,37 @@ def settle(db,payment_id,metadata,amount,status):
     db.execute("UPDATE promo_reservations SET state=?,updated_at=CURRENT_TIMESTAMP WHERE checkout_id=?",
                (target,row["checkout_id"]))
     return target
+
+
+def open_reservation(path,owner):
+    with closing(sqlite3.connect(path,timeout=15)) as db:
+        db.row_factory=sqlite3.Row
+        if not has_schema(db):
+            return None
+        row=db.execute("SELECT * FROM promo_reservations WHERE telegram_id=? AND state IN ('reserved','attached')",(owner,)).fetchone()
+        return dict(row) if row else None
+
+
+def validate_binding(path,payment_id,metadata,amount):
+    with closing(sqlite3.connect(path,timeout=15)) as db:
+        db.row_factory=sqlite3.Row
+        if not registered(db,payment_id):
+            if metadata.get("promo_reservation_id"):
+                raise ReservationConflict("Unregistered discount order")
+            return False
+        row=db.execute("SELECT * FROM promo_reservations WHERE payment_id=?",(payment_id,)).fetchone()
+        _match(row,metadata,amount)
+        return True
+
+
+def settle_verified_success(path,payment_id,obj):
+    """Called only after independent verification of provider success."""
+    with transaction(path) as db:
+        metadata=obj["metadata"]
+        if not registered(db,payment_id):
+            if metadata.get("promo_reservation_id"):
+                raise ReservationConflict("Unregistered discount order")
+            return "ignored"
+        if obj.get("id")!=payment_id:
+            raise ReservationConflict("Provider payment identity mismatch")
+        return settle(db,payment_id,metadata,obj["amount_rub"],"succeeded")
