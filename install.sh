@@ -39,6 +39,7 @@ git -C "$source_dir" cat-file -e HEAD:deploy/setup_https.sh ||
 
 apt-get update
 apt-get install -y python3 python3-venv curl iproute2
+git -C "$source_dir" show HEAD:deploy/setup_https.sh | bash -s -- --check-only "$domain" "$email"
 if [[ -n $(ss -H -ltn '( sport = :8000 or sport = :8081 )') ]]; then
     fail 'Локальный порт 8000 или 8081 уже занят.'
 fi

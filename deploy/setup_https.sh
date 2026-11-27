@@ -9,11 +9,16 @@ fail() {
 
 [[ $EUID == 0 ]] || fail 'Запустите скрипт через sudo.'
 admin_only=0
+check_only=0
+if [[ ${1:-} == --check-only ]]; then
+    check_only=1
+    shift
+fi
 if [[ ${1:-} == --admin-only ]]; then
     admin_only=1
     shift
 fi
-[[ $# == 2 ]] || fail 'Использование: sudo bash deploy/setup_https.sh [--admin-only] DOMAIN ACME_EMAIL'
+[[ $# == 2 ]] || fail 'Использование: sudo bash deploy/setup_https.sh [--check-only | --admin-only] DOMAIN ACME_EMAIL'
 domain=${1,,}
 email=$2
 [[ ${#domain} -le 253 && $domain =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] ||
@@ -42,6 +47,8 @@ marker="# Managed by VPN4US HTTPS installer for $domain"
 if [[ -L $site ]] || { [[ -e $site ]] && ! head -n 1 "$site" | grep -Fxq -- "$marker"; }; then
     fail "Путь $site уже занят существующей конфигурацией."
 fi
+
+if (( check_only )); then exit 0; fi
 
 missing=()
 for command_name in nginx certbot curl; do
