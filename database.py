@@ -384,6 +384,22 @@ def _create_tables():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
         
+        c.execute('''CREATE TABLE IF NOT EXISTS payment_processing (
+            payment_id TEXT PRIMARY KEY,
+            is_legacy INTEGER NOT NULL DEFAULT 0,
+            payment_state TEXT NOT NULL DEFAULT 'pending',
+            vpn_state TEXT NOT NULL DEFAULT 'not_started',
+            tax_state TEXT NOT NULL DEFAULT 'not_started',
+            refund_state TEXT NOT NULL DEFAULT 'none',
+            subscription_id INTEGER,
+            receipt_uuid TEXT UNIQUE,
+            receipt_url TEXT,
+            last_error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(payment_id) REFERENCES payments(payment_id)
+        )''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id INTEGER NOT NULL,
