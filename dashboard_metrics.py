@@ -218,7 +218,12 @@ async def probe_panel_metrics(client, row, key):
                 if not isinstance(status, dict):
                     return {"cpu": None, "memory": None, "disk": None}
 
+                unavailable = status.get("unavailableMetrics")
+                unavailable = unavailable if isinstance(unavailable, list) else []
+
                 def percent(section):
+                    if section in unavailable:
+                        return None
                     item = status.get(section)
                     if not isinstance(item, dict):
                         return None
@@ -232,7 +237,7 @@ async def probe_panel_metrics(client, row, key):
                     return round(100 * current / total, 1)
 
                 cpu = status.get("cpu")
-                if (isinstance(cpu, bool) or not isinstance(cpu, (int, float))
+                if ("cpu" in unavailable or isinstance(cpu, bool) or not isinstance(cpu, (int, float))
                         or not math.isfinite(cpu) or not 0 <= cpu <= 100):
                     cpu = None
                 return {"cpu": cpu, "memory": percent("mem"), "disk": percent("disk")}
