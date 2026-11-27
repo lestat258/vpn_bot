@@ -148,6 +148,38 @@ async def deliver(path, *, sender=None):
         await asyncio.to_thread(finish_event,path,event["id"],state)
 
 
+def linked_observations(panel, now):
+    observations = {}
+    for row in panel["linked_nodes"]:
+        node_id = row["id"]
+        # Indirect nodes do not have a stable ID or resource samples on this panel.
+        if node_id <= 0 or row.get("enable") is not True:
+            continue
+        name = str(row.get("name") or node_id) + " · через " + panel["name"]
+        identity = f"{panel['id']}:linked:{node_id}"
+        status = row.get("status")
+        heartbeat = row.get("lastHeartbeat")
+        fresh = type(heartbeat) is int and 0 <= now - heartbeat <= MAX_GAP
+        state = "Не проверен"
+        if status == "offline":
+            state = "Не подтверждён"
+        elif status == "online" and fresh:
+            state = "API доступен"
+        observations["panel:" + identity] = ("Статус ноды · " + name, state)
+        unavailable = row.get("unavailableMetrics")
+        if not isinstance(unavailable, list):
+            unavailable = []
+        for metric, field, key, label in (
+            ("cpu", "cpuPct", "cpu", "CPU"),
+            ("memory", "memPct", "mem", "Память"),
+        ):
+            value = row.get(field)
+            if state != "API доступен" or key in unavailable or type(value) not in (int, float):
+                value = None
+            observations[f"node:{identity}:{metric}"] = (label + " · " + name, value)
+    return observations
+
+
 async def sample(path, previous=None):
     # The CPU observation is valid only across a recent contiguous interval.
     try:
@@ -160,8 +192,10 @@ async def sample(path, previous=None):
     local=await asyncio.to_thread(local_metrics)
     obs={key:(LABELS[key],cpu if key=="cpu" else local["percent"][key]) for key in LIMITS}
     keys=None
+    unavailable_parents = set()
     try:
-        result=await probe_panels(path)
+        result=await probe_panels(path, discover_nodes=True)
+        now = time.time()
         observed=set()
         metric_labels={"cpu":"CPU","memory":"Память","disk":"Диск"}
         for panel in result["panels"]:
@@ -174,6 +208,12 @@ async def sample(path, previous=None):
                 metric_key="node:"+server_id+":"+metric
                 observed.add(metric_key)
                 obs[metric_key]=(metric_labels[metric]+" · "+panel["name"],metrics.get(metric))
+            if panel["linked_nodes"] is None:
+                unavailable_parents.add(server_id)
+            else:
+                linked = linked_observations(panel, now)
+                obs.update(linked)
+                observed.update(linked)
         if not result["truncated"]:
             keys=observed
     except Exception as exc:
@@ -181,9 +221,14 @@ async def sample(path, previous=None):
     # A failed global probe must break consecutive evidence, not indicate recovery.
     with closing(read_db(path)) as db:
         exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='system_monitor_state'").fetchone()
-        if exists and keys is None:
+        if exists and (keys is None or unavailable_parents):
             for row in db.execute("SELECT key,label FROM system_monitor_state WHERE key LIKE 'panel:%' OR key LIKE 'node:%'"):
-                obs.setdefault(row["key"],(row["label"],"Не проверен" if row["key"].startswith("panel:") else None))
+                key = row["key"]
+                parts = key.split(":")
+                if keys is None or (len(parts) >= 4 and parts[2] == "linked" and parts[1] in unavailable_parents):
+                    obs.setdefault(key, (row["label"], "Не проверен" if key.startswith("panel:") else None))
+                    if keys is not None:
+                        keys.add(key)
     return current,obs,keys
 
 
