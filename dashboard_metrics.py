@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import json
+import math
 import os
 import re
 import shutil
@@ -136,7 +137,7 @@ def dashboard_data(path, now=None):
 
 def server_targets(path):
     with closing(read_db(path)) as db:
-        rows = [dict(row) for row in db.execute("SELECT id,name,url,api_token FROM servers WHERE is_active=1 ORDER BY id LIMIT 51")]
+        rows = [dict(row) for row in db.execute("SELECT id,name,url,api_token FROM servers WHERE is_active=1 ORDER BY id")]
         key = db.execute("SELECT value FROM settings WHERE key='encryption_key'").fetchone()
     return rows, key[0] if key else None
 
@@ -191,16 +192,67 @@ async def probe_panel(client, row, key):
         return "Не подтверждён"
 
 
+async def probe_panel_metrics(client, row, key):
+    """Read CPU, memory and disk for the host running this 3x-ui panel."""
+    try:
+        parsed = urlsplit(row["url"])
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+                or parsed.password is not None or parsed.query or parsed.fragment):
+            return {"cpu": None, "memory": None, "disk": None}
+        token = token_clear(row["api_token"], key)
+
+        async def fetch():
+            async with client.stream(
+                "GET", row["url"].rstrip("/") + "/panel/api/server/status",
+                headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
+            ) as resp:
+                if resp.status_code != 200:
+                    return {"cpu": None, "memory": None, "disk": None}
+                content = bytearray()
+                async for part in resp.aiter_bytes():
+                    content.extend(part)
+                    if len(content) > 1024 * 1024:
+                        return {"cpu": None, "memory": None, "disk": None}
+                result = json.loads(content)
+                status = result.get("obj") if isinstance(result, dict) and result.get("success") is True else None
+                if not isinstance(status, dict):
+                    return {"cpu": None, "memory": None, "disk": None}
+
+                def percent(section):
+                    item = status.get(section)
+                    if not isinstance(item, dict):
+                        return None
+                    current, total = item.get("current"), item.get("total")
+                    if (isinstance(current, bool) or isinstance(total, bool)
+                            or not isinstance(current, (int, float))
+                            or not isinstance(total, (int, float))
+                            or not math.isfinite(current) or not math.isfinite(total)
+                            or total <= 0 or current < 0 or current > total):
+                        return None
+                    return round(100 * current / total, 1)
+
+                cpu = status.get("cpu")
+                if (isinstance(cpu, bool) or not isinstance(cpu, (int, float))
+                        or not math.isfinite(cpu) or not 0 <= cpu <= 100):
+                    cpu = None
+                return {"cpu": cpu, "memory": percent("mem"), "disk": percent("disk")}
+
+        return await asyncio.wait_for(fetch(), 6)
+    except Exception:
+        return {"cpu": None, "memory": None, "disk": None}
+
+
 async def probe_panels(path):
     import httpx
-    rows,key = await asyncio.to_thread(server_targets,path)
-    # Cap work per refresh; report that additional servers were not checked.
-    rows, truncated = rows[:50], len(rows)>50
-    limit=asyncio.Semaphore(4)
-    async with httpx.AsyncClient(timeout=5,verify=True,follow_redirects=False,trust_env=False) as client:
+    rows, key = await asyncio.to_thread(server_targets, path)
+    limit = asyncio.Semaphore(32)
+    async with httpx.AsyncClient(timeout=5, verify=True, follow_redirects=False, trust_env=False) as client:
         async def one(row):
             async with limit:
-                state=await probe_panel(client,row,key)
-            return {"id":row["id"],"name":row["name"],"state":state}
+                state, metrics = await asyncio.gather(
+                    probe_panel(client, row, key),
+                    probe_panel_metrics(client, row, key),
+                )
+            return {"id": row["id"], "name": row["name"], "state": state, "metrics": metrics}
         statuses = await asyncio.gather(*(one(row) for row in rows))
-    return {"panels":statuses,"truncated":truncated}
+    return {"panels": statuses, "truncated": False}
