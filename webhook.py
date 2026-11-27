@@ -115,6 +115,8 @@ async def process_payment_success(payment_id, data):
     from tax_fulfillment import queue_verified
     if await asyncio.to_thread(is_registered,DB_PATH,payment_id):
         obj=data["object"]
+        if obj.get("id")!=payment_id:
+            raise ValueError("Deposit payment identity mismatch")
         refund=obj.get("refunded_amount")
         # Require an explicit zero refund from the independently verified provider.
         if refund is None or refund.currency!="RUB":
@@ -125,7 +127,7 @@ async def process_payment_success(payment_id, data):
         state,owner,balance=await asyncio.to_thread(credit_verified,DB_PATH,payment_id,obj["metadata"])
         if state=="credited":
             try:
-                await _telegram_notify(owner,f"✅ Баланс пополнен.\\nДоступный баланс: {rubles(balance):.2f} ₽",None,include_guide=False)
+                await _telegram_notify(owner,f"✅ Баланс пополнен.\nБаланс после пополнения: {rubles(balance):.2f} ₽",None,include_guide=False)
             except Exception:
                 logger.warning("Deposit credited; notification not confirmed")
         return state in ("credited","done","held")

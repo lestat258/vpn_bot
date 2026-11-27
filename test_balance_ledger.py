@@ -113,3 +113,53 @@ class BalanceTests(unittest.TestCase):
             db.execute("UPDATE settings SET value='true'")
         self.credit()
         self.assertEqual(self.read("SELECT tax_state FROM payment_processing"),[("needs_review",)])
+
+
+    def test_webhook_routes_deposit_without_vpn_or_tax_queue(self):
+        import ast
+        import asyncio
+        import logging
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock,patch
+        from balance_ledger import is_registered, rubles
+        path=Path(__file__).with_name("webhook.py")
+        tree=ast.parse(path.read_text(encoding="utf-8"))
+        node=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=="process_payment_success")
+        env=dict(DB_PATH=self.path,asyncio=asyncio,logger=logging.getLogger("test"),
+                 is_registered=is_registered,credit_verified=credit_verified,
+                 record_deposit_change=record_deposit_change,kopecks=kopecks,rubles=rubles)
+        exec(compile(ast.Module(body=[node],type_ignores=[]),str(path),"exec"),env)
+        data={"object":{"id":"new","metadata":self.meta,"refunded_amount":SimpleNamespace(currency="RUB",value="0.00")}}
+        with patch("payment_fulfillment.process_verified_payment",new_callable=AsyncMock) as vpn, \
+             patch("payment_fulfillment._telegram_notify",new_callable=AsyncMock) as notify, \
+             patch("tax_fulfillment.queue_verified") as tax:
+            for _ in range(2):
+                self.assertTrue(asyncio.run(env["process_payment_success"]("new",data)))
+            vpn.assert_not_awaited()
+            tax.assert_not_called()
+            notify.assert_awaited_once()
+            self.assertIn("10.50",notify.await_args.args[1])
+            self.assertEqual(self.read("SELECT balance FROM users WHERE telegram_id=42"),[(10.5,)])
+
+    def test_webhook_refund_does_not_credit(self):
+        import ast
+        import asyncio
+        import logging
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock,patch
+        from balance_ledger import is_registered, rubles
+        path=Path(__file__).with_name("webhook.py")
+        tree=ast.parse(path.read_text(encoding="utf-8"))
+        node=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=="process_payment_success")
+        env=dict(DB_PATH=self.path,asyncio=asyncio,logger=logging.getLogger("test"),
+                 is_registered=is_registered,credit_verified=credit_verified,
+                 record_deposit_change=record_deposit_change,kopecks=kopecks,rubles=rubles)
+        exec(compile(ast.Module(body=[node],type_ignores=[]),str(path),"exec"),env)
+        data={"object":{"id":"new","metadata":self.meta,"refunded_amount":SimpleNamespace(currency="RUB",value="10.50")}}
+        with patch("payment_fulfillment.process_verified_payment",new_callable=AsyncMock) as vpn, \
+             patch("tax_fulfillment.queue_verified") as tax:
+            self.assertTrue(asyncio.run(env["process_payment_success"]("new",data)))
+            vpn.assert_not_awaited()
+            tax.assert_not_called()
+        self.assertEqual(self.read("SELECT balance FROM users WHERE telegram_id=42"),[(0.0,)])
+        self.assertEqual(self.read("SELECT refund_state FROM payment_processing"),[("full_review",)])

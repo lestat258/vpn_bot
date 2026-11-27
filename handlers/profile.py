@@ -425,7 +425,7 @@ async def deposit_custom_amount(message: types.Message, state: FSMContext):
         await message.answer(f"💳 Пополнение баланса: {rubles(amount):.2f} ₽\nНажмите кнопку для оплаты.",reply_markup=kb)
         await state.clear()
     except Exception:
-        logging.exception("Deposit creation failed")
+        logging.error("Deposit creation failed")
         await message.answer("Не удалось подготовить платёж. Обратитесь в поддержку.")
         await state.clear()
 
