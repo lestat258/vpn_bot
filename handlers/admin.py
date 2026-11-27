@@ -612,7 +612,7 @@ async def admin_withdraw_start(callback: types.CallbackQuery, state: FSMContext)
     await state.update_data(user_id=telegram_id)
     await state.set_state(AdminWithdraw.amount)
 
-    await callback.message.answer(
+    await callback.message.edit_text(
         "💸 <b>Списание баланса</b>\n\n"
         "Введите сумму списания (в рублях) или /cancel для отмены:",
         reply_markup=admin_balance_cancel_keyboard(telegram_id, "withdraw"),
