@@ -5,13 +5,13 @@
     <a href="/dashboard" class="btn btn-secondary">Дашборд</a>
 </div>
 <div class="card">
-    <div class="card-header">Фоновый мониторинг</div>
+    <div class="card-header">Мониторинг админ-сервера и всех активных 3x-ui серверов</div>
     <div class="card-body">
         <strong style="color: {{ 'var(--success)' if fresh else 'var(--warning)' }};">
             {{ 'Получен свежий цикл проверки' if fresh else 'Нет свежего цикла проверки' }}
         </strong>
         <p style="margin:8px 0;">Последний цикл: {{ heartbeat }} (МСК)</p>
-        <p style="color:var(--text-secondary);font-size:12px;">CPU &gt;90% и память &gt;85% в течение 5 минут; диск от 85%; API — 3 неудачные проверки. Восстановление — 2 успешные проверки, CPU/память/диск не выше 80%. CPU — среднее за интервал. Проверки примерно раз в минуту, независимо от открытой страницы.</p>
+        <p style="color:var(--text-secondary);font-size:12px;">Локальные ресурсы сервера с админкой и CPU, память, диск каждого активного сервера из списка серверов проверяются примерно раз в минуту через API 3x-ui. CPU &gt;90% и память &gt;85% в течение 5 минут; диск от 85%; API — 3 неудачные проверки. Восстановление — 2 успешные проверки, CPU/память/диск не выше 80%. CPU — среднее за интервал. Проверки примерно раз в минуту, независимо от открытой страницы.</p>
         {% for row in states %}
         <div style="border-top:1px solid var(--border-color);padding:12px 0;margin-top:8px;overflow-wrap:anywhere;">
             <strong>{{ row.label }}</strong>
@@ -19,7 +19,7 @@
             <small style="color:var(--text-secondary);">{{ row.checked_at }} МСК</small>
         </div>
         {% endfor %}
-        <p style="font-size:12px;color:var(--text-secondary);margin-top:12px;">Проверяется API 3x-ui, не VPN-туннель. При отключении самой машины уведомление отправить невозможно. Отсутствие инцидентов не гарантирует доступность.</p>
+        <p style="font-size:12px;color:var(--text-secondary);margin-top:12px;">У подключённых в 3x-ui нод доступны статус, CPU и память по последнему отчёту ноды. Заполнение диска доступно при прямом подключении к панели ноды. Метрики удалённого сервера берутся из API 3x-ui и относятся к машине, на которой работает эта панель. Проверяется API 3x-ui, не VPN-туннель. Если сама машина выключена, уведомление с неё отправить невозможно. Отсутствие инцидентов не гарантирует доступность.</p>
     </div>
 </div>
 <div class="card">

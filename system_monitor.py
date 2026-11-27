@@ -46,17 +46,18 @@ def classify(key, value):
         if value == "Не подтверждён":
             return "bad"
         return "unknown"
-    if not isinstance(value,(int,float)) or not math.isfinite(value) or not 0 <= value <= 100:
+    metric = key.rsplit(":", 1)[-1]
+    if metric not in LIMITS or not isinstance(value,(int,float)) or not math.isfinite(value) or not 0 <= value <= 100:
         return "unknown"
-    high, low = LIMITS[key]
-    if (value >= high if key == "disk" else value > high):
+    high, low = LIMITS[metric]
+    if (value >= high if metric == "disk" else value > high):
         return "bad"
     if value <= low:
         return "good"
     return "neutral"
 
 
-def record_cycle(path, observations, *, now, checked_panel_ids=None):
+def record_cycle(path, observations, *, now, checked_keys=None):
     """A transaction records state and event atomically. Unknown never recovers."""
     with transaction(path) as db:
         init_tables(db)
@@ -74,8 +75,9 @@ def record_cycle(path, observations, *, now, checked_panel_ids=None):
                     bad_since = now
                 bad_count += 1
                 good_count = 0
+                metric = key.rsplit(":", 1)[-1]
                 threshold = (bad_count >= 3 if key.startswith("panel:") else
-                             True if key == "disk" else now-bad_since >= 300)
+                             True if metric == "disk" else now-bad_since >= 300)
                 if not active and threshold:
                     active,kind = True,"opened"
             elif status == "good":
@@ -97,9 +99,9 @@ def record_cycle(path, observations, *, now, checked_panel_ids=None):
                 db.execute("INSERT INTO system_monitor_events(key,label,kind,value,occurred_at) VALUES (?,?,?,?,?)",
                            (key,label,kind,display,now))
         # Disabled or deleted servers leave monitoring scope, not a fake recovery.
-        if checked_panel_ids is not None:
-            for row in db.execute("SELECT key,label,active FROM system_monitor_state WHERE key LIKE 'panel:%'").fetchall():
-                if row["key"] not in checked_panel_ids:
+        if checked_keys is not None:
+            for row in db.execute("SELECT key,label,active FROM system_monitor_state WHERE key LIKE 'panel:%' OR key LIKE 'node:%'").fetchall():
+                if row["key"] not in checked_keys:
                     if row["active"]:
                         db.execute("INSERT INTO system_monitor_events(key,label,kind,value,occurred_at,delivery) VALUES (?,?,?,?,?,'not_required')",
                                    (row["key"],row["label"],"removed","Исключён из мониторинга",now))
@@ -146,6 +148,38 @@ async def deliver(path, *, sender=None):
         await asyncio.to_thread(finish_event,path,event["id"],state)
 
 
+def linked_observations(panel, now):
+    observations = {}
+    for row in panel["linked_nodes"]:
+        node_id = row["id"]
+        # Indirect nodes do not have a stable ID or resource samples on this panel.
+        if node_id <= 0 or row.get("enable") is not True:
+            continue
+        name = str(row.get("name") or node_id) + " · через " + panel["name"]
+        identity = f"{panel['id']}:linked:{node_id}"
+        status = row.get("status")
+        heartbeat = row.get("lastHeartbeat")
+        fresh = type(heartbeat) is int and 0 <= now - heartbeat <= MAX_GAP
+        state = "Не проверен"
+        if status == "offline":
+            state = "Не подтверждён"
+        elif status == "online" and fresh:
+            state = "API доступен"
+        observations["panel:" + identity] = ("Статус ноды · " + name, state)
+        unavailable = row.get("unavailableMetrics")
+        if not isinstance(unavailable, list):
+            unavailable = []
+        for metric, field, key, label in (
+            ("cpu", "cpuPct", "cpu", "CPU"),
+            ("memory", "memPct", "mem", "Память"),
+        ):
+            value = row.get(field)
+            if state != "API доступен" or key in unavailable or type(value) not in (int, float):
+                value = None
+            observations[f"node:{identity}:{metric}"] = (label + " · " + name, value)
+    return observations
+
+
 async def sample(path, previous=None):
     # The CPU observation is valid only across a recent contiguous interval.
     try:
@@ -158,13 +192,28 @@ async def sample(path, previous=None):
     local=await asyncio.to_thread(local_metrics)
     obs={key:(LABELS[key],cpu if key=="cpu" else local["percent"][key]) for key in LIMITS}
     keys=None
+    unavailable_parents = set()
     try:
-        result=await probe_panels(path)
+        result=await probe_panels(path, discover_nodes=True)
+        now = time.time()
         observed=set()
+        metric_labels={"cpu":"CPU","memory":"Память","disk":"Диск"}
         for panel in result["panels"]:
-            key="panel:"+str(panel["id"])
-            observed.add(key)
-            obs[key]=("API 3x-ui · "+panel["name"],panel["state"])
+            server_id=str(panel["id"])
+            api_key="panel:"+server_id
+            observed.add(api_key)
+            obs[api_key]=("API 3x-ui · "+panel["name"],panel["state"])
+            metrics=panel.get("metrics",{})
+            for metric in ("cpu","memory","disk"):
+                metric_key="node:"+server_id+":"+metric
+                observed.add(metric_key)
+                obs[metric_key]=(metric_labels[metric]+" · "+panel["name"],metrics.get(metric))
+            if panel["linked_nodes"] is None:
+                unavailable_parents.add(server_id)
+            else:
+                linked = linked_observations(panel, now)
+                obs.update(linked)
+                observed.update(linked)
         if not result["truncated"]:
             keys=observed
     except Exception as exc:
@@ -172,9 +221,14 @@ async def sample(path, previous=None):
     # A failed global probe must break consecutive evidence, not indicate recovery.
     with closing(read_db(path)) as db:
         exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='system_monitor_state'").fetchone()
-        if exists and keys is None:
-            for row in db.execute("SELECT key,label FROM system_monitor_state WHERE key LIKE 'panel:%'"):
-                obs.setdefault(row["key"],(row["label"],"Не проверен"))
+        if exists and (keys is None or unavailable_parents):
+            for row in db.execute("SELECT key,label FROM system_monitor_state WHERE key LIKE 'panel:%' OR key LIKE 'node:%'"):
+                key = row["key"]
+                parts = key.split(":")
+                if keys is None or (len(parts) >= 4 and parts[2] == "linked" and parts[1] in unavailable_parents):
+                    obs.setdefault(key, (row["label"], "Не проверен" if key.startswith("panel:") else None))
+                    if keys is not None:
+                        keys.add(key)
     return current,obs,keys
 
 
@@ -184,7 +238,7 @@ async def monitor_worker(path):
         started=time.monotonic()
         try:
             previous,obs,keys=await sample(path,previous)
-            await asyncio.to_thread(record_cycle,path,obs,now=time.time(),checked_panel_ids=keys)
+            await asyncio.to_thread(record_cycle,path,obs,now=time.time(),checked_keys=keys)
         except Exception as exc:
             previous=None
             LOG.error("Monitor sample failed: %s",type(exc).__name__)
