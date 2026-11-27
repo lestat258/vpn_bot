@@ -444,7 +444,7 @@ async def deposit_process(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.message(Command("cancel"))
+@router.message(CustomDeposit.amount, Command("cancel"))
 async def cancel_deposit(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state == CustomDeposit.amount:
