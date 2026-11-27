@@ -2,6 +2,7 @@
 Все клавиатуры для бота
 """
 from runtime_config import DB_PATH
+from subscription_renewal import expiry_presentation
 import sqlite3
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from datetime import datetime
@@ -86,10 +87,10 @@ def get_keys_keyboard(telegram_id):
     buttons = []
     for sub in subs:
         sub_id, email, end_date, tariff_name = sub
-        days_left = (datetime.fromisoformat(end_date) - datetime.now()).days
-        status = "✅" if days_left > 0 else "❌"
+        current, date_label, _ = expiry_presentation(end_date)
+        status = "✅" if current else "❌"
         buttons.append([InlineKeyboardButton(
-            text=f"{status} {tariff_name} (до {end_date[:10]})",
+            text=f"{status} {tariff_name} ({'до' if current else 'истёк'} {date_label})",
             callback_data=f"key_{sub_id}"
         )])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_profile")])

@@ -1,4 +1,5 @@
 from runtime_config import DB_PATH
+from subscription_renewal import expiry_presentation
 from services.vpn_service import vpn_service
 """
 Обработчики профиля и ключей
@@ -186,14 +187,14 @@ async def show_my_keys(callback: types.CallbackQuery):
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ? AND is_active = 1 AND datetime(end_date) > datetime("now")', (callback.from_user.id,))
+    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ? AND is_active = 1', (callback.from_user.id,))
     count = c.fetchone()[0]
     conn.close()
 
     if count == 0:
         kb = get_back_keyboard("back_to_tariffs")
         await callback.message.answer(
-            "🔑 <b>У вас нет активных ключей</b>\n\n"
+            "🔑 <b>У вас нет доступных ключей</b>\n\n"
             "Вы можете приобрести ключ в разделе «📋 Купить ключ».",
             reply_markup=kb,
             parse_mode="HTML"
@@ -221,7 +222,7 @@ async def render_key_detail(callback: types.CallbackQuery, sub_id: int):
         return
 
     sub_id, email, end_date, tariff_name, xui_client_uid, traffic_used, tariff_id, start_date, user_id = sub
-    days_left = (datetime.fromisoformat(end_date) - datetime.now()).days
+    current, expiry_label, remaining = expiry_presentation(end_date)
     tariff = get_tariff_by_id(tariff_id)
     traffic_limit = tariff[4] if tariff else 0
     ip_limit = tariff[5] if tariff else 3
@@ -236,27 +237,35 @@ async def render_key_detail(callback: types.CallbackQuery, sub_id: int):
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('SELECT auto_renew FROM subscriptions WHERE id = ?', (sub_id,))
+    c.execute('SELECT auto_renew,is_active FROM subscriptions WHERE id = ? AND telegram_id=?', (sub_id,callback.from_user.id))
     auto_renew_row = c.fetchone()
     conn.close()
     auto_renew_enabled = auto_renew_row[0] == 1 if auto_renew_row else False
     auto_renew_text = "✅" if auto_renew_enabled else "❌"
     user_balance = get_user_balance(callback.from_user.id)
 
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+    available = bool(auto_renew_row and auto_renew_row[1] == 1)
+    current = current and available
+    buttons = [
         [types.InlineKeyboardButton(text="🔄 Продлить", callback_data=f"renew_from_key_{sub_id}")],
         [types.InlineKeyboardButton(text=f"🔄 Авто-продление {auto_renew_text}", callback_data=f"toggle_auto_renew_{sub_id}")],
-        [types.InlineKeyboardButton(text="🛟 Запросить отключение", callback_data=f"delete_key_{sub_id}")],
+    ] if available else []
+    if current:
+        buttons.append([types.InlineKeyboardButton(text="🛟 Запросить отключение", callback_data=f"delete_key_{sub_id}")])
+    buttons.extend([
         [types.InlineKeyboardButton(text="🔙 Назад к ключам", callback_data="my_keys")],
         [types.InlineKeyboardButton(text="🏠 На главную", callback_data="back_to_main")]
     ])
+    kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    status_label = ("Истекает" if current else "Истёк" if available else "Окончание")
+    remaining_label = ("Осталось: " + remaining if current else
+                       "Срок действия истёк" if available else "Доступ отключён")
 
     text = (
         f"🔑 <b>Ключ: {escape(tariff_name)}</b>\n\n"
-        f"📧 E-mail в панели: <code>{escape(email or '')}</code>\n"
-        f"📅 Создан: {start_date[:10] if start_date else 'Неизвестно'}\n"
-        f"📅 Истекает: {end_date[:10]}\n"
-        f"⏳ Осталось: {days_left} дн.\n\n"
+        f"📅 Создан: {datetime.fromisoformat(start_date).strftime('%d.%m.%Y') if start_date else 'Неизвестно'}\n"
+        f"📅 {status_label}: {expiry_label}\n"
+        f"⏳ {remaining_label}\n\n"
         f"📊 <b>Трафик:</b>\n"
         f"   • Использовано: {traffic_used_gb:.2f} ГБ\n"
         f"   • Лимит: {traffic_limit_str}\n"
@@ -292,7 +301,8 @@ async def renew_from_key(callback: types.CallbackQuery):
     sub_id = int(callback.data.replace("renew_from_key_", ""))
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('SELECT telegram_id FROM subscriptions WHERE id = ?', (sub_id,))
+    c.execute("""SELECT s.telegram_id FROM subscriptions s JOIN users u ON u.telegram_id=s.telegram_id
+        WHERE s.id=? AND s.is_active=1 AND s.managed_by_vpn4us=1 AND u.is_blocked=0""", (sub_id,))
     sub = c.fetchone()
     conn.close()
 
@@ -303,7 +313,7 @@ async def renew_from_key(callback: types.CallbackQuery):
     renew_temp[callback.from_user.id] = sub_id
     await callback.message.answer(
         "📋 <b>Выберите тариф для продления</b>\n\n"
-        "После оплаты дни будут добавлены к вашей подписке.",
+        "Действующий ключ продлевается от даты окончания, просроченный — от текущего времени с округлением в пользу пользователя.",
         reply_markup=get_tariffs_keyboard(),
         parse_mode="HTML"
     )
