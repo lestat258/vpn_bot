@@ -1,5 +1,5 @@
 from runtime_config import DB_PATH
-from screen_navigation import render_screen
+from screen_navigation import render_screen, render_command
 from subscription_renewal import expiry_presentation
 from html import escape
 from services.vpn_service import vpn_service
@@ -143,7 +143,7 @@ async def cmd_start(message: types.Message):
     [types.InlineKeyboardButton(text="Главное меню", callback_data="start_menu")]
 ])
 
-    await message.answer(welcome_text, reply_markup=start_kb, parse_mode="HTML", disable_web_page_preview=True)
+    await render_command(message,welcome_text, reply_markup=start_kb, parse_mode="HTML", disable_web_page_preview=True)
 
 @router.callback_query(F.data == "start_menu")
 async def start_menu(callback: types.CallbackQuery):
@@ -160,20 +160,21 @@ async def start_menu(callback: types.CallbackQuery):
 @router.callback_query(F.data == "paid_key_guide")
 async def paid_key_guide(callback: types.CallbackQuery):
     await callback.answer()
-    await install_vpn(callback.message)
+    text = get_setting('text_install_vpn') or "Выберите ваше устройство:"
+    await render_screen(callback.message,text,reply_markup=get_device_keyboard(),parse_mode="HTML",disable_web_page_preview=True)
 
 
 @router.message(Command("install"))
 @router.message(F.text == "📥 Установить VPN")
 async def install_vpn(message: types.Message):
     text = get_setting('text_install_vpn') or "Выберите ваше устройство:"
-    await message.answer(text, reply_markup=get_device_keyboard(), parse_mode="HTML", disable_web_page_preview=True)
+    await render_command(message,text, reply_markup=get_device_keyboard(), parse_mode="HTML", disable_web_page_preview=True)
 
 @router.message(Command("buy"))
 @router.message(F.text == "📋 Купить ключ")
 async def buy_key(message: types.Message):
     """Кнопка 'Купить ключ' — показывает тарифы"""
-    await message.answer("Выберите подходящий тариф:", reply_markup=get_tariffs_keyboard(), parse_mode="HTML")
+    await render_command(message,"Выберите подходящий тариф:", reply_markup=get_tariffs_keyboard(), parse_mode="HTML")
 
 @router.message(Command("help"))
 @router.message(Command("faq"))
@@ -196,7 +197,7 @@ async def faq(message: types.Message):
     )
 
     kb = get_back_keyboard("back_to_main")
-    await message.answer(faq_text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
+    await render_command(message,faq_text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
 
 @router.message(Command("referral"))
 @router.message(F.text == "🎁 Пригласить друга")
@@ -226,7 +227,7 @@ async def invite_friend(message: types.Message):
     )
 
     kb = get_back_keyboard("back_to_main")
-    await message.answer(invite_text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
+    await render_command(message,invite_text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
 
 @router.message(Command("admin"))
 @router.message(F.text == "🔧 Админ-панель")
@@ -242,7 +243,7 @@ async def admin_panel_button(message: types.Message):
 
 @router.message(F.text == "/menu")
 async def refresh_menu(message: types.Message):
-    await message.answer(
+    await render_command(message,
         "Главное меню:",
         reply_markup=get_main_keyboard(message.from_user.id)
     )

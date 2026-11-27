@@ -1,5 +1,5 @@
 from runtime_config import DB_PATH
-from screen_navigation import render_screen
+from screen_navigation import render_screen, render_command, render_photo_screen
 import asyncio
 import hashlib
 from balance_ledger import validate_deposit_amount, deposit_metadata, register_deposit, rubles
@@ -50,20 +50,21 @@ ADMIN_ID = int(get_setting('admin_id') or 812021055)
 
 @router.message(Command("profile"))
 @router.message(F.text == "👤 Профиль")
-async def profile(message: types.Message):
+async def profile(message: types.Message, *, callback=None):
+    owner = callback.from_user.id if callback is not None else message.from_user.id
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    c.execute('SELECT first_name, created_at, referrer_id, balance FROM users WHERE telegram_id = ?', (message.from_user.id,))
+    c.execute('SELECT first_name, created_at, referrer_id, balance FROM users WHERE telegram_id = ?', (owner,))
     user = c.fetchone()
 
-    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ? AND is_active = 1 AND datetime(end_date) > datetime("now")', (message.from_user.id,))
+    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ? AND is_active = 1 AND datetime(end_date) > datetime("now")', (owner,))
     active_subs_count = c.fetchone()[0]
 
-    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ?', (message.from_user.id,))
+    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ?', (owner,))
     total_subs_count = c.fetchone()[0]
 
-    c.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (message.from_user.id,))
+    c.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (owner,))
     ref_count = c.fetchone()[0]
 
     conn.close()
@@ -84,8 +85,8 @@ async def profile(message: types.Message):
     has_promocodes = c.fetchone()[0] > 0
     conn.close()
 
-    await message.answer(
-        profile_text,
+    renderer = render_screen if callback is not None else render_command
+    await renderer(message,profile_text,
         reply_markup=get_profile_keyboard(has_promocodes),
         parse_mode="HTML",
         disable_web_page_preview=True
@@ -93,12 +94,7 @@ async def profile(message: types.Message):
 
 @router.callback_query(F.data == "back_to_profile")
 async def back_to_profile(callback: types.CallbackQuery):
-    class FakeMessage:
-        from_user = callback.from_user
-        chat = callback.message.chat
-        async def answer(self, *args, **kwargs):
-            await render_screen(callback.message, *args, **kwargs)
-    await profile(FakeMessage())
+    await profile(callback.message,callback=callback)
     await callback.answer()
 
 # ============ БАЛАНС И АВТО-ПРОДЛЕНИЕ ============
@@ -282,7 +278,7 @@ async def render_key_detail(callback: types.CallbackQuery, sub_id: int):
         photo = types.BufferedInputFile(_subscription_qr(link), filename="subscription.png")
         if len(text.encode("utf-16-le")) // 2 <= 1024:
             media = types.InputMediaPhoto(media=photo, caption=text, parse_mode="HTML")
-            await message.edit_media(media=media, reply_markup=kb)
+            await render_photo_screen(message,media,reply_markup=kb)
             return
         await message.answer_photo(photo)
 
