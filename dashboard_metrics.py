@@ -247,17 +247,54 @@ async def probe_panel_metrics(client, row, key):
         return {"cpu": None, "memory": None, "disk": None}
 
 
-async def probe_panels(path):
+async def probe_linked_nodes(client, row, key):
+    """Read the central panel's own heartbeat data for its attached nodes."""
+    try:
+        parsed = urlsplit(row["url"])
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+                or parsed.password is not None or parsed.query or parsed.fragment):
+            return None
+        token = token_clear(row["api_token"], key)
+
+        async def fetch():
+            async with client.stream(
+                "GET", row["url"].rstrip("/") + "/panel/api/nodes/list",
+                headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
+            ) as response:
+                if response.status_code != 200:
+                    return None
+                body = bytearray()
+                async for part in response.aiter_bytes():
+                    body.extend(part)
+                    if len(body) > 8 * 1024 * 1024:
+                        return None
+                result = json.loads(body)
+            nodes = result.get("obj") if isinstance(result, dict) and result.get("success") is True else None
+            if not isinstance(nodes, list) or any(
+                not isinstance(node, dict) or type(node.get("id")) is not int for node in nodes
+            ):
+                return None
+            return nodes
+
+        return await asyncio.wait_for(fetch(), 6)
+    except Exception:
+        return None
+
+
+async def probe_panels(path, *, discover_nodes=False):
     import httpx
     rows, key = await asyncio.to_thread(server_targets, path)
     limit = asyncio.Semaphore(32)
     async with httpx.AsyncClient(timeout=5, verify=True, follow_redirects=False, trust_env=False) as client:
         async def one(row):
             async with limit:
-                state, metrics = await asyncio.gather(
-                    probe_panel(client, row, key),
-                    probe_panel_metrics(client, row, key),
-                )
-            return {"id": row["id"], "name": row["name"], "state": state, "metrics": metrics}
+                probes = [probe_panel(client, row, key), probe_panel_metrics(client, row, key)]
+                if discover_nodes:
+                    probes.append(probe_linked_nodes(client, row, key))
+                results = await asyncio.gather(*probes)
+            panel = {"id": row["id"], "name": row["name"], "state": results[0], "metrics": results[1]}
+            if discover_nodes:
+                panel["linked_nodes"] = results[2]
+            return panel
         statuses = await asyncio.gather(*(one(row) for row in rows))
     return {"panels": statuses, "truncated": False}
