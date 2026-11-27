@@ -477,7 +477,10 @@ async def admin_user_balance(callback: types.CallbackQuery):
         return
 
     telegram_id = int(callback.data.replace("user_balance_", ""))
+    await render_admin_balance(callback, telegram_id)
 
+
+async def render_admin_balance(callback, telegram_id, *, canceled=False):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT balance FROM users WHERE telegram_id = ?', (telegram_id,))
@@ -494,6 +497,7 @@ async def admin_user_balance(callback: types.CallbackQuery):
     kb = admin_balance_keyboard(telegram_id)
 
     await callback.message.edit_text(
+        ("❌ Операция отменена\n\n" if canceled else "") +
         f"💰 <b>Баланс пользователя</b>\n\n"
         f"Текущий баланс: <b>{balance:.2f} ₽</b>\n\n"
         f"Выберите действие:",
@@ -501,6 +505,32 @@ async def admin_user_balance(callback: types.CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer()
+
+def admin_balance_cancel_keyboard(telegram_id, mode):
+    return types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(text="🔙 Назад",
+            callback_data=f"admin_balance_cancel_{mode}_{telegram_id}")
+    ]])
+
+
+@router.callback_query(F.data.startswith("admin_balance_cancel_"))
+async def admin_balance_cancel(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    try:
+        mode, raw_id = callback.data.removeprefix("admin_balance_cancel_").split("_")
+        owner = int(raw_id)
+        expected = {"deposit": AdminDeposit.amount.state, "withdraw": AdminWithdraw.amount.state}[mode]
+        data = await state.get_data()
+        if owner <= 0 or await state.get_state() != expected or data.get("user_id") != owner:
+            raise ValueError("Stale input")
+    except (ValueError, KeyError, TypeError):
+        await callback.answer("Этот ввод уже завершён. Откройте баланс заново.", show_alert=True)
+        return
+    await state.clear()
+    await render_admin_balance(callback, owner, canceled=True)
+
 
 @router.callback_query(F.data.startswith("user_deposit_"))
 async def admin_deposit_start(callback: types.CallbackQuery, state: FSMContext):
@@ -515,6 +545,7 @@ async def admin_deposit_start(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "💰 <b>Пополнение баланса</b>\n\n"
         "Введите сумму пополнения (в рублях) или /cancel для отмены:",
+        reply_markup=admin_balance_cancel_keyboard(telegram_id, "deposit"),
         parse_mode="HTML"
     )
     await callback.answer()
@@ -584,6 +615,7 @@ async def admin_withdraw_start(callback: types.CallbackQuery, state: FSMContext)
     await callback.message.answer(
         "💸 <b>Списание баланса</b>\n\n"
         "Введите сумму списания (в рублях) или /cancel для отмены:",
+        reply_markup=admin_balance_cancel_keyboard(telegram_id, "withdraw"),
         parse_mode="HTML"
     )
     await callback.answer()
