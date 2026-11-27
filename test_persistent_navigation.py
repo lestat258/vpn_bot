@@ -256,13 +256,62 @@ class PersistentNavigationTests(unittest.IsolatedAsyncioTestCase):
             dict(types=SimpleNamespace(Message=object,InlineKeyboardMarkup=lambda **kw:kw,
                                        InlineKeyboardButton=lambda **kw:kw),
                  sqlite3=sqlite3,DB_PATH=path,logging=logging,
-                 get_setting=lambda k:None,get_main_keyboard=lambda uid:kb,render_command=render))
+                 get_setting=lambda k:None,get_main_keyboard=lambda uid:kb,render_home=render))
         user=self.message(command=True,text="/start")
         user.from_user.username="new"
         user.from_user.first_name="New"
         await env["cmd_start"](user)
         render.assert_awaited_once()
-        self.assertTrue(render.await_args.kwargs["refresh_keyboard"])
+        self.assertNotIn("reply_markup",render.await_args.kwargs)
+        self.assertIn("Добро пожаловать",render.await_args.args[1])
         self.assertIs(render.await_args.kwargs["keyboard"],kb)
         with sqlite3.connect(path) as db:
             self.assertEqual(db.execute("SELECT * FROM users").fetchall(),[(42,"new","New")])
+
+
+    async def test_home_is_one_message_and_retires_previous_ui(self):
+        nav._save_anchor(self.key,20)
+        nav._save(self.key,21,"photo")
+        user=self.message(command=True,text="/start",result_id=30)
+        kb=self.keyboard()
+        await nav.render_home(user,"Welcome",keyboard=kb,parse_mode="HTML")
+        user.answer.assert_awaited_once_with("Welcome",reply_markup=kb,parse_mode="HTML")
+        self.assertEqual(nav._read_anchor(self.key),30)
+        self.assertIsNone(nav._read(self.key))
+        self.assertEqual([c.kwargs["message_id"] for c in self.bot.delete_message.await_args_list],[20,21])
+        self.bot.edit_message_text.assert_not_awaited()
+        user.delete.assert_awaited_once()
+
+    async def test_first_section_after_home_preserves_welcome(self):
+        start=self.message(command=True,text="/start",result_id=30)
+        await nav.render_home(start,"Welcome",keyboard=self.keyboard())
+        profile=self.message(command=True,text="👤 Профиль",result_id=31)
+        await nav.render_command(profile,"Profile",keyboard=self.keyboard())
+        profile.answer.assert_awaited_once_with("Profile")
+        self.assertEqual(nav._read_anchor(self.key),30)
+        self.assertEqual(nav._read(self.key),(31,"text"))
+        self.bot.delete_message.assert_not_awaited()
+        await nav.render_command(profile,"Buy",keyboard=self.keyboard())
+        self.bot.edit_message_text.assert_awaited_once_with(text="Buy",chat_id=42,message_id=31)
+
+    async def test_failed_home_send_preserves_previous_ui(self):
+        nav._save_anchor(self.key,20)
+        nav._save(self.key,21,"text")
+        user=self.message(command=True,text="/start")
+        user.answer.side_effect=TelegramNetworkError(method=None,message="timeout")
+        with self.assertRaises(TelegramNetworkError):
+            await nav.render_home(user,"Welcome",keyboard=self.keyboard())
+        self.assertEqual(nav._read_anchor(self.key),20)
+        self.assertEqual(nav._read(self.key),(21,"text"))
+        self.bot.delete_message.assert_not_awaited()
+        user.delete.assert_not_awaited()
+
+    async def test_real_menu_handler_uses_one_home_message(self):
+        from test_renewal_checkout import load_functions
+        render=AsyncMock()
+        kb=self.keyboard()
+        env=load_functions("handlers/users.py",{"refresh_menu"},
+            dict(types=SimpleNamespace(Message=object),get_main_keyboard=lambda uid:kb,render_home=render))
+        user=self.message(command=True,text="/menu")
+        await env["refresh_menu"](user)
+        render.assert_awaited_once_with(user,"Главное меню VPN4US",keyboard=kb)
