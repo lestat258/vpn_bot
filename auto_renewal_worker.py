@@ -21,6 +21,7 @@ async def renewal_worker(path, *, interval=INTERVAL_SECONDS, manager=None):
     if manager is None:
         from auto_renew import AutoRenewManager
         manager=AutoRenewManager(db_path=path)
+    logger.info("Auto renewal scheduler started: interval=%s, activation=%s",interval,activated())
     try:
         while True:
             try:
