@@ -66,6 +66,22 @@ def pending(db, subscription_id):
         (subscription_id,)).fetchone())
 
 
+def open_payment(db, owner):
+    # The historic payment table has no explicit subscription target. Prefer
+    # skipping an otherwise eligible key to competing with any open VPN order.
+    if db.execute("""SELECT 1 FROM payments p
+        LEFT JOIN payment_processing j USING(payment_id)
+        WHERE p.telegram_id=? AND p.tariff_id>0 AND
+        (p.status='pending' OR j.vpn_state IN ('processing','needs_review')) LIMIT 1""",
+        (owner,)).fetchone():
+        return True
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='promo_reservations'").fetchone():
+        return bool(db.execute("""SELECT 1 FROM promo_reservations
+            WHERE telegram_id=? AND action='renew' AND state IN ('reserved','attached') LIMIT 1""",
+            (owner,)).fetchone())
+    return False
+
+
 def candidates(path, now):
     if not activated():
         return []
@@ -81,14 +97,14 @@ def candidates(path, now):
         result = []
         for sid,owner,tid,end,price,days in rows:
             try:
-                if type(days) is int and 0<days<=3660 and due(end,now) and not pending(db,sid):
+                if type(days) is int and 0<days<=3660 and due(end,now) and not pending(db,sid) and not open_payment(db,owner):
                     result.append(Candidate(sid,owner,tid,end,kopecks(price,positive=True,maximum=MAX_KOPECKS),days))
             except (ValueError,TypeError,OverflowError):
                 LOG.warning("Invalid auto renewal candidate %s",sid)
         return result
 
 
-def reserve(path, candidate, *, now, target_ms, server_id, uid, subid):
+def reserve(path, candidate, *, now, target_ms, server_id, uid, subid, email, url, token, inbounds):
     """Recheck all financial and eligibility facts in one write transaction.
 
     Called only with the shared subscription renewal lock held, AFTER panel
@@ -97,17 +113,22 @@ def reserve(path, candidate, *, now, target_ms, server_id, uid, subid):
     c = candidate
     with transaction(path) as db:
         ensure_schema(db)
-        if not enabled(db) or not due(c.end_date,now) or pending(db,c.subscription_id):
+        if (not enabled(db) or not due(c.end_date,now) or pending(db,c.subscription_id)
+                or open_payment(db,c.owner) or type(c.days) is not int or not 0<c.days<=3660):
             raise ValueError("Auto renewal disabled, not due or awaiting review")
         row = db.execute("""SELECT s.telegram_id,s.tariff_id,s.end_date,t.price_rub,t.duration_days,
-                 s.server_id,s.xui_client_uid,s.xui_subid
+                 s.server_id,s.xui_client_uid,s.xui_subid,s.xui_email,v.url,v.api_token
           FROM subscriptions s JOIN users u ON u.telegram_id=s.telegram_id
           JOIN tariffs t ON t.id=s.tariff_id JOIN servers v ON v.id=s.server_id
           WHERE s.id=? AND s.is_active=1 AND s.managed_by_vpn4us=1 AND s.auto_renew=1
           AND u.is_blocked=0 AND v.is_active=1 AND t.is_active=1""",(c.subscription_id,)).fetchone()
         if not row or (row[0],row[1],row[2],kopecks(row[3],positive=True,maximum=MAX_KOPECKS),
-                       row[4],row[5],row[6],row[7]) != (c.owner,c.tariff_id,c.end_date,c.price,c.days,server_id,uid,subid):
+                       *tuple(row)[4:]) != (c.owner,c.tariff_id,c.end_date,c.price,c.days,server_id,uid,subid,email,url,token):
             raise ValueError("Auto renewal facts changed")
+        actual = tuple(r[0] for r in db.execute("""SELECT inbound_id FROM subscription_inbound_memberships
+            WHERE subscription_id=? AND server_id=? ORDER BY inbound_id""",(c.subscription_id,server_id)))
+        if actual != inbounds:
+            raise ValueError("Automatic renewal membership changed")
         operation_id = "auto-renew:" + sha256(f"{c.subscription_id}:{c.end_date}".encode()).hexdigest()
         db.execute("""INSERT INTO auto_renewal_operations(operation_id,subscription_id,telegram_id,
             tariff_id,original_end,target_ms,amount_kopecks,duration_days,server_id,client_uid,client_subid,state)
@@ -119,8 +140,12 @@ def reserve(path, candidate, *, now, target_ms, server_id, uid, subid):
         return operation_id
 
 
-def complete(db, operation_id):
+def complete(db, operation_id, subscription_id, server_id, inbounds):
     # Same transaction as the local expiry update: neither can commit alone.
+    actual = tuple(r[0] for r in db.execute("""SELECT inbound_id FROM subscription_inbound_memberships
+        WHERE subscription_id=? AND server_id=? ORDER BY inbound_id""",(subscription_id,server_id)))
+    if actual != inbounds:
+        raise ValueError("Automatic renewal membership changed after panel update")
     row = db.execute("""UPDATE auto_renewal_operations SET state='done',updated_at=CURRENT_TIMESTAMP
         WHERE operation_id=? AND state='reserved'""",(operation_id,))
     if row.rowcount != 1:
