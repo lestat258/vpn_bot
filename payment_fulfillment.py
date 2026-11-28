@@ -193,7 +193,8 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
 
         # Commit completion BEFORE any Telegram notification. A notification
         # failure must never result in a second VPN subscription/renewal.
-        await asyncio.to_thread(ledger.complete, payment_id, sub_id)
+        await asyncio.to_thread(ledger.complete, payment_id, sub_id,
+                                duration_days=duration, action='renew' if renewed else 'new_key')
 
     except Exception as exc:
         LOG.error('VPN outcome requires reconciliation: %s', type(exc).__name__)
