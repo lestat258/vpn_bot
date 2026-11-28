@@ -2,7 +2,7 @@
 Административные хендлеры бота
 """
 from runtime_config import BACKUP_DIR, DB_PATH
-from balance_ledger import admin_adjust, rubles, kopecks
+from balance_ledger import admin_adjust, rubles, kopecks, MAX_KOPECKS
 from admin_form_navigation import begin as form_begin, step as form_step, retry as form_retry, finish as form_finish
 from admin_form_navigation import parent_for, back_keyboard, CONFIRM_TOKEN, callback_is_current, private_admin, FORM_SCREEN
 from screen_navigation import render_screen
@@ -428,7 +428,7 @@ async def render_admin_balance(callback, telegram_id, *, canceled=False):
 
     kb = admin_balance_keyboard(telegram_id)
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         ("❌ Операция отменена\n\n" if canceled else "") +
         f"💰 <b>Баланс пользователя</b>\n\n"
         f"Текущий баланс: <b>{balance:.2f} ₽</b>\n\n"
@@ -438,124 +438,126 @@ async def render_admin_balance(callback, telegram_id, *, canceled=False):
     )
     await callback.answer()
 
-def admin_balance_cancel_keyboard(telegram_id, mode):
-    return types.InlineKeyboardMarkup(inline_keyboard=[[
-        types.InlineKeyboardButton(text="🔙 Назад",
-            callback_data=f"admin_balance_cancel_{mode}_{telegram_id}")
-    ]])
+def admin_balance_snapshot(owner):
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        row=db.execute("SELECT balance FROM users WHERE telegram_id=?",(owner,)).fetchone()
+    return kopecks(row[0] or 0) if row else None
 
 
-@router.callback_query(F.data.startswith("admin_balance_cancel_"))
-async def admin_balance_cancel(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Доступ запрещён")
+async def admin_balance_start(callback,state,*,withdraw):
+    if not private_admin(callback,ADMIN_ID) or not callback_is_current(callback):
+        await callback.answer("Откройте актуальный баланс пользователя.",show_alert=True)
         return
+    prefix="user_withdraw_" if withdraw else "user_deposit_"
     try:
-        mode, raw_id = callback.data.removeprefix("admin_balance_cancel_").split("_")
-        owner = int(raw_id)
-        expected = {"deposit": AdminDeposit.amount.state, "withdraw": AdminWithdraw.amount.state}[mode]
-        data = await state.get_data()
-        if owner <= 0 or await state.get_state() != expected or data.get("user_id") != owner:
-            raise ValueError("Stale input")
-    except (ValueError, KeyError, TypeError):
-        await callback.answer("Этот ввод уже завершён. Откройте баланс заново.", show_alert=True)
+        owner=int(callback.data.removeprefix(prefix))
+        if owner<=0:
+            raise ValueError
+        balance=admin_balance_snapshot(owner)
+        if balance is None:
+            raise ValueError
+    except (ValueError,TypeError,OverflowError):
+        await callback.answer("Пользователь или баланс недоступен.",show_alert=True)
         return
-    await state.clear()
-    await render_admin_balance(callback, owner, canceled=True)
+    extend_temp.pop(callback.from_user.id,None)
+    label="Списание" if withdraw else "Пополнение"
+    group=AdminWithdraw if withdraw else AdminDeposit
+    await form_begin(callback,state,group.amount,
+        f"{label} баланса\n\nПользователь: {owner}\nТекущий баланс: {rubles(balance):.2f} ₽\n\n"
+        "Введите сумму в рублях:",fields={"user_id":owner})
 
 
 @router.callback_query(F.data.startswith("user_deposit_"))
-async def admin_deposit_start(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Доступ запрещён")
-        return
-
-    telegram_id = int(callback.data.replace("user_deposit_", ""))
-    await state.update_data(user_id=telegram_id)
-    await state.set_state(AdminDeposit.amount)
-
-    await callback.message.edit_text(
-        "💰 <b>Пополнение баланса</b>\n\n"
-        "Введите сумму пополнения (в рублях) или /cancel для отмены:",
-        reply_markup=admin_balance_cancel_keyboard(telegram_id, "deposit"),
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-async def admin_balance_operation(message, state, *, withdraw):
-    if message.from_user.id != ADMIN_ID:
-        await state.clear()
-        await message.answer("⛔ Доступ запрещён")
-        return
-
-    owner = None
-    try:
-        data = await state.get_data()
-        owner = int(data["user_id"])
-        if owner <= 0:
-            owner = None
-            raise ValueError("Invalid user")
-    except (ValueError, KeyError, TypeError):
-        await state.clear()
-        await message.answer("Пользователь не выбран. Откройте его карточку заново.")
-        return
-
-    raw = (message.text or "").strip()
-    review = False
-    if raw == "/cancel":
-        text = "❌ Операция отменена"
-    else:
-        try:
-            amount = raw.replace(",", ".")
-            n = kopecks(amount, positive=True, maximum=10000000)
-            balance, changed = await asyncio.to_thread(
-                admin_adjust, DB_PATH,
-                f"admin:{message.chat.id}:{message.message_id}",
-                owner, message.from_user.id, amount, withdraw=withdraw)
-            label = "Списание" if withdraw else "Пополнение"
-            text = (f"✅ {label}: {rubles(n):.2f} ₽\n"
-                    f"Баланс после операции: {rubles(balance):.2f} ₽")
-            if not changed:
-                text = "Операция уже учтена.\n" + text
-        except (ValueError, KeyError, TypeError):
-            text = "Операция недоступна: проверьте сумму, остаток и наличие блокировки средств."
-        except Exception:
-            logging.error("Administrative balance operation requires review")
-            text = "Результат операции не подтверждён. Проверьте журнал перед повтором."
-            review = True
-    # Return to the menu, never leave an input state active under navigation.
-    await state.clear()
-    await message.answer(text, reply_markup=admin_balance_keyboard(owner, review=review))
-
-
-@router.message(AdminDeposit.amount)
-async def admin_deposit_process(message: types.Message, state: FSMContext):
-    await admin_balance_operation(message, state, withdraw=False)
-
+async def admin_deposit_start(callback: types.CallbackQuery,state: FSMContext):
+    await admin_balance_start(callback,state,withdraw=False)
 
 
 @router.callback_query(F.data.startswith("user_withdraw_"))
-async def admin_withdraw_start(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Доступ запрещён")
+async def admin_withdraw_start(callback: types.CallbackQuery,state: FSMContext):
+    await admin_balance_start(callback,state,withdraw=True)
+
+
+async def admin_balance_operation(message,state,*,withdraw):
+    if not private_admin(message,ADMIN_ID):
+        await state.clear()
+        await message.answer("⛔ Доступ запрещён")
         return
+    data=await state.get_data()
+    owner=data.get("user_id")
+    if type(owner) is not int or owner<=0:
+        await form_finish(message,state,"Пользователь не выбран. Откройте карточку заново.")
+        return
+    try:
+        n=kopecks((message.text or "").strip().replace(",","."),positive=True,maximum=MAX_KOPECKS)
+    except (ValueError,TypeError,OverflowError):
+        await form_retry(message,state,"❌ Введите сумму от 0,01 до 100000 ₽, не более двух знаков после запятой.")
+        return
+    balance=admin_balance_snapshot(owner)
+    if balance is None:
+        await form_finish(message,state,"Пользователь не найден.")
+        return
+    if withdraw and n>balance:
+        await form_retry(message,state,f"❌ Недостаточно средств. Текущий баланс: {rubles(balance):.2f} ₽.")
+        return
+    label="Списание" if withdraw else "Пополнение"
+    sign="−" if withdraw else "+"
+    group=AdminWithdraw if withdraw else AdminDeposit
+    await form_step(message,state,group.confirm,
+        f"Подтвердите операцию: {label.lower()}\n\nПользователь: {owner}\n"
+        f"Сумма: {sign}{rubles(n):.2f} ₽\nБаланс на момент проверки: {rubles(balance):.2f} ₽\n\n"
+        "Это ручная корректировка внутреннего баланса. Банковский платёж или возврат не создаётся.",
+        amount=f"{rubles(n):.2f}")
 
-    telegram_id = int(callback.data.replace("user_withdraw_", ""))
-    await state.update_data(user_id=telegram_id)
-    await state.set_state(AdminWithdraw.amount)
 
-    await callback.message.edit_text(
-        "💸 <b>Списание баланса</b>\n\n"
-        "Введите сумму списания (в рублях) или /cancel для отмены:",
-        reply_markup=admin_balance_cancel_keyboard(telegram_id, "withdraw"),
-        parse_mode="HTML"
-    )
-    await callback.answer()
+@router.message(AdminDeposit.amount)
+async def admin_deposit_process(message: types.Message,state: FSMContext):
+    await admin_balance_operation(message,state,withdraw=False)
+
 
 @router.message(AdminWithdraw.amount)
-async def admin_withdraw_process(message: types.Message, state: FSMContext):
-    await admin_balance_operation(message, state, withdraw=True)
+async def admin_withdraw_process(message: types.Message,state: FSMContext):
+    await admin_balance_operation(message,state,withdraw=True)
 
+
+@router.callback_query(F.data.startswith("admin_balance_apply_"))
+async def admin_balance_apply(callback: types.CallbackQuery,state: FSMContext):
+    current=await state.get_state()
+    data=await state.get_data()
+    if (current not in (AdminDeposit.confirm.state,AdminWithdraw.confirm.state)
+            or not private_admin(callback,ADMIN_ID) or not callback_is_current(callback)
+            or data.get(FORM_SCREEN)!=getattr(callback.message,"message_id",None)
+            or callback.data!=data.get(CONFIRM_TOKEN)):
+        await callback.answer("Подтверждение устарело.",show_alert=True)
+        return
+    owner=data.get("user_id")
+    if type(owner) is not int or owner<=0:
+        await state.clear()
+        await callback.answer("Пользователь не выбран.",show_alert=True)
+        return
+    withdraw=current==AdminWithdraw.confirm.state
+    # Close the form before attempting any financial write. The same token
+    # is also the durable ledger identity, independent of callback/message ID.
+    token=callback.data
+    await state.clear()
+    await callback.answer()
+    review=False
+    try:
+        amount=data["amount"]
+        n=kopecks(amount,positive=True,maximum=MAX_KOPECKS)
+        balance,changed=await asyncio.to_thread(admin_adjust,DB_PATH,
+            "admin-confirm:"+token,owner,callback.from_user.id,amount,withdraw=withdraw)
+        label="Списание" if withdraw else "Пополнение"
+        text=(f"✅ {label}: {rubles(n):.2f} ₽\nПользователь: {owner}\n"
+              f"Баланс после операции: {rubles(balance):.2f} ₽")
+        if not changed:
+            text="Операция уже учтена.\n"+text
+    except (ValueError,KeyError,TypeError):
+        text="Операция недоступна: проверьте сумму, остаток и наличие блокировки средств."
+    except Exception:
+        logging.error("Administrative balance operation requires review")
+        text="Результат операции не подтверждён. Проверьте журнал перед повтором."
+        review=True
+    await render_screen(callback.message,text,reply_markup=admin_balance_keyboard(owner,review=review))
 
 
 @router.callback_query(F.data.startswith("user_block_"))

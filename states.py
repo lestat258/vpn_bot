@@ -46,10 +46,12 @@ class EditTariff(StatesGroup):
 class AdminDeposit(StatesGroup):
     amount = State()
     user_id = State()
+    confirm = State()
 
 class AdminWithdraw(StatesGroup):
     amount = State()
     user_id = State()
+    confirm = State()
 
 class AdminAddKeyForUser(StatesGroup):
     user_id = State()
