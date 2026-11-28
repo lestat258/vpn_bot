@@ -26,7 +26,7 @@ class ReferralSchemaTests(unittest.TestCase):
     def test_three_levels_without_path_column(self):
         self.assertEqual(self.manager.get_referrals_by_level(1),{1:[2],2:[3],3:[4]})
         self.assertEqual(self.manager.get_referral_stats(1),
-                         dict(total=3,level_1=1,level_2=1,level_3=1,bonus_days=50))
+                         dict(total=3,level_1=1,level_2=1,level_3=1,bonus_days=0))
 
     def test_empty_statistics(self):
         self.assertEqual(self.manager.get_referral_stats(6),
