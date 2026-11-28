@@ -33,7 +33,10 @@ def levels(db):
     raw=setting(db,"referral_levels")
     if raw is None:
         return DEFAULT_LEVELS
-    rows=json.loads(raw)
+    return validate_levels(json.loads(raw))
+
+
+def validate_levels(rows):
     if not isinstance(rows,list) or not 1<=len(rows)<=10:
         raise ValueError("Invalid referral levels")
     result=[]
