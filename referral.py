@@ -103,11 +103,9 @@ class ReferralManager:
         }
         stats['total'] = stats['level_1'] + stats['level_2'] + stats['level_3']
         
-        # Подсчёт бонусных дней
-        for level in [1, 2, 3]:
-            count = len(referrals.get(level, []))
-            if level in self.bonus_levels:
-                stats['bonus_days'] += count * self.bonus_levels[level]
+        # Registration counts are not earned bonus days.
+        from referral_accrual import confirmed_days
+        stats['bonus_days'] = confirmed_days(self.db_path, user_id)
         
         return stats
     
