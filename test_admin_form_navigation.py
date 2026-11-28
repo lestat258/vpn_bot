@@ -1,5 +1,7 @@
 """Admin form navigation: real middleware, isolated state and SQLite."""
 import math
+from datetime import datetime
+from html import escape
 from urllib.parse import urlsplit
 from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
 import logging
@@ -10,7 +12,7 @@ from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
-from states import AddTariff, EditTariff, EditText, AddServer, SendMessageToUser
+from states import AddTariff, EditTariff, EditText, AddServer, SendMessageToUser, AdminAddKey, AdminExtendKey
 import admin_form_navigation as form
 import screen_navigation as nav
 from test_renewal_checkout import load_functions
@@ -60,14 +62,22 @@ class AdminFormTests(unittest.IsolatedAsyncioTestCase):
                   duration_days INTEGER,traffic_gb REAL,ip_limit INTEGER,is_active INTEGER DEFAULT 1);
                 INSERT INTO tariffs VALUES(1,'Existing',150,30,0,3,1);
                 CREATE TABLE servers(id INTEGER PRIMARY KEY,name TEXT,url TEXT,api_token TEXT,is_active INTEGER,status TEXT);
+                CREATE TABLE users(telegram_id INTEGER PRIMARY KEY,is_blocked INTEGER);
+                CREATE TABLE subscriptions(id INTEGER PRIMARY KEY,telegram_id INTEGER,tariff_id INTEGER,
+                    end_date TEXT,server_id INTEGER,xui_client_uid TEXT,xui_subid TEXT,is_active INTEGER,managed_by_vpn4us INTEGER);
+                INSERT INTO users VALUES(43,0),(44,1);
+                INSERT INTO subscriptions VALUES(9,43,1,'2099-01-01',1,'uid','subid',1,1);
             """)
         self.bot=SimpleNamespace(id=100,send_message=AsyncMock())
+        self.vpn=SimpleNamespace(
+            create_subscription=AsyncMock(return_value={"success":True,"end_date":datetime(2099,1,5),"link":"https://example.invalid/sub"}),
+            extend_subscription=AsyncMock(return_value={"success":True,"new_end_date":datetime(2099,1,5)}))
         self.admin=SimpleNamespace(id=42)
         self.chat=SimpleNamespace(type="private",id=42)
         self.screen=SimpleNamespace(bot=self.bot,chat=self.chat,from_user=SimpleNamespace(id=100),
             message_id=7,reply_markup=None)
         self.message=SimpleNamespace(bot=self.bot,chat=self.chat,from_user=self.admin,text="hello",answer=AsyncMock(),delete=AsyncMock())
-        self.callback=SimpleNamespace(message=self.screen,from_user=self.admin,data="admin_add_tariff",answer=AsyncMock())
+        self.callback=SimpleNamespace(bot=self.bot,message=self.screen,from_user=self.admin,data="admin_add_tariff",answer=AsyncMock())
         self.state=State()
         self.next=AsyncMock()
         self.settings=Mock()
@@ -82,7 +92,9 @@ class AdminFormTests(unittest.IsolatedAsyncioTestCase):
             "tariff_number","admin_edit_tariff_select","admin_edit_tariff_start","edit_tariff_field",
             "edit_tariff_name","edit_tariff_price","edit_tariff_days","edit_tariff_traffic","edit_tariff_ip_limit",
             "edit_text_start","edit_text_save","admin_add_server_start","server_name","panel_url","server_url","server_token",
-            "send_message_from_user_card","send_message_process"},
+            "send_message_from_user_card","send_message_process","admin_issue_tariff","admin_issue_owner",
+            "admin_add_key_for_user","admin_add_key_tariff","admin_add_key_days",
+            "admin_renew_target","admin_extend_key_start","admin_extend_key_process","admin_apply_key_operation"},
             dict(types=SimpleNamespace(CallbackQuery=object,Message=object,
                  InlineKeyboardMarkup=form.types.InlineKeyboardMarkup,InlineKeyboardButton=form.types.InlineKeyboardButton),
                  FSMContext=object,ADMIN_ID=42,DB_PATH=self.db,AddTariff=AddTariff,EditTariff=EditTariff,
@@ -91,7 +103,11 @@ class AdminFormTests(unittest.IsolatedAsyncioTestCase):
                  get_setting=lambda _: "<b>Old</b>",set_setting=self.settings,
                  ADMIN_TEXT_FIELDS={"text_faq":"FAQ"},extend_temp=self.legacy,
                  AddServer=AddServer,SendMessageToUser=SendMessageToUser,urlsplit=urlsplit,
-                 TelegramAPIError=TelegramAPIError,encrypt=self.encrypt,get_user_by_telegram_id=self.user))
+                 TelegramAPIError=TelegramAPIError,encrypt=self.encrypt,get_user_by_telegram_id=self.user,
+                 AdminAddKey=AdminAddKey,AdminExtendKey=AdminExtendKey,vpn_service=self.vpn,escape=escape,
+                 parent_for=form.parent_for,back_keyboard=form.back_keyboard,CONFIRM_TOKEN=form.CONFIRM_TOKEN,
+                 callback_is_current=form.callback_is_current,private_admin=form.private_admin,FORM_SCREEN=form.FORM_SCREEN,
+                 render_screen=form.render_screen))
 
     def set_buttons(self,*values):
         self.screen.reply_markup=SimpleNamespace(inline_keyboard=[
@@ -501,3 +517,151 @@ class AdminFormTests(unittest.IsolatedAsyncioTestCase):
         for name in ("edit_tariff_days","edit_tariff_traffic","edit_tariff_ip_limit"):
             await self.enter("/skip",name)
         self.assertEqual(self.rows()[0][2],90.0)
+
+
+    async def key_callback(self,value,name,*,start=False):
+        self.callback.data=value
+        if start:
+            self.set_buttons(value)
+        await self.call(self.callback,lambda event,data:self.env[name](event,self.state))
+
+    async def start_issue(self,owner=43):
+        await self.key_callback(f"user_add_key_{owner}","admin_add_key_for_user",start=True)
+
+    async def choose_issue(self):
+        await self.start_issue()
+        await self.key_callback("admin_tariff_select_1|43","admin_add_key_tariff")
+
+    async def issue_confirmation(self):
+        await self.choose_issue()
+        await self.enter("/skip","admin_add_key_days")
+
+    async def apply_key(self):
+        await self.key_callback(self.state.data[form.CONFIRM_TOKEN],"admin_apply_key_operation")
+
+    async def start_renew(self):
+        with closing(sqlite3.connect(self.db)) as db,db:
+            db.execute("INSERT OR IGNORE INTO servers VALUES(1,'Test','https://example.invalid','fake',1,'online')")
+        await self.key_callback("admin_extend_key_9","admin_extend_key_start",start=True)
+
+    async def renew_confirmation(self):
+        await self.start_renew()
+        await self.enter("4","admin_extend_key_process")
+
+    async def test_issue_select_and_days_no_remote_call(self):
+        await self.choose_issue()
+        self.assertEqual(self.state.current,AdminAddKey.days.state)
+        await self.enter("abc","admin_add_key_days")
+        self.assertEqual(self.state.current,AdminAddKey.days.state)
+        self.vpn.create_subscription.assert_not_awaited()
+
+    async def test_issue_skip_requires_confirmation_and_calls_once(self):
+        await self.issue_confirmation()
+        self.assertEqual(self.state.current,AdminAddKey.confirm.state)
+        self.vpn.create_subscription.assert_not_awaited()
+        token=self.state.data[form.CONFIRM_TOKEN]
+        await self.apply_key()
+        self.vpn.create_subscription.assert_awaited_once_with(telegram_id=43,tariff_id=1,days=30,
+            traffic_gb=0.0,ip_limit=3,allow_additional_key=True)
+        self.bot.send_message.assert_awaited_once()
+        self.assertEqual(self.bot.send_message.await_args.kwargs["chat_id"],43)
+        self.assertIsNone(self.state.current)
+        await self.key_callback(token,"admin_apply_key_operation")
+        self.vpn.create_subscription.assert_awaited_once()
+
+    async def test_issue_back_to_days_then_tariff_selection(self):
+        await self.issue_confirmation()
+        await self.press_previous()
+        self.assertEqual(self.state.current,AdminAddKey.days.state)
+        await self.press_previous()
+        self.assertEqual(self.state.current,AdminAddKey.tariff_id.state)
+        self.assertEqual(self.state.data["user_id"],43)
+        self.assertNotIn("tariff_id",self.state.data)
+        self.vpn.create_subscription.assert_not_awaited()
+
+    async def test_issue_wrong_owner_selection_rejected(self):
+        await self.start_issue()
+        self.set_buttons("admin_tariff_select_1|44")
+        await self.key_callback("admin_tariff_select_1|44","admin_add_key_tariff")
+        self.assertEqual(self.state.current,AdminAddKey.tariff_id.state)
+        self.vpn.create_subscription.assert_not_awaited()
+
+    async def test_issue_blocked_owner_rejected(self):
+        await self.start_issue(44)
+        self.assertIsNone(self.state.current)
+        self.vpn.create_subscription.assert_not_awaited()
+
+    async def test_issue_cancel_at_confirmation(self):
+        await self.issue_confirmation()
+        self.callback.data="user_back_to_43"
+        await self.call(self.callback)
+        self.assertIsNone(self.state.current)
+        self.vpn.create_subscription.assert_not_awaited()
+
+    async def test_issue_changed_tariff_rejected_before_confirmation_apply(self):
+        await self.issue_confirmation()
+        with closing(sqlite3.connect(self.db)) as db,db:
+            db.execute("UPDATE tariffs SET ip_limit=9 WHERE id=1")
+        await self.apply_key()
+        self.vpn.create_subscription.assert_not_awaited()
+        self.assertIsNone(self.state.current)
+
+    async def test_issue_uncertain_requires_review_no_retry(self):
+        await self.issue_confirmation()
+        self.vpn.create_subscription.side_effect=TimeoutError("unknown")
+        token=self.state.data[form.CONFIRM_TOKEN]
+        await self.apply_key()
+        self.assertIn("не подтверждена",form.render_screen.await_args.args[1])
+        await self.key_callback(token,"admin_apply_key_operation")
+        self.vpn.create_subscription.assert_awaited_once()
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_renew_invalid_input_and_zero_cancel(self):
+        await self.start_renew()
+        await self.enter("-2","admin_extend_key_process")
+        self.assertEqual(self.state.current,AdminExtendKey.days.state)
+        await self.enter("0","admin_extend_key_process")
+        self.assertIsNone(self.state.current)
+        self.vpn.extend_subscription.assert_not_awaited()
+        self.assertEqual(self.screen.reply_markup.inline_keyboard[0][0].callback_data,"admin_key_detail_9")
+
+    async def test_renew_confirmation_back_changes_days(self):
+        await self.renew_confirmation()
+        await self.press_previous()
+        self.assertEqual(self.state.current,AdminExtendKey.days.state)
+        await self.enter("5","admin_extend_key_process")
+        self.vpn.extend_subscription.assert_not_awaited()
+        await self.apply_key()
+        self.vpn.extend_subscription.assert_awaited_once_with(subscription_id=9,days_to_add=5,tariff_id=1)
+
+    async def test_renew_changed_target_rejected(self):
+        await self.renew_confirmation()
+        with closing(sqlite3.connect(self.db)) as db,db:
+            db.execute("UPDATE subscriptions SET end_date='2099-02-01' WHERE id=9")
+        await self.apply_key()
+        self.vpn.extend_subscription.assert_not_awaited()
+
+    async def test_renew_menu_navigation_clears_without_call(self):
+        await self.start_renew()
+        self.message.text="👤 Профиль"
+        await self.call(self.message)
+        self.assertIsNone(self.state.current)
+        self.vpn.extend_subscription.assert_not_awaited()
+
+    async def test_renew_stale_confirmation_cannot_apply(self):
+        await self.renew_confirmation()
+        token=self.state.data[form.CONFIRM_TOKEN]
+        await self.press_previous()
+        await self.enter("6","admin_extend_key_process")
+        await self.key_callback(token,"admin_apply_key_operation")
+        self.vpn.extend_subscription.assert_not_awaited()
+        self.assertEqual(self.state.current,AdminExtendKey.confirm.state)
+
+    async def test_renew_failure_no_auto_retry(self):
+        await self.renew_confirmation()
+        self.vpn.extend_subscription.return_value={"success":False}
+        token=self.state.data[form.CONFIRM_TOKEN]
+        await self.apply_key()
+        self.assertIn("не подтверждено",form.render_screen.await_args.args[1])
+        await self.key_callback(token,"admin_apply_key_operation")
+        self.vpn.extend_subscription.assert_awaited_once()
