@@ -150,6 +150,35 @@ async def save_tax_settings(request: Request):
         return HTMLResponse(escape(str(exc)),status_code=400,headers={"Cache-Control":"no-store"})
     return RedirectResponse("/tax-settings?saved=1", status_code=302)
 
+@settings_router.get("/referral-settings", response_class=HTMLResponse)
+async def referral_settings_page(request: Request):
+    if not check_auth(request):
+        return RedirectResponse("/")
+    from referral_settings_policy import status
+    policy=await asyncio.to_thread(status,DB_PATH)
+    return templates.TemplateResponse("referral_settings.html", {
+        "request":request,"policy":policy,"csrf":activation_token(request),
+    },headers={"Cache-Control":"no-store"})
+
+
+@settings_router.post("/referral-settings")
+async def save_referral_settings(request: Request):
+    if not check_auth(request):
+        return RedirectResponse("/",status_code=303)
+    form=await request.form()
+    if not hmac.compare_digest(activation_token(request).encode(),str(form.get("csrf","")).encode()):
+        return HTMLResponse("Обновите страницу настроек.",status_code=403,headers={"Cache-Control":"no-store"})
+    from referral_settings_policy import save, StalePolicy
+    from html import escape
+    try:
+        await asyncio.to_thread(save,DB_PATH,form)
+    except StalePolicy as exc:
+        return HTMLResponse(escape(str(exc)),status_code=409,headers={"Cache-Control":"no-store"})
+    except ValueError as exc:
+        return HTMLResponse(escape(str(exc)),status_code=400,headers={"Cache-Control":"no-store"})
+    return RedirectResponse("/referral-settings?saved=1",status_code=303)
+
+
 @settings_router.get("/bot-texts", response_class=HTMLResponse)
 async def bot_texts_page(request: Request):
     """Страница текстов бота"""
