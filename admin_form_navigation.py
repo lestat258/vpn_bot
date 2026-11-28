@@ -1,8 +1,9 @@
-"""Screen-scoped administrative tariff and text forms.
+"""Screen-scoped administrative forms with step-by-step navigation.
 
 Only these form states are managed here. Other admin workflows retain their
 existing routing until separately migrated.
 """
+import secrets
 from aiogram import BaseMiddleware, types
 from states import AddTariff, EditTariff, EditText, AddServer, SendMessageToUser
 from aiogram.exceptions import TelegramAPIError
@@ -25,6 +26,68 @@ def parent_for(current, fields):
             return f"user_back_to_{user}"
     return PARENTS[current]
 PROMPT = "admin_form_prompt"
+HISTORY = "admin_form_history"
+BACK_TOKEN = "admin_form_back"
+SELECT_KEYBOARD = "admin_form_select_keyboard"
+STATES = {s.state:s for group in (AddTariff,EditTariff,EditText,AddServer,SendMessageToUser)
+          for s in group.__all_states__}
+INPUT_FIELDS = {
+    s.state:k for group,keys in (
+        (AddTariff,("name","price","days","traffic","ip_limit")),
+        (EditTariff,("tariff_id","name","price","days","traffic","ip_limit")),
+        (AddServer,("name","url")),
+    ) for s,k in zip(group.__all_states__,keys)
+}
+
+
+def active_keyboard(current,fields):
+    parent=parent_for(current,fields)
+    buttons=[]
+    if fields.get(HISTORY):
+        buttons.append([types.InlineKeyboardButton(text="🔙 Назад",callback_data=fields[BACK_TOKEN])])
+    if current==SELECT and fields.get(SELECT_KEYBOARD):
+        for row in fields[SELECT_KEYBOARD]["inline_keyboard"]:
+            buttons.append([types.InlineKeyboardButton(**b) for b in row
+                            if b.get("callback_data")!=parent])
+        buttons=[row for row in buttons if row]
+    buttons.append([types.InlineKeyboardButton(text="❌ Отмена",callback_data=parent)])
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def new_back_token(fields):
+    if fields.get(HISTORY):
+        fields[BACK_TOKEN]="admin_form_back_"+secrets.token_hex(12)
+    else:
+        fields.pop(BACK_TOKEN,None)
+    return fields
+
+
+def snapshot(current,fields):
+    return {"state":current,"data":{k:v for k,v in fields.items()
+            if k not in (HISTORY,BACK_TOKEN,FORM_SCREEN)}}
+
+
+async def go_back(callback,state,current,fields):
+    history=fields.get(HISTORY,[])
+    if not history:
+        await callback.answer("Предыдущего шага нет.",show_alert=True)
+        return
+    frame=history[-1]
+    previous=frame["state"]
+    restored={**frame["data"],HISTORY:history[:-1]}
+    field=INPUT_FIELDS.get(previous)
+    prompt=restored[PROMPT]
+    if previous!=SELECT and field and field in fields:
+        restored[field]=fields[field]
+        value=str(fields[field])[:500]
+        prompt+=f"\n\nРанее введено: {value}\nВведите значение заново."
+    new_back_token(restored)
+    await render_screen(callback.message,prompt,reply_markup=active_keyboard(previous,restored))
+    restored[FORM_SCREEN]=tracked_id(callback.message,command=False)
+    await state.set_data(restored)
+    await state.set_state(STATES[previous])
+    await callback.answer()
+
 
 
 def back_keyboard(parent):
@@ -60,26 +123,41 @@ def tracked_id(message, *, command):
 
 
 async def begin(callback, state, target, text, *, fields=None, keyboard=None):
-    parent = parent_for(target.state, fields or {})
+    current=await state.get_state()
+    old=await state.get_data()
+    data={**(fields or {}),PROMPT:text,HISTORY:[]}
+    if current==SELECT and target.state==EditTariff.name.state:
+        data[HISTORY]=[*old.get(HISTORY,[]),snapshot(current,old)]
+    if keyboard is not None:
+        data[SELECT_KEYBOARD]=keyboard.model_dump(exclude_none=True)
+    new_back_token(data)
     await state.clear()
-    await render_screen(callback.message, text, reply_markup=keyboard or back_keyboard(parent))
-    await state.set_data({**(fields or {}), FORM_SCREEN: tracked_id(callback.message, command=False), PROMPT: text})
+    await render_screen(callback.message,text,reply_markup=active_keyboard(target.state,data))
+    data[FORM_SCREEN]=tracked_id(callback.message,command=False)
+    await state.set_data(data)
     await state.set_state(target)
     await callback.answer()
 
 
 async def step(message, state, target, text, **fields):
-    await render_command(message, text, reply_markup=back_keyboard(parent_for(target.state, {**await state.get_data(), **fields})))
-    await state.update_data(**fields, **{FORM_SCREEN: tracked_id(message, command=True), PROMPT: text})
+    current=await state.get_state()
+    old=await state.get_data()
+    data={**old,**fields,PROMPT:text,HISTORY:[*old.get(HISTORY,[]),snapshot(current,old)]}
+    new_back_token(data)
+    await render_command(message,text,reply_markup=active_keyboard(target.state,data))
+    data[FORM_SCREEN]=tracked_id(message,command=True)
+    await state.set_data(data)
     await state.set_state(target)
 
 
 async def retry(message, state, error):
-    current = await state.get_state()
-    data = await state.get_data()
-    text = error + "\n\n" + data[PROMPT]
-    await render_command(message, text, reply_markup=back_keyboard(parent_for(current, data)))
-    await state.update_data(**{FORM_SCREEN: tracked_id(message, command=True)})
+    current=await state.get_state()
+    data=await state.get_data()
+    text=error+"\n\n"+data[PROMPT]
+    new_back_token(data)
+    await render_command(message,text,reply_markup=active_keyboard(current,data))
+    data[FORM_SCREEN]=tracked_id(message,command=True)
+    await state.set_data(data)
 
 
 async def finish(message, state, text, *, clean_cancel=False):
@@ -106,6 +184,9 @@ class AdminFormNavigation(BaseMiddleware):
             select = value.startswith("admin_edit_tariff_select_")
             start = value in STARTS or value.startswith(("edittext_", "user_send_message_"))
             if current not in PARENTS:
+                if value.startswith("admin_form_back_"):
+                    await event.answer("Форма уже закрыта. Откройте её заново.",show_alert=True)
+                    return
                 if start or select:
                     if (current is not None or select or not private_admin(event, self.admin_id)
                             or not callback_is_current(event)):
@@ -118,13 +199,20 @@ class AdminFormNavigation(BaseMiddleware):
                     or not callback_is_current(event)):
                 await event.answer("Откройте актуальную форму.", show_alert=True)
                 return
-            if value == parent_for(current, await state.get_data()):
+            fields=await state.get_data()
+            if value.startswith("admin_form_back_"):
+                if value!=fields.get(BACK_TOKEN):
+                    await event.answer("Кнопка устарела.",show_alert=True)
+                    return
+                await go_back(event,state,current,fields)
+                return
+            if value == parent_for(current, fields):
                 await state.clear()
                 data["raw_state"] = None
                 return await handler(event, data)
             if current == SELECT and select:
                 return await handler(event, data)
-            await event.answer("Завершите ввод или нажмите «Назад».", show_alert=True)
+            await event.answer("Завершите ввод или нажмите «Отмена».", show_alert=True)
             return
         if current not in PARENTS:
             return await handler(event, data)

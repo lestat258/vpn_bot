@@ -412,3 +412,92 @@ class AdminFormTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state.current,SendMessageToUser.message_text.state)
         self.assertEqual(self.screen.reply_markup.inline_keyboard[0][0].callback_data,"user_back_to_43")
         self.bot.send_message.assert_not_awaited()
+
+
+    async def press_previous(self):
+        self.callback.data=self.state.data[form.BACK_TOKEN]
+        await self.call(self.callback)
+
+    async def test_server_previous_from_token_to_url(self):
+        await self.server_to_token()
+        await self.press_previous()
+        self.assertEqual(self.state.current,AddServer.url.state)
+        self.assertEqual(self.state.data["name"],"Test")
+        self.assertIn("https://example.invalid/panel",form.render_screen.await_args.args[1])
+        self.assertEqual(self.servers(),[])
+        await self.enter("https://other.invalid","server_url")
+        await self.enter("fake-token","server_token")
+        self.assertEqual(self.servers()[0][1],"https://other.invalid")
+
+    async def test_server_previous_from_url_to_name(self):
+        await self.server_to_token()
+        await self.press_previous()
+        await self.press_previous()
+        self.assertEqual(self.state.current,AddServer.name.state)
+        self.assertIn("Test",form.render_screen.await_args.args[1])
+        self.assertNotIn("url",self.state.data)
+        await self.enter("Changed","server_name")
+        self.assertEqual(self.state.data["name"],"Changed")
+        self.assertEqual(self.state.current,AddServer.url.state)
+
+    async def test_server_retry_preserves_previous_and_cancel(self):
+        await self.start_server()
+        await self.enter("Test","server_name")
+        await self.enter("abc","server_url")
+        buttons=self.screen.reply_markup.inline_keyboard
+        self.assertEqual(buttons[0][0].text,"🔙 Назад")
+        self.assertEqual(buttons[-1][0].text,"❌ Отмена")
+        await self.press_previous()
+        self.assertEqual(self.state.current,AddServer.name.state)
+        self.assertEqual(self.servers(),[])
+
+    async def test_old_previous_button_cannot_skip_step(self):
+        await self.server_to_token()
+        old=self.state.data[form.BACK_TOKEN]
+        await self.press_previous()
+        self.callback.data=old
+        await self.call(self.callback)
+        self.assertEqual(self.state.current,AddServer.url.state)
+        self.assertNotEqual(self.state.data[form.BACK_TOKEN],old)
+
+    async def test_cancel_after_back_does_not_create_server(self):
+        await self.server_to_token()
+        await self.press_previous()
+        self.callback.data="admin_servers_menu"
+        await self.call(self.callback)
+        self.assertIsNone(self.state.current)
+        self.assertEqual(self.servers(),[])
+
+    async def test_add_tariff_back_revises_price(self):
+        await self.start()
+        await self.enter("New","tariff_name")
+        await self.enter("15","tariff_price")
+        await self.press_previous()
+        self.assertEqual(self.state.current,AddTariff.price.state)
+        self.assertEqual(self.state.data["name"],"New")
+        await self.enter("20","tariff_price")
+        for value,name in (("3","tariff_days"),("0","tariff_traffic"),("2","tariff_ip")):
+            await self.enter(value,name)
+        self.assertEqual(self.rows()[1],(2,"New",20.0,3,0.0,2,1))
+
+    async def test_edit_back_returns_to_tariff_selection(self):
+        await self.edit()
+        await self.press_previous()
+        self.assertEqual(self.state.current,EditTariff.tariff_id.state)
+        self.assertNotIn("tariff_id",self.state.data)
+        self.assertEqual(self.screen.reply_markup.inline_keyboard[0][0].callback_data,"admin_edit_tariff_select_1")
+        self.callback.data="admin_edit_tariff_select_1"
+        await self.call(self.callback,lambda event,data:self.env["admin_edit_tariff_start"](event,self.state))
+        self.assertEqual(self.state.current,EditTariff.name.state)
+        self.assertEqual(self.rows()[0][2],150.0)
+
+    async def test_edit_back_revises_value_then_skip(self):
+        await self.edit()
+        await self.enter("/skip","edit_tariff_name")
+        await self.enter("80","edit_tariff_price")
+        await self.press_previous()
+        self.assertEqual(self.state.current,EditTariff.price.state)
+        await self.enter("90","edit_tariff_price")
+        for name in ("edit_tariff_days","edit_tariff_traffic","edit_tariff_ip_limit"):
+            await self.enter("/skip",name)
+        self.assertEqual(self.rows()[0][2],90.0)
