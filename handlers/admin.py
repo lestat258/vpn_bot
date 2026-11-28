@@ -696,6 +696,7 @@ async def admin_add_tariff_start(callback: types.CallbackQuery, state: FSMContex
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
+    extend_temp.pop(callback.from_user.id,None)
     await form_begin(callback,state,AddTariff.name,"Название тарифа:")
 
 
@@ -767,6 +768,7 @@ async def admin_edit_tariff_select(callback: types.CallbackQuery, state: FSMCont
         [types.InlineKeyboardButton(text=f"{'✅' if t[4] else '❌'} {t[1]} — {t[2]}₽ / {t[3]} дн.",
             callback_data=f"admin_edit_tariff_select_{t[0]}")] for t in tariffs
     ]+[[types.InlineKeyboardButton(text="🔙 Назад",callback_data="admin_tariffs")]])
+    extend_temp.pop(callback.from_user.id,None)
     await form_begin(callback,state,EditTariff.tariff_id,"✏️ Выберите тариф для редактирования:",keyboard=kb)
 
 
@@ -1384,6 +1386,7 @@ async def edit_text_start(callback: types.CallbackQuery, state: FSMContext):
         return
     current=get_setting(field) or '(пусто)'
     preview=current[:2500]+("…" if len(current)>2500 else "")
+    extend_temp.pop(callback.from_user.id,None)
     await form_begin(callback,state,EditText.waiting,
         f"✏️ {ADMIN_TEXT_FIELDS[field]}\n\nТекущий текст:\n{preview}\n\nОтправьте новый текст полностью. Поддерживается HTML.",
         fields={"field":field})
