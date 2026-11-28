@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h2>🎁 Реферальная программа</h2></div>
+{% if request.query_params.get('saved') == '1' %}<div class="alert alert-success">Настройки сохранены.</div>{% endif %}
+{% if policy.invalid %}<div class="alert alert-danger">Текущая конфигурация некорректна. Заполните уровни заново.</div>{% endif %}
+<div class="card mb-3">
+    <div class="card-header">Уровни и вознаграждения</div>
+    <div class="card-body">
+        <p>Редактируйте до 10 уровней. Пустые строки не сохраняются. Первый порог — 1 платящий друг, далее пороги строго возрастают. Процент не уменьшается с ростом уровня.</p>
+        <p class="text-muted">Начисления рассчитываются по новым условиям только для будущих операций. Ранее заработанные дни не пересчитываются. Изменение порогов может изменить текущий уровень пользователей.</p>
+        <p>Запрос активации в базе: <strong>{{ 'включён' if policy.requested else 'выключен' }}</strong>. Сохранение уровней не включает программу. Фактическая активация службы начислений контролируется отдельно.</p>
+        <form method="POST" action="/referral-settings">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="revision" value="{{ policy.revision }}">
+            {% for i in range(10) %}
+            {% set row = policy.rows[i] if i < policy.rows|length else none %}
+            <fieldset class="border rounded p-3 mb-2">
+                <legend class="float-none w-auto fs-6 px-2">Уровень {{ i+1 }}</legend>
+                <div class="row g-2">
+                    <div class="col-12 col-md-6">
+                        <label class="form-label" for="name_{{ i }}">Название</label>
+                        <input class="form-control" id="name_{{ i }}" name="name_{{ i }}" maxlength="40" value="{{ row[1] if row else '' }}">
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <label class="form-label" for="threshold_{{ i }}">Платящие друзья</label>
+                        <input class="form-control" id="threshold_{{ i }}" name="threshold_{{ i }}" type="number" min="1" max="100000" step="1" value="{{ row[0] if row else '' }}">
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <label class="form-label" for="rate_{{ i }}">Бонус, %</label>
+                        <input class="form-control" id="rate_{{ i }}" name="rate_{{ i }}" type="number" min="1" max="100" step="1" value="{{ row[2] if row else '' }}">
+                    </div>
+                </div>
+            </fieldset>
+            {% endfor %}
+            <button type="submit" class="btn btn-primary">💾 Сохранить уровни</button>
+        </form>
+    </div>
+</div>
+<div class="card">
+    <div class="card-header">История изменений (последние 10)</div>
+    <div class="card-body">
+        {% for id, date, old, new in policy.history %}
+        <details class="mb-3">
+            <summary>Редакция №{{ id }} · {{ date }} UTC</summary>
+            <p class="small mt-2">До: <code style="white-space:pre-wrap;overflow-wrap:anywhere">{{ old if old is not none else 'Стандартные уровни' }}</code></p>
+            <p class="small">После: <code style="white-space:pre-wrap;overflow-wrap:anywhere">{{ new }}</code></p>
+        </details>
+        {% else %}<p>Изменений пока нет.</p>{% endfor %}
+    </div>
+</div>
+{% endblock %}
