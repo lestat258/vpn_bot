@@ -179,10 +179,12 @@ def credit_verified(path,payment_id,metadata):
         if row["status"]!="pending" or j:
             raise ValueError("Unexpected deposit state")
         balance,_=apply_operation(db,"deposit:"+payment_id,owner,"deposit",amount,payment_id=payment_id)
-        # Fiscal handling for advances requires a separate approved policy.
-        # Do not issue a subscription receipt for a balance deposit.
-        tax=db.execute("SELECT value FROM settings WHERE key='tax_enabled'").fetchone()
-        tax_state="needs_review" if tax and tax[0]=="true" else "skipped"
+        # Only new, verified cash deposits under an explicitly approved NPD
+        # prepayment policy are eligible. A duplicate event never requeues history.
+        tax=dict(db.execute("SELECT key,value FROM settings WHERE key IN ('tax_enabled','tax_deposit_policy')"))
+        tax_state="skipped"
+        if tax.get("tax_enabled")=="true":
+            tax_state="queued" if tax.get("tax_deposit_policy")=="npd_prepayment" else "needs_review"
         db.execute("""INSERT INTO payment_processing(payment_id,payment_state,vpn_state,tax_state)
             VALUES(?,'verified','done',?)""",(payment_id,tax_state))
         db.execute("UPDATE payments SET status='paid' WHERE payment_id=?",(payment_id,))
@@ -217,5 +219,7 @@ def record_deposit_change(path,payment_id,metadata,*,refund=None,canceled=False)
             db.execute("""INSERT INTO payment_processing(payment_id,payment_state,vpn_state,tax_state,refund_state)
                 VALUES(?,'verified','not_started','skipped',?)""",(payment_id,state))
         else:
-            db.execute("UPDATE payment_processing SET refund_state=?,updated_at=CURRENT_TIMESTAMP WHERE payment_id=?",(state,payment_id))
+            db.execute("""UPDATE payment_processing SET refund_state=?,
+                tax_state=CASE WHEN tax_state='queued' THEN 'needs_review' ELSE tax_state END,
+                updated_at=CURRENT_TIMESTAMP WHERE payment_id=?""",(state,payment_id))
         return "review"
