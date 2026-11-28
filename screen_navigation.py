@@ -10,6 +10,7 @@ import sqlite3
 from contextlib import closing
 from weakref import WeakValueDictionary
 from runtime_config import DATA_DIR
+from callback_navigation import prepare_buttons, invalidate, remember, NOTICE_PREFIXES
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import ReplyKeyboardMarkup, ReplyKeyboardRemove, ForceReply
 
@@ -18,7 +19,7 @@ LOG=logging.getLogger(__name__)
 
 def significant_message(message):
     text=getattr(message,"text",None) or getattr(message,"caption",None) or ""
-    if text.startswith(("✅ Пробная подписка создана!", "✅ Ваш VPN-ключ!", "✅ Подписка продлена!")):
+    if text.startswith(("✅ Пробная подписка создана!", "✅ Ваш VPN-ключ!", "✅ Подписка продлена!") + NOTICE_PREFIXES):
         return True
     markup=getattr(message,"reply_markup",None)
     return any(getattr(button,"callback_data",None)=="paid_key_guide"
@@ -156,6 +157,7 @@ async def render_home(message,text,*,keyboard,**kwargs):
     async with _lock(key):
         old_anchor=_read_anchor(key)
         old_screen=_read(key)
+        invalidate(key)
         anchor=await message.answer(text,reply_markup=keyboard,**kwargs)
         mid=getattr(anchor,"message_id",None)
         if not isinstance(mid,int) or mid<=0:
@@ -204,11 +206,12 @@ async def _retire_id(bot,chat_id,mid):
             LOG.warning("Previous active screen could not be retired")
 
 
-async def _remember(key,message,result,previous,kind,*,retired_source=False):
+async def _remember(key,message,result,previous,kind,*,retired_source=False,buttons=None):
     mid=getattr(result,"message_id",None)
     if not isinstance(mid,int) or mid<=0:
         return
     _save(key,mid,kind)
+    remember(key,mid,buttons or {})
     if previous and previous[0]!=mid:
         if retired_source and previous[0]==message.message_id:
             return
@@ -227,6 +230,8 @@ async def render_screen(message,text,**kwargs):
         if isinstance(reply,ReplyKeyboardMarkup):
             keyboard_added=await _ensure_keyboard(message,key,reply)
             kwargs.pop("reply_markup")
+        kwargs,buttons=prepare_buttons(kwargs)
+        invalidate(key)
         if keyboard_added:
             # Keep the first screen below the new keyboard anchor.
             result=await message.answer(text,**kwargs)
@@ -236,17 +241,21 @@ async def render_screen(message,text,**kwargs):
             result=await _render_screen(message,text,**kwargs)
         if preserved and previous and previous[0]==message.message_id:
             previous=None
-        await _remember(key,message,result,previous,"text",retired_source=not preserved)
+        await _remember(key,message,result,previous,"text",retired_source=not preserved,buttons=buttons)
         return result
 
 
 async def _render_command_locked(message,key,text,kwargs,*,force_new=False):
     previous=_read(key)
     reply=kwargs.get("reply_markup")
+    kwargs,buttons=prepare_buttons(kwargs)
+    invalidate(key)
     if not force_new and previous and previous[1]=="text" and not isinstance(reply,(ReplyKeyboardMarkup,ReplyKeyboardRemove,ForceReply)):
         try:
-            return await message.bot.edit_message_text(text=text,chat_id=key[1],
+            result=await message.bot.edit_message_text(text=text,chat_id=key[1],
                                                         message_id=previous[0],**kwargs)
+            remember(key,previous[0],buttons)
+            return result
         except TelegramBadRequest as exc:
             reason=str(exc).lower()
             if "message is not modified" in reason:
@@ -255,7 +264,7 @@ async def _render_command_locked(message,key,text,kwargs,*,force_new=False):
                     "message to edit not found","there is no text in the message to edit")):
                 raise
     result=await message.answer(text,**kwargs)
-    await _remember(key,message,result,previous,"text")
+    await _remember(key,message,result,previous,"text",buttons=buttons)
     return result
 
 
@@ -306,8 +315,10 @@ async def render_photo_screen(message,media,**kwargs):
     async with _lock(key):
         previous=_read(key)
         preserved=significant_message(message)
+        kwargs,buttons=prepare_buttons(kwargs)
+        invalidate(key)
         result=await show()
         if preserved and previous and previous[0]==message.message_id:
             previous=None
-        await _remember(key,message,result,previous,"photo",retired_source=not preserved)
+        await _remember(key,message,result,previous,"photo",retired_source=not preserved,buttons=buttons)
         return result
