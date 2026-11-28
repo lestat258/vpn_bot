@@ -74,7 +74,7 @@ class PaymentLedger:
             ''', (payment_id,))
             return 'claimed'
 
-    def complete(self, payment_id, subscription_id):
+    def complete(self, payment_id, subscription_id, *, duration_days=None, action=None):
         """Commit successful VPN effect. Raises if payment is not claimed."""
         if not isinstance(subscription_id, int) or subscription_id <= 0:
             raise ValueError('Missing positive subscription_id')
@@ -97,7 +97,7 @@ class PaymentLedger:
                 (payment_id,)
             )
             from referral_accrual import record_completed_purchase
-            record_completed_purchase(db, payment_id)
+            record_completed_purchase(db, payment_id, duration_days, action)
 
     def mark_review(self, payment_id, reason):
         """Retain uncertain outcome for manual reconciliation. No auto-retry."""
