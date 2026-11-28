@@ -8,6 +8,9 @@ from screen_navigation import render_screen
 from contextlib import closing
 from html import escape
 import math
+from urllib.parse import urlsplit
+from encryption import encrypt
+from aiogram.exceptions import TelegramAPIError
 import logging
 import sqlite3
 import json
@@ -66,7 +69,7 @@ async def admin_users(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "👥 <b>Выберите пользователя:</b>",
         reply_markup=get_user_list_keyboard(),
         parse_mode="HTML"
@@ -98,16 +101,16 @@ async def admin_user_card(callback: types.CallbackQuery):
 
     text = (
         f"👤 <b>Карточка пользователя</b>\n\n"
-        f"📛 Имя: {first_name or 'Не указано'}\n"
+        f"📛 Имя: {escape(first_name or 'Не указано')}\n"
         f"🆔 ID: {telegram_id}\n"
-        f"📝 Username: @{username or 'Нет'}\n"
+        f"📝 Username: @{escape(username or 'Нет')}\n"
         f"📅 Регистрация: {created_at[:10] if created_at else 'Неизвестно'}\n"
         f"🔑 Ключей: {keys_count}\n"
         f"💰 Баланс: {balance or 0:.2f} ₽\n"
         f"🚫 Статус: {'🔴 Заблокирован' if is_blocked else '🟢 Активен'}"
     )
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         text,
         reply_markup=get_user_action_keyboard(telegram_id),
         parse_mode="HTML"
@@ -139,16 +142,16 @@ async def admin_back_to_user_card(callback: types.CallbackQuery):
 
     text = (
         f"👤 <b>Карточка пользователя</b>\n\n"
-        f"📛 Имя: {first_name or 'Не указано'}\n"
+        f"📛 Имя: {escape(first_name or 'Не указано')}\n"
         f"🆔 ID: {telegram_id}\n"
-        f"📝 Username: @{username or 'Нет'}\n"
+        f"📝 Username: @{escape(username or 'Нет')}\n"
         f"📅 Регистрация: {created_at[:10] if created_at else 'Неизвестно'}\n"
         f"🔑 Ключей: {keys_count}\n"
         f"💰 Баланс: {balance or 0:.2f} ₽\n"
         f"🚫 Статус: {'🔴 Заблокирован' if is_blocked else '🟢 Активен'}"
     )
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         text,
         reply_markup=get_user_action_keyboard(telegram_id),
         parse_mode="HTML"
@@ -405,62 +408,46 @@ async def send_message_from_user_card(callback: types.CallbackQuery, state: FSMC
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
+    try:
+        telegram_id=int(callback.data.removeprefix("user_send_message_"))
+        if telegram_id<=0:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Некорректный пользователь",show_alert=True)
+        return
+    user=get_user_by_telegram_id(telegram_id)
+    if not user:
+        await callback.answer("Пользователь не найден",show_alert=True)
+        return
+    user_name=user[2] or user[3] or str(telegram_id)
+    extend_temp.pop(callback.from_user.id,None)
+    await form_begin(callback,state,SendMessageToUser.message_text,
+        f"💬 Отправка сообщения пользователю\n\n👤 Пользователь: {user_name}\n"
+        f"🆔 ID: {telegram_id}\n\nВведите текст сообщения (поддерживается HTML). "
+        "После ввода сообщение будет отправлено сразу.",
+        fields={"user_id":telegram_id,"user_name":user_name})
 
-    telegram_id = int(callback.data.replace("user_send_message_", ""))
-
-    user = get_user_by_telegram_id(telegram_id)
-    user_name = user[2] or user[3] or str(telegram_id) if user else str(telegram_id)
-
-    await state.update_data(user_id=telegram_id, user_name=user_name)
-
-    kb = get_back_keyboard(f"user_{telegram_id}")
-
-    await callback.message.edit_text(
-        f"💬 <b>Отправка сообщения пользователю</b>\n\n"
-        f"👤 Пользователь: <b>{user_name}</b>\n"
-        f"🆔 ID: <code>{telegram_id}</code>\n\n"
-        f"✏️ Введите текст сообщения (поддерживается HTML):",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-    await state.set_state(SendMessageToUser.message_text)
-    await callback.answer()
 
 @router.message(SendMessageToUser.message_text)
 async def send_message_process(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    user_id = data.get('user_id')
-    user_name = data.get('user_name', 'Пользователь')
-
-    if not user_id:
-        await message.answer("❌ Ошибка: ID пользователя не найден")
-        await state.clear()
+    data=await state.get_data()
+    user_id=data.get("user_id")
+    if type(user_id) is not int or user_id<=0 or not get_user_by_telegram_id(user_id):
+        await form_finish(message,state,"Пользователь не найден. Сообщение не отправлено.")
         return
-
+    if len(message.text.encode("utf-16-le"))//2>3900:
+        await form_retry(message,state,"❌ Сообщение слишком длинное (до 3900 символов UTF-16).")
+        return
+    # Never retry an ambiguous Telegram send; preserve the recipient-specific back button.
     try:
-        if message.text:
-            await message.bot.send_message(
-                chat_id=user_id,
-                text=f"📨 <b>Сообщение от администратора</b>\n\n{message.text}",
-                parse_mode="HTML"
-            )
-            await message.answer(f"✅ Сообщение отправлено пользователю {user_name}")
-        else:
-            await message.answer("❌ Отправьте текст")
-            return
+        await message.bot.send_message(chat_id=user_id,
+            text=f"📨 <b>Сообщение от администратора</b>\n\n{message.text}",parse_mode="HTML")
+    except Exception as exc:
+        logging.warning("Admin message delivery requires review: %s",type(exc).__name__)
+        await form_finish(message,state,"Не удалось подтвердить отправку. Проверьте доставку перед повтором.")
+        return
+    await form_finish(message,state,f"✅ Сообщение отправлено пользователю {data.get('user_name',user_id)}.")
 
-        await state.clear()
-        await message.answer(
-            f"👤 <b>Карточка пользователя</b>\n\n"
-            f"📛 Имя: {user_name}\n"
-            f"🆔 ID: {user_id}",
-            reply_markup=get_user_action_keyboard(user_id),
-            parse_mode="HTML"
-        )
-
-    except Exception as e:
-        await message.answer(f"❌ Ошибка отправки: {e}")
-        await state.clear()
 
 def admin_balance_keyboard(telegram_id, *, review=False):
     buttons = []
@@ -1107,7 +1094,7 @@ async def admin_servers_menu(callback: types.CallbackQuery):
             [types.InlineKeyboardButton(text="➕ Добавить сервер", callback_data="admin_add_server")],
             [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
         ])
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
         await callback.answer()
         return
 
@@ -1130,7 +1117,7 @@ async def admin_servers_menu(callback: types.CallbackQuery):
             status_emoji = "🔴"
             status_text = "❌ Недоступен"
 
-        text += f"{status_emoji} <b>{name}</b>\n"
+        text += f"{status_emoji} <b>{escape(name)}</b>\n"
         text += f"   Статус: {status_text}\n"
         text += f"   ID: {server_id}\n\n"
 
@@ -1143,7 +1130,7 @@ async def admin_servers_menu(callback: types.CallbackQuery):
     buttons.append([types.InlineKeyboardButton(text="➕ Добавить сервер", callback_data="admin_add_server")])
     buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         text,
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
@@ -1291,33 +1278,70 @@ async def admin_add_server_start(callback: types.CallbackQuery, state: FSMContex
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-    await callback.message.answer("Название сервера:", parse_mode="HTML")
-    await state.set_state(AddServer.name)
-    await callback.answer()
+    extend_temp.pop(callback.from_user.id,None)
+    await form_begin(callback,state,AddServer.name,"Название сервера:")
+
 
 @router.message(AddServer.name)
 async def server_name(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await message.answer("URL панели:")
-    await state.set_state(AddServer.url)
+    name=message.text.strip()
+    if len(name)>100:
+        await form_retry(message,state,"❌ Название должно быть не длиннее 100 символов.")
+        return
+    await form_step(message,state,AddServer.url,"URL панели (https:// или http://):",name=name)
+
+
+def panel_url(value):
+    value=value.strip()
+    parsed=urlsplit(value)
+    if (len(value)>2048 or any(c.isspace() for c in value)
+            or parsed.scheme not in ("http","https") or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment
+            or parsed.port==0):
+        raise ValueError("Invalid panel URL")
+    return value.rstrip("/")
+
 
 @router.message(AddServer.url)
 async def server_url(message: types.Message, state: FSMContext):
-    await state.update_data(url=message.text)
-    await message.answer("API Token:")
-    await state.set_state(AddServer.token)
+    try:
+        url=panel_url(message.text)
+    except ValueError:
+        await form_retry(message,state,"❌ Введите адрес панели без логина, пароля, параметров и фрагмента.")
+        return
+    await form_step(message,state,AddServer.token,
+        "API Token (будет зашифрован в базе; бот попробует удалить сообщение с токеном):",url=url)
+
 
 @router.message(AddServer.token)
 async def server_token(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('INSERT INTO servers (name, url, api_token, is_active, status) VALUES (?,?,?,?,?)',
-              (data['name'], data['url'], message.text, 1, 'pending'))
-    conn.commit()
-    conn.close()
-    await message.answer(f"✅ Сервер «{data['name']}» добавлен!", parse_mode="HTML")
-    await state.clear()
+    data=await state.get_data()
+    token=message.text.strip()
+    removed=True
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        removed=False
+    notice="" if removed else "\nУдалите сообщение с токеном вручную."
+    if not token or len(token)>4096 or any(c.isspace() for c in token):
+        await form_retry(message,state,"❌ Некорректный токен."+notice)
+        return
+    try:
+        encoded=encrypt(token)
+        with closing(sqlite3.connect(DB_PATH)) as conn,conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM servers WHERE rtrim(url,'/')=?",(data["url"],)).fetchone():
+                result="Сервер с таким URL уже есть. Новый сервер не добавлен."
+            else:
+                conn.execute("INSERT INTO servers(name,url,api_token,is_active,status) VALUES(?,?,?,?,?)",
+                    (data["name"],data["url"],encoded,1,"pending"))
+                result=f"✅ Сервер «{data['name']}» добавлен. Проверка соединения ещё не выполнена."
+    except Exception as exc:
+        logging.warning("Admin server insert requires review: %s",type(exc).__name__)
+        result="Не удалось подтвердить добавление сервера. Проверьте список перед повтором."
+    await form_finish(message,state,result+notice)
+
 
 # ============================================================
 # АДМИН: СТАТИСТИКА
