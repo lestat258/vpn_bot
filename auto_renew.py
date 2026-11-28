@@ -11,7 +11,8 @@ from aiogram import Bot
 from database import get_setting
 from encryption import decrypt
 from xui_client import XUIClient
-from auto_renewal import activated, candidates, process_one, review_count
+from auto_renewal import activated, enabled, candidates, process_one, review_count
+from contextlib import closing
 from balance_ledger import rubles
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,11 @@ class AutoRenewManager:
 
     async def check_expiring_soon(self):
         """Проверяет подписки, которые истекут скоро, и предупреждает пользователей"""
+        if not activated():
+            return
+        with closing(sqlite3.connect(self.db_path)) as db:
+            if not enabled(db):
+                return
         await self.init_bot()
         if not self.bot:
             return
