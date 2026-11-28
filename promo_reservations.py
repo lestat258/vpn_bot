@@ -8,6 +8,7 @@ import sqlite3
 from contextlib import closing, contextmanager
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from datetime import datetime
+import secrets
 from balance_ledger import kopecks, rubles
 
 
@@ -142,7 +143,7 @@ def _select(db,owner,price):
     return candidate
 
 
-def reserve(path,checkout_id,owner,tariff_id,price,*,action="new_key",subscription_id=None):
+def reserve(path,checkout_id,owner,tariff_id,price,*,action="new_key",subscription_id=None,full_price_token=None):
     """Return (row, newly_reserved). No discount -> (None, False).
 
     Replayed checkout IDs are returned but MUST NOT trigger another provider
@@ -162,6 +163,9 @@ def reserve(path,checkout_id,owner,tariff_id,price,*,action="new_key",subscripti
             if tuple(existing[k] for k in ("telegram_id","tariff_id","original_kopecks","action","subscription_id"))!=(owner,tariff_id,original,action,subscription_id):
                 raise ReservationConflict("Checkout identity mismatch")
             return dict(existing),False
+        if full_price_token is not None:
+            claim_full_price(db,full_price_token,owner,tariff_id,original,action,subscription_id)
+            return None,False
         if has_open(db,owner):
             raise ReservationBusy("Previous discounted checkout is unresolved")
         expire_manual_grant(db,owner)
@@ -360,3 +364,113 @@ def manual_discount_status(path,owner):
         except (ValueError,InvalidOperation):
             return None
         return None
+
+
+def _table_exists(db,name):
+    return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone())
+
+
+def ensure_archive_schema(db):
+    # UI state only, never a payment state transition.
+    db.execute("""CREATE TABLE IF NOT EXISTS promo_checkout_archive (
+        checkout_id TEXT PRIMARY KEY REFERENCES promo_reservations(checkout_id),
+        archived INTEGER NOT NULL CHECK(archived IN (0,1)),
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+    db.execute("""CREATE TABLE IF NOT EXISTS promo_full_price_intents (
+        token TEXT PRIMARY KEY, checkout_id TEXT NOT NULL,
+        telegram_id INTEGER NOT NULL, tariff_id INTEGER NOT NULL,
+        original_kopecks INTEGER NOT NULL CHECK(original_kopecks>0),
+        action TEXT NOT NULL, subscription_id INTEGER,
+        claimed INTEGER NOT NULL DEFAULT 0 CHECK(claimed IN (0,1)),
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+
+
+def _is_archived(db,checkout_id):
+    return _table_exists(db,"promo_checkout_archive") and bool(db.execute(
+        "SELECT 1 FROM promo_checkout_archive WHERE checkout_id=? AND archived=1",(checkout_id,)).fetchone())
+
+
+def archive_info(path,owner):
+    """Return the open attached local order and its UI state (no mutation)."""
+    with closing(sqlite3.connect(path,timeout=15)) as db:
+        db.row_factory=sqlite3.Row
+        if not has_schema(db):
+            return None
+        row=db.execute("""SELECT r.checkout_id,p.id AS order_id
+            FROM promo_reservations r JOIN payments p USING(payment_id)
+            WHERE r.telegram_id=? AND r.state='attached' AND p.status='pending'""",(owner,)).fetchone()
+        if not row:
+            return None
+        return {**dict(row),"archived":_is_archived(db,row["checkout_id"])}
+
+
+def set_archived(path,owner,order_id,archived):
+    """Owner-scoped, exact local order. Preserve payment, reservation and discount."""
+    if type(archived) is not bool or not _positive_id(owner) or not _positive_id(order_id):
+        return False
+    with transaction(path) as db:
+        if not has_schema(db):
+            return False
+        row=db.execute("""SELECT r.checkout_id FROM promo_reservations r JOIN payments p USING(payment_id)
+            WHERE r.telegram_id=? AND p.id=? AND r.state='attached' AND p.status='pending'""",(owner,order_id)).fetchone()
+        if not row:
+            return False
+        ensure_archive_schema(db)
+        db.execute("""INSERT INTO promo_checkout_archive(checkout_id,archived) VALUES(?,?)
+            ON CONFLICT(checkout_id) DO UPDATE SET archived=excluded.archived,updated_at=CURRENT_TIMESTAMP""",
+            (row[0],int(archived)))
+        # Restoring or re-archiving invalidates outstanding confirmations.
+        db.execute("UPDATE promo_full_price_intents SET claimed=1 WHERE checkout_id=? AND claimed=0",(row[0],))
+        return True
+
+
+def _archived_open(db,owner):
+    if not has_schema(db):
+        return None
+    row=db.execute("""SELECT r.checkout_id FROM promo_reservations r JOIN payments p USING(payment_id)
+        WHERE r.telegram_id=? AND r.state='attached' AND p.status='pending'""",(owner,)).fetchone()
+    return row[0] if row and _is_archived(db,row[0]) else None
+
+
+def prepare_full_price(path,owner,tariff_id,price,action,subscription_id):
+    """A short-lived, one-use confirmation bound to the exact archived order."""
+    original=kopecks(price,positive=True)
+    if (not _positive_id(owner) or not _positive_id(tariff_id)
+            or not ((action=="new_key" and subscription_id is None)
+                    or (action=="renew" and _positive_id(subscription_id)))):
+        raise ValueError("Invalid checkout identity")
+    with transaction(path) as db:
+        checkout_id=_archived_open(db,owner)
+        if checkout_id is None:
+            return None
+        ensure_archive_schema(db)
+        # Only the most recent confirmation for this user is valid.
+        db.execute("UPDATE promo_full_price_intents SET claimed=1 WHERE telegram_id=? AND claimed=0",(owner,))
+        token=secrets.token_hex(16)
+        db.execute("""INSERT INTO promo_full_price_intents
+            (token,checkout_id,telegram_id,tariff_id,original_kopecks,action,subscription_id)
+            VALUES(?,?,?,?,?,?,?)""",(token,checkout_id,owner,tariff_id,original,action,subscription_id))
+        return token
+
+
+def full_price_details(path,token,owner):
+    with closing(sqlite3.connect(path,timeout=15)) as db:
+        db.row_factory=sqlite3.Row
+        if not _table_exists(db,"promo_full_price_intents"):
+            return None
+        row=db.execute("""SELECT * FROM promo_full_price_intents WHERE token=? AND telegram_id=?
+            AND claimed=0 AND datetime(created_at)>datetime('now','-10 minutes')""",(token,owner)).fetchone()
+        return dict(row) if row else None
+
+
+def claim_full_price(db,token,owner,tariff_id,original,action,subscription_id):
+    """Called inside reserve's BEGIN IMMEDIATE, before any provider create."""
+    if not _table_exists(db,"promo_full_price_intents"):
+        raise ReservationConflict("No full-price confirmation")
+    row=db.execute("""SELECT * FROM promo_full_price_intents WHERE token=? AND telegram_id=?
+        AND claimed=0 AND datetime(created_at)>datetime('now','-10 minutes')""",(token,owner)).fetchone()
+    if (row is None or tuple(row[k] for k in ("tariff_id","original_kopecks","action","subscription_id"))
+            !=(tariff_id,original,action,subscription_id)
+            or _archived_open(db,owner)!=row["checkout_id"]):
+        raise ReservationConflict("Full-price confirmation is no longer valid")
+    db.execute("UPDATE promo_full_price_intents SET claimed=1 WHERE token=?",(token,))
