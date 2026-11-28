@@ -1541,11 +1541,14 @@ async def tax_toggle(callback: types.CallbackQuery):
         await callback.answer("⛔ Доступ запрещён")
         return
 
-    current = get_setting('tax_enabled') == 'true'
-    new_value = 'false' if current else 'true'
-    set_setting('tax_enabled', new_value)
+    from tax_settings_policy import save as save_fiscal
+    try:
+        enabled = await asyncio.to_thread(save_fiscal,DB_PATH,{},toggle=True)
+    except ValueError as exc:
+        await callback.answer(str(exc),show_alert=True)
+        return
 
-    status = "✅ Включено" if new_value == 'true' else "❌ Выключено"
+    status = "✅ Включено" if enabled else "❌ Выключено"
 
     await callback.answer(f"Налоги: {status}", show_alert=True)
     await admin_tax_menu(callback)
@@ -1558,12 +1561,14 @@ async def tax_status(callback: types.CallbackQuery):
 
     tax_enabled = get_setting('tax_enabled') == 'true'
     tax_inn = get_setting('tax_inn') or 'Не настроен'
-    has_password = bool(get_setting('tax_password'))
+    from tax_settings_policy import status as fiscal_status
+    fiscal = await asyncio.to_thread(fiscal_status,DB_PATH)
+    has_password = fiscal["credentials_ready"]
 
     text = (
         f"📊 <b>Статус налоговой интеграции</b>\n\n"
         f"🔹 Включено: {'✅' if tax_enabled else '❌'}\n"
-        f"🔹 ИНН: {tax_inn}\n"
+        f"🔹 ИНН: {escape(tax_inn)}\n"
         f"🔹 Пароль: {'✅ Установлен' if has_password else '❌ Не установлен'}\n\n"
     )
 
@@ -1572,7 +1577,7 @@ async def tax_status(callback: types.CallbackQuery):
     elif not has_password:
         text += "⚠️ Не установлен пароль от «Мой налог»."
     else:
-        text += "✅ Всё готово к работе!"
+        text += "✅ Локальная конфигурация заполнена. Вход в ФНС не проверялся."
 
     kb = get_back_keyboard("admin_tax")
 
