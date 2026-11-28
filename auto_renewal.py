@@ -88,6 +88,13 @@ def open_payment(db, owner):
     return False
 
 
+def manual_attempt_pending(db, subscription_id):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='manual_renewal_attempts'").fetchone():
+        return False
+    return bool(db.execute("""SELECT 1 FROM manual_renewal_attempts
+        WHERE subscription_id=? AND state='reserved' LIMIT 1""",(subscription_id,)).fetchone())
+
+
 def begin_manual_attempt(path, checkout_id, owner, subscription_id):
     """Called under the same subscription lock, before provider creation.
 
@@ -95,6 +102,8 @@ def begin_manual_attempt(path, checkout_id, owner, subscription_id):
     automatic spending. This row never grants permission to retry a payment.
     """
     with transaction(path) as db:
+        if manual_attempt_pending(db,subscription_id):
+            raise ValueError("Manual renewal checkout awaits reconciliation")
         db.execute("""CREATE TABLE IF NOT EXISTS manual_renewal_attempts(
             checkout_id TEXT PRIMARY KEY, telegram_id INTEGER NOT NULL,
             subscription_id INTEGER NOT NULL,
