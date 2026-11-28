@@ -4,6 +4,7 @@
 from runtime_config import BACKUP_DIR, DB_PATH
 from balance_ledger import admin_adjust, rubles, kopecks
 from admin_form_navigation import begin as form_begin, step as form_step, retry as form_retry, finish as form_finish
+from admin_form_navigation import parent_for, back_keyboard, CONFIRM_TOKEN, callback_is_current, private_admin, FORM_SCREEN
 from screen_navigation import render_screen
 from contextlib import closing
 from html import escape
@@ -37,6 +38,7 @@ from states import (
     EditText,
     SendMessageToUser,
     AdminAddKey,
+    AdminExtendKey,
     EditTariff,
     AdminDeposit,
     AdminWithdraw
@@ -181,7 +183,7 @@ async def admin_list_keys_for_user(callback: types.CallbackQuery):
     buttons = []
 
     if not subs:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             "🔑 <b>У пользователя нет ключей</b>",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
                 [types.InlineKeyboardButton(text="➕ Добавить ключ", callback_data=f"user_add_key_{telegram_id}")],
@@ -204,7 +206,7 @@ async def admin_list_keys_for_user(callback: types.CallbackQuery):
     buttons.append([types.InlineKeyboardButton(text="➕ Добавить ключ", callback_data=f"user_add_key_{telegram_id}")])
     buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_back_to_{telegram_id}")])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"🔑 <b>Ключи пользователя</b>\n\nВыберите ключ для управления или добавьте новый:",
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
@@ -241,8 +243,8 @@ async def admin_key_detail(callback: types.CallbackQuery):
 
     text = (
         f"🔑 <b>Карточка ключа</b>\n\n"
-        f"📦 Тариф: {tariff_name}\n"
-        f"📧 Email: <code>{email}</code>\n"
+        f"📦 Тариф: {escape(tariff_name)}\n"
+        f"📧 Email: <code>{escape(email or '')}</code>\n"
         f"📅 Создан: {start_date[:10] if start_date else 'Неизвестно'}\n"
         f"📅 Истекает: {end_date[:10]}\n"
         f"⏳ Осталось: {days_left} дн.\n"
@@ -255,153 +257,91 @@ async def admin_key_detail(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад к ключам", callback_data=f"user_list_keys_{user_id}")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         text,
         reply_markup=kb,
         parse_mode="HTML"
     )
     await callback.answer()
 
+def admin_issue_tariff(tariff_id):
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        return db.execute("""SELECT id,name,price_rub,duration_days,traffic_gb,ip_limit FROM tariffs
+                             WHERE id=? AND is_active=1 AND duration_days>0""",(tariff_id,)).fetchone()
+
+
+def admin_issue_owner(user_id):
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        return bool(db.execute("SELECT 1 FROM users WHERE telegram_id=? AND is_blocked=0",(user_id,)).fetchone())
+
+
 @router.callback_query(F.data.startswith("user_add_key_"))
 async def admin_add_key_for_user(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
+    try:
+        user_id=int(callback.data.removeprefix("user_add_key_"))
+        if user_id<=0 or not admin_issue_owner(user_id):
+            raise ValueError
+    except ValueError:
+        await callback.answer("Пользователь недоступен",show_alert=True)
+        return
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        tariffs=db.execute("SELECT id,name,price_rub,duration_days FROM tariffs WHERE is_active=1 AND duration_days>0").fetchall()
+    if not tariffs:
+        await callback.answer("Нет доступных тарифов",show_alert=True)
+        return
+    kb=types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text=f"{t[1]} — {t[2]}₽ / {t[3]} дн.",
+            callback_data=f"admin_tariff_select_{t[0]}|{user_id}")] for t in tariffs])
+    extend_temp.pop(callback.from_user.id,None)
+    await form_begin(callback,state,AdminAddKey.tariff_id,
+        f"🔑 Выдача нового ключа пользователю {user_id}\nВыберите тариф:",fields={"user_id":user_id},keyboard=kb)
 
-    telegram_id = int(callback.data.replace("user_add_key_", ""))
-    await state.update_data(user_id=telegram_id)
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, name, price_rub, duration_days FROM tariffs WHERE is_active = 1')
-    tariffs = c.fetchall()
-    conn.close()
-
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(
-            text=f"{t[1]} — {t[2]}₽ / {t[3]} дн.",
-            callback_data=f"admin_tariff_select_{t[0]}|{telegram_id}"
-        )] for t in tariffs
-    ] + [[types.InlineKeyboardButton(text="🔙 Назад к карточке", callback_data=f"user_back_to_{telegram_id}")]])
-
-    await callback.message.edit_text(
-        "Выберите тариф для добавления:",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-    await state.set_state(AdminAddKey.tariff_id)
-    await callback.answer()
 
 @router.callback_query(F.data.startswith("admin_tariff_select_"))
 async def admin_add_key_tariff(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-
-    parts = callback.data.split("|")
-    tariff_id = int(parts[0].replace("admin_tariff_select_", ""))
-    user_id = int(parts[1]) if len(parts) > 1 else None
-
-    tariff = get_tariff_by_id(tariff_id)
-
-    if not tariff:
-        await callback.message.edit_text("❌ Тариф не найден")
-        await callback.answer()
+    data=await state.get_data()
+    try:
+        raw=callback.data.removeprefix("admin_tariff_select_").split("|")
+        tariff_id,user_id=map(int,raw)
+        if user_id!=data.get("user_id") or not admin_issue_owner(user_id):
+            raise ValueError
+    except ValueError:
+        await callback.answer("Выберите пользователя заново",show_alert=True)
         return
+    tariff=admin_issue_tariff(tariff_id)
+    if not tariff:
+        await callback.answer("Тариф недоступен",show_alert=True)
+        return
+    await form_begin(callback,state,AdminAddKey.days,
+        f"📦 Тариф: {tariff[1]}\n📅 Дней: {tariff[3]}\n\nВведите срок в днях или /skip для стандартного:",
+        fields={"user_id":user_id,"tariff_id":tariff_id,"tariff":tariff})
 
-    await state.update_data(tariff_id=tariff_id)
 
-    kb = get_back_keyboard(f"user_add_key_{user_id}")
-
-    await callback.message.edit_text(
-        f"📦 Тариф: {tariff[1]}\n"
-        f"📅 Дней: {tariff[3]}\n\n"
-        "Введите количество дней подписки\n"
-        "(или отправьте /skip для стандартного):",
-        reply_markup=kb
-    )
-    await state.set_state(AdminAddKey.days)
-    await callback.answer()
-
-# ============================================================
-# ИСПРАВЛЕНО: ИСПОЛЬЗУЕТ vpn_service
-# ============================================================
 @router.message(AdminAddKey.days)
 async def admin_add_key_days(message: types.Message, state: FSMContext):
-    if message.text == "/skip":
-        days = None
-    else:
-        try:
-            days = int(message.text)
-            if days <= 0:
-                await message.answer("❌ Введите положительное число:")
-                return
-        except ValueError:
-            await message.answer("❌ Введите число или /skip:")
-            return
-
-    data = await state.get_data()
-    user_id = data['user_id']
-    tariff_id = data['tariff_id']
-
-    tariff = get_tariff_by_id(tariff_id)
-
-    if not tariff:
-        await message.answer("❌ Тариф не найден")
-        await state.clear()
+    data=await state.get_data()
+    tariff=admin_issue_tariff(data["tariff_id"])
+    if not tariff or tuple(data["tariff"])!=tariff or not admin_issue_owner(data["user_id"]):
+        await form_finish(message,state,"Пользователь или тариф изменились. Откройте форму заново.")
         return
+    try:
+        days=tariff[3] if message.text=="/skip" else int(message.text)
+        if not 1<=days<=36500:
+            raise ValueError
+    except (ValueError,TypeError,OverflowError):
+        await form_retry(message,state,"❌ Введите целое число от 1 до 36500 или /skip.")
+        return
+    await form_step(message,state,AdminAddKey.confirm,
+        f"Подтвердите выдачу нового ключа\n\nПользователь: {data['user_id']}\n"
+        f"Тариф: {tariff[1]}\nСрок: {days} дн.\nТрафик: {tariff[4] or '∞'} ГБ\n"
+        f"Лимит IP: {tariff[5]}\n\nОплата не списывается.",days=days)
 
-    tariff_id, tariff_name, price, default_days, traffic_gb, ip_limit = tariff
-    days = days or default_days
-
-    # Используем vpn_service для создания подписки
-    result = await vpn_service.create_subscription(
-        telegram_id=user_id,
-        tariff_id=tariff_id,
-        days=days,
-        traffic_gb=traffic_gb,
-        ip_limit=ip_limit
-    )
-
-    if result['success']:
-        kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="🔙 Назад к карточке", callback_data=f"user_back_to_{user_id}")],
-            [types.InlineKeyboardButton(text="➕ Добавить еще ключ", callback_data=f"user_add_key_{user_id}")]
-        ])
-
-        await message.answer(
-            f"✅ <b>Ключ создан!</b>\n\n"
-            f"👤 Пользователь: {user_id}\n"
-            f"📦 Тариф: {tariff_name}\n"
-            f"📅 Дней: {days}\n"
-            f"📅 До: {result['end_date'].strftime('%d.%m.%Y')}\n\n"
-            f"🔗 <b>Ссылка:</b>\n"
-            f"<code>{result['link']}</code>",
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
-
-        try:
-            await message.bot.send_message(
-                chat_id=user_id,
-                text=f"🎉 <b>Администратор выдал вам ключ!</b>\n\n"
-                     f"📦 Тариф: {tariff_name}\n"
-                     f"📅 Действует до: {result['end_date'].strftime('%d.%m.%Y')}\n\n"
-                     f"🔗 <b>Ссылка для подключения:</b>\n"
-                     f"<code>{result['link']}</code>\n\n"
-                     f"Вставьте ссылку в приложение-клиент",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            logging.error(f"Failed to notify user: {e}")
-    else:
-        kb = get_back_keyboard(f"user_back_to_{user_id}")
-        await message.answer(
-            f"❌ Не удалось создать ключ: {result.get('error', 'Неизвестная ошибка')}",
-            reply_markup=kb
-        )
-
-    await state.clear()
 
 @router.callback_query(F.data.startswith("user_send_message_"))
 async def send_message_from_user_card(callback: types.CallbackQuery, state: FSMContext):
@@ -936,81 +876,112 @@ async def admin_delete_tariff_execute(callback: types.CallbackQuery):
 # АДМИН: ПРОДЛЕНИЕ КЛЮЧА (ИСПРАВЛЕНО: ИСПОЛЬЗУЕТ vpn_service)
 # ============================================================
 
+def admin_renew_target(sub_id):
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        return db.execute("""SELECT s.id,s.telegram_id,s.tariff_id,s.end_date,s.server_id,s.xui_client_uid,s.xui_subid
+            FROM subscriptions s JOIN users u ON u.telegram_id=s.telegram_id JOIN servers v ON v.id=s.server_id
+            WHERE s.id=? AND s.is_active=1 AND s.managed_by_vpn4us=1 AND u.is_blocked=0 AND v.is_active=1""",
+            (sub_id,)).fetchone()
+
+
 @router.callback_query(F.data.startswith("admin_extend_key_"))
-async def admin_extend_key_start(callback: types.CallbackQuery):
+async def admin_extend_key_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-
-    sub_id = int(callback.data.replace("admin_extend_key_", ""))
-    extend_temp[callback.from_user.id] = sub_id
-
-    await callback.message.answer(
-        "📅 <b>Продление ключа</b>\n\n"
-        "Введите количество дней для продления (числом):\n"
-        "(или отправьте 0 для отмены)",
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
     try:
-        await callback.message.delete()
-    except:
-        pass
-
-@router.message(lambda message: bool(message.from_user) and message.from_user.id == ADMIN_ID and message.from_user.id in extend_temp)
-async def admin_extend_key_process(message: types.Message):
-    if message.from_user.id not in extend_temp:
-        return
-
-    try:
-        days = int(message.text)
-        sub_id = extend_temp.pop(message.from_user.id)
-
-        if days <= 0:
-            await message.answer("❌ Операция отменена")
-            return
-
-        # Получаем информацию о подписке
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('SELECT end_date, xui_email, telegram_id, tariff_id FROM subscriptions WHERE id = ?', (sub_id,))
-        sub = c.fetchone()
-
-        if not sub:
-            await message.answer("❌ Подписка не найдена")
-            conn.close()
-            return
-
-        end_date, xui_email, user_id, tariff_id = sub
-
-        # Используем vpn_service для продления
-        result = await vpn_service.extend_subscription(
-            subscription_id=sub_id,
-            days_to_add=days,
-            tariff_id=tariff_id
-        )
-
-        if result['success']:
-            await message.answer(
-                f"✅ Ключ продлён на <b>{days} дн.</b>\n\n"
-                f"Новая дата: <b>{result['new_end_date'].strftime('%d.%m.%Y')}</b>",
-                parse_mode="HTML"
-            )
-        else:
-            await message.answer(
-                f"❌ Ошибка продления: {result.get('error', 'Неизвестная ошибка')}",
-                parse_mode="HTML"
-            )
-
-        conn.close()
-        await admin_list_keys_for_user_prepared(message, user_id)
-
+        sub_id=int(callback.data.removeprefix("admin_extend_key_"))
+        if sub_id<=0:
+            raise ValueError
     except ValueError:
-        await message.answer("❌ Введите число")
-    except Exception as e:
-        logging.error(f"❌ Ошибка продления: {e}")
-        await message.answer(f"❌ Ошибка: {e}")
+        await callback.answer("Некорректный ключ",show_alert=True)
+        return
+    target=admin_renew_target(sub_id)
+    if not target:
+        await callback.answer("Ключ недоступен для продления",show_alert=True)
+        return
+    extend_temp.pop(callback.from_user.id,None)
+    await form_begin(callback,state,AdminExtendKey.days,
+        f"📅 Продление ключа №{sub_id}\nПользователь: {target[1]}\nСрок до: {target[3][:10]}\n\n"
+        "Введите количество дней (или 0 для отмены):",
+        fields={"subscription_id":sub_id,"target":target})
+
+
+@router.message(AdminExtendKey.days)
+async def admin_extend_key_process(message: types.Message, state: FSMContext):
+    data=await state.get_data()
+    try:
+        days=int(message.text)
+        if not 0<=days<=36500:
+            raise ValueError
+    except (ValueError,TypeError,OverflowError):
+        await form_retry(message,state,"❌ Введите целое число от 1 до 36500.")
+        return
+    if days==0:
+        await form_finish(message,state,"Продление отменено.")
+        return
+    target=admin_renew_target(data["subscription_id"])
+    if not target or tuple(data["target"])!=target:
+        await form_finish(message,state,"Ключ изменился. Откройте карточку заново.")
+        return
+    await form_step(message,state,AdminExtendKey.confirm,
+        f"Подтвердите продление ключа №{target[0]}\n\nПользователь: {target[1]}\n"
+        f"Добавить: {days} дн.\n\nОплата не списывается.",days=days)
+
+
+@router.callback_query(F.data.startswith("admin_key_apply_"))
+async def admin_apply_key_operation(callback: types.CallbackQuery,state: FSMContext):
+    current=await state.get_state()
+    data=await state.get_data()
+    if (current not in (AdminAddKey.confirm.state,AdminExtendKey.confirm.state)
+            or not private_admin(callback,ADMIN_ID) or not callback_is_current(callback)
+            or data.get(FORM_SCREEN)!=getattr(callback.message,"message_id",None)
+            or callback.data!=data.get(CONFIRM_TOKEN)):
+        await callback.answer("Подтверждение устарело",show_alert=True)
+        return
+    parent=parent_for(current,data)
+    # One confirmation, one service attempt. Clear before any external mutation.
+    await state.clear()
+    await callback.answer()
+    days=data["days"]
+    if current==AdminAddKey.confirm.state:
+        user_id=data["user_id"]
+        tariff=admin_issue_tariff(data["tariff_id"])
+        if not tariff or tuple(data["tariff"])!=tariff or not admin_issue_owner(user_id):
+            result_text="Пользователь или тариф изменились. Откройте форму заново."
+        else:
+            try:
+                result=await vpn_service.create_subscription(telegram_id=user_id,tariff_id=tariff[0],days=days,
+                    traffic_gb=tariff[4],ip_limit=tariff[5],allow_additional_key=True)
+                if result.get("success"):
+                    date=result["end_date"].strftime("%d.%m.%Y")
+                    result_text=f"✅ Ключ создан!\nПользователь: {user_id}\nТариф: {tariff[1]}\nДо: {date}\n\n{result['link']}"
+                    try:
+                        await callback.bot.send_message(chat_id=user_id,
+                            text=f"🎉 <b>Администратор выдал вам ключ!</b>\n\n📦 Тариф: {escape(tariff[1])}\n"
+                                 f"📅 Действует до: {date}\n\n<code>{escape(result['link'])}</code>",
+                            parse_mode="HTML")
+                    except Exception:
+                        result_text+="\nНе удалось подтвердить доставку уведомления."
+                else:
+                    result_text="Выдача не подтверждена. Проверьте ключи и журнал выдачи перед повтором."
+            except Exception as exc:
+                logging.warning("Manual key issuance requires review: %s",type(exc).__name__)
+                result_text="Выдача не подтверждена. Проверьте ключи и журнал выдачи перед повтором."
+    else:
+        target=admin_renew_target(data["subscription_id"])
+        if not target or tuple(data["target"])!=target:
+            result_text="Ключ изменился. Откройте карточку заново."
+        else:
+            try:
+                result=await vpn_service.extend_subscription(subscription_id=target[0],days_to_add=days,tariff_id=target[2])
+                result_text=(f"✅ Ключ продлён на {days} дн.\nНовая дата: {result['new_end_date'].strftime('%d.%m.%Y')}"
+                    if result.get("success") else "Продление не подтверждено. Проверьте ключ и панель перед повтором.")
+            except Exception as exc:
+                logging.warning("Manual renewal requires review: %s",type(exc).__name__)
+                result_text="Продление не подтверждено. Проверьте ключ и панель перед повтором."
+    await render_screen(callback.message,result_text,reply_markup=back_keyboard(parent))
+
 
 async def admin_list_keys_for_user_prepared(message, user_id):
     conn = sqlite3.connect(DB_PATH)

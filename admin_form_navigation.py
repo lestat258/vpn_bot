@@ -5,7 +5,7 @@ existing routing until separately migrated.
 """
 import secrets
 from aiogram import BaseMiddleware, types
-from states import AddTariff, EditTariff, EditText, AddServer, SendMessageToUser
+from states import AddTariff, EditTariff, EditText, AddServer, SendMessageToUser, AdminAddKey, AdminExtendKey
 from aiogram.exceptions import TelegramAPIError
 from form_navigation import is_current_screen, menu_navigation, FORM_SCREEN
 from screen_navigation import render_screen, render_command, _key, _read
@@ -16,11 +16,19 @@ SELECT = EditTariff.tariff_id.state
 PARENTS.update({s.state: "admin_servers_menu" for s in AddServer.__all_states__})
 SEND = SendMessageToUser.message_text.state
 PARENTS[SEND] = "admin_users"
+ISSUE_SELECT=AdminAddKey.tariff_id.state
+SELECT_STATES={SELECT,ISSUE_SELECT}
+CONFIRM_STATES={AdminAddKey.confirm.state,AdminExtendKey.confirm.state}
+PARENTS.update({s.state:"admin_users" for s in (*AdminAddKey.__all_states__,*AdminExtendKey.__all_states__)})
 STARTS = {"admin_add_tariff", "admin_edit_tariff", "admin_add_server"}
 
 
 def parent_for(current, fields):
-    if current == SEND:
+    if current.startswith("AdminExtendKey:"):
+        sub=fields.get("subscription_id")
+        if type(sub) is int and sub>0:
+            return f"admin_key_detail_{sub}"
+    if current == SEND or current.startswith("AdminAddKey:"):
         user = fields.get("user_id")
         if type(user) is int and user > 0:
             return f"user_back_to_{user}"
@@ -29,13 +37,16 @@ PROMPT = "admin_form_prompt"
 HISTORY = "admin_form_history"
 BACK_TOKEN = "admin_form_back"
 SELECT_KEYBOARD = "admin_form_select_keyboard"
-STATES = {s.state:s for group in (AddTariff,EditTariff,EditText,AddServer,SendMessageToUser)
+CONFIRM_TOKEN = "admin_form_confirm_token"
+STATES = {s.state:s for group in (AddTariff,EditTariff,EditText,AddServer,SendMessageToUser,AdminAddKey,AdminExtendKey)
           for s in group.__all_states__}
 INPUT_FIELDS = {
     s.state:k for group,keys in (
         (AddTariff,("name","price","days","traffic","ip_limit")),
         (EditTariff,("tariff_id","name","price","days","traffic","ip_limit")),
         (AddServer,("name","url")),
+        (AdminAddKey,("user_id","tariff_id","days")),
+        (AdminExtendKey,("days",)),
     ) for s,k in zip(group.__all_states__,keys)
 }
 
@@ -45,7 +56,9 @@ def active_keyboard(current,fields):
     buttons=[]
     if fields.get(HISTORY):
         buttons.append([types.InlineKeyboardButton(text="🔙 Назад",callback_data=fields[BACK_TOKEN])])
-    if current==SELECT and fields.get(SELECT_KEYBOARD):
+    if current in CONFIRM_STATES:
+        buttons.insert(0,[types.InlineKeyboardButton(text="✅ Подтвердить",callback_data=fields[CONFIRM_TOKEN])])
+    if current in SELECT_STATES and fields.get(SELECT_KEYBOARD):
         for row in fields[SELECT_KEYBOARD]["inline_keyboard"]:
             buttons.append([types.InlineKeyboardButton(**b) for b in row
                             if b.get("callback_data")!=parent])
@@ -64,7 +77,7 @@ def new_back_token(fields):
 
 def snapshot(current,fields):
     return {"state":current,"data":{k:v for k,v in fields.items()
-            if k not in (HISTORY,BACK_TOKEN,FORM_SCREEN)}}
+            if k not in (HISTORY,BACK_TOKEN,FORM_SCREEN,CONFIRM_TOKEN)}}
 
 
 async def go_back(callback,state,current,fields):
@@ -77,7 +90,7 @@ async def go_back(callback,state,current,fields):
     restored={**frame["data"],HISTORY:history[:-1]}
     field=INPUT_FIELDS.get(previous)
     prompt=restored[PROMPT]
-    if previous!=SELECT and field and field in fields:
+    if previous not in SELECT_STATES and field and field in fields:
         restored[field]=fields[field]
         value=str(fields[field])[:500]
         prompt+=f"\n\nРанее введено: {value}\nВведите значение заново."
@@ -126,7 +139,8 @@ async def begin(callback, state, target, text, *, fields=None, keyboard=None):
     current=await state.get_state()
     old=await state.get_data()
     data={**(fields or {}),PROMPT:text,HISTORY:[]}
-    if current==SELECT and target.state==EditTariff.name.state:
+    if ((current==SELECT and target.state==EditTariff.name.state)
+            or (current==ISSUE_SELECT and target.state==AdminAddKey.days.state)):
         data[HISTORY]=[*old.get(HISTORY,[]),snapshot(current,old)]
     if keyboard is not None:
         data[SELECT_KEYBOARD]=keyboard.model_dump(exclude_none=True)
@@ -143,6 +157,8 @@ async def step(message, state, target, text, **fields):
     current=await state.get_state()
     old=await state.get_data()
     data={**old,**fields,PROMPT:text,HISTORY:[*old.get(HISTORY,[]),snapshot(current,old)]}
+    if target.state in CONFIRM_STATES:
+        data[CONFIRM_TOKEN]="admin_key_apply_"+secrets.token_hex(12)
     new_back_token(data)
     await render_command(message,text,reply_markup=active_keyboard(target.state,data))
     data[FORM_SCREEN]=tracked_id(message,command=True)
@@ -181,10 +197,10 @@ class AdminFormNavigation(BaseMiddleware):
         callback = hasattr(event, "data") and hasattr(event, "message")
         if callback:
             value = event.data or ""
-            select = value.startswith("admin_edit_tariff_select_")
-            start = value in STARTS or value.startswith(("edittext_", "user_send_message_"))
+            select = value.startswith(("admin_edit_tariff_select_","admin_tariff_select_"))
+            start = value in STARTS or value.startswith(("edittext_", "user_send_message_","user_add_key_","admin_extend_key_"))
             if current not in PARENTS:
-                if value.startswith("admin_form_back_"):
+                if value.startswith(("admin_form_back_","admin_key_apply_")):
                     await event.answer("Форма уже закрыта. Откройте её заново.",show_alert=True)
                     return
                 if start or select:
@@ -210,7 +226,9 @@ class AdminFormNavigation(BaseMiddleware):
                 await state.clear()
                 data["raw_state"] = None
                 return await handler(event, data)
-            if current == SELECT and select:
+            if ((current==SELECT and value.startswith("admin_edit_tariff_select_"))
+                    or (current==ISSUE_SELECT and value.startswith("admin_tariff_select_"))
+                    or (current in CONFIRM_STATES and value==fields.get(CONFIRM_TOKEN))):
                 return await handler(event, data)
             await event.answer("Завершите ввод или нажмите «Отмена».", show_alert=True)
             return
@@ -232,13 +250,13 @@ class AdminFormNavigation(BaseMiddleware):
         if text == "/cancel":
             await finish(event, state, "Ввод отменён. Изменения не сохранены.", clean_cancel=True)
             return
-        if current == SELECT:
-            await event.answer("Выберите тариф кнопкой или отправьте /cancel.")
+        if current in SELECT_STATES or current in CONFIRM_STATES:
+            await event.answer("Используйте кнопки формы или отправьте /cancel.")
             return
         if not isinstance(text, str) or not text.strip():
             await retry(event, state, "❌ Отправьте текст.")
             return
-        if text.startswith("/") and not (text == "/skip" and current.startswith("EditTariff:")):
+        if text.startswith("/") and not (text == "/skip" and (current.startswith("EditTariff:") or current==AdminAddKey.days.state)):
             await retry(event, state, "❌ Команда не относится к этой форме.")
             return
         return await handler(event, data)
