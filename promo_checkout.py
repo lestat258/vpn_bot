@@ -41,11 +41,11 @@ def payment_link(payment):
 def create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,username,*,action="new_key",subscription_id=None,full_price_token=None):
     if action == "renew":
         from subscription_renewal import renewal_lock
-        from auto_renewal import pending
+        from auto_renewal import pending, manual_attempt_pending
         with renewal_lock(path,subscription_id):
             with closing(sqlite3.connect(path)) as db:
-                if pending(db,subscription_id):
-                    raise ReservationBusy("Automatic renewal awaits reconciliation")
+                if pending(db,subscription_id) or manual_attempt_pending(db,subscription_id):
+                    raise ReservationBusy("Renewal awaits reconciliation")
             return _create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,username,
                                     action=action,subscription_id=subscription_id,full_price_token=full_price_token)
     return _create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,username,
