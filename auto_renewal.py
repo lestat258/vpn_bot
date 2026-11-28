@@ -32,8 +32,10 @@ def activated():
 
 
 def enabled(db):
+    if not activated():
+        return False
     row = db.execute("SELECT value FROM settings WHERE key='auto_renew_enabled'").fetchone()
-    return activated() and row is not None and row[0] == "true"
+    return row is not None and row[0] == "true"
 
 
 def expiry_ms(value):
@@ -75,11 +77,39 @@ def open_payment(db, owner):
         (p.status='pending' OR j.vpn_state IN ('processing','needs_review')) LIMIT 1""",
         (owner,)).fetchone():
         return True
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='manual_renewal_attempts'").fetchone():
+        if db.execute("""SELECT 1 FROM manual_renewal_attempts
+            WHERE telegram_id=? AND state='reserved' LIMIT 1""",(owner,)).fetchone():
+            return True
     if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='promo_reservations'").fetchone():
         return bool(db.execute("""SELECT 1 FROM promo_reservations
             WHERE telegram_id=? AND action='renew' AND state IN ('reserved','attached') LIMIT 1""",
             (owner,)).fetchone())
     return False
+
+
+def begin_manual_attempt(path, checkout_id, owner, subscription_id):
+    """Called under the same subscription lock, before provider creation.
+
+    An ambiguous provider call with no local payment row must still block
+    automatic spending. This row never grants permission to retry a payment.
+    """
+    with transaction(path) as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS manual_renewal_attempts(
+            checkout_id TEXT PRIMARY KEY, telegram_id INTEGER NOT NULL,
+            subscription_id INTEGER NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('reserved','registered')),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        db.execute("""INSERT INTO manual_renewal_attempts(checkout_id,telegram_id,subscription_id,state)
+            VALUES(?,?,?,'reserved')""",(checkout_id,owner,subscription_id))
+
+
+def finish_manual_attempt(path, checkout_id):
+    with transaction(path) as db:
+        row = db.execute("""UPDATE manual_renewal_attempts SET state='registered'
+            WHERE checkout_id=? AND state='reserved'""",(checkout_id,))
+        if row.rowcount != 1:
+            raise ValueError("Manual renewal checkout requires reconciliation")
 
 
 def candidates(path, now):
@@ -159,6 +189,11 @@ def review(path, operation_id):
 
 
 def process_one(path, candidate, api_factory, *, clock=None):
+    if not activated():
+        raise ValueError("Automatic renewal not activated")
+    with closing(sqlite3.connect(path)) as db:
+        if not enabled(db):
+            raise ValueError("Automatic renewal disabled")
     from subscription_renewal import renew_subscription
     return renew_subscription(path,candidate.subscription_id,candidate.days,candidate.tariff_id,
                               api_factory,clock=clock,auto=candidate)
