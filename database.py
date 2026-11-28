@@ -334,12 +334,41 @@ def init_db():
         # Запускаем миграции
         run_migrations()
         
+        _init_vpn_issue_schema()
+
         logger.info("✅ База данных инициализирована")
         return True
         
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации БД: {e}")
         raise
+
+def _init_vpn_issue_schema():
+    from vpn_issue_journal import ensure_schema
+
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(subscriptions)")}
+        for name, definition in (
+            ("server_id", "INTEGER REFERENCES servers(id)"),
+            ("managed_by_vpn4us", "INTEGER NOT NULL DEFAULT 0"),
+            ("xui_subid", "TEXT"),
+        ):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {name} {definition}")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS subscription_inbound_memberships (
+                subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+                server_id INTEGER NOT NULL REFERENCES servers(id),
+                inbound_id INTEGER NOT NULL,
+                verified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (subscription_id, server_id, inbound_id)
+            )
+        """)
+
+    with get_db() as conn:
+        ensure_schema(conn)
+
 
 def _create_tables():
     """Создает все таблицы, если они не существуют"""
@@ -384,6 +413,22 @@ def _create_tables():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
         
+        c.execute('''CREATE TABLE IF NOT EXISTS payment_processing (
+            payment_id TEXT PRIMARY KEY,
+            is_legacy INTEGER NOT NULL DEFAULT 0,
+            payment_state TEXT NOT NULL DEFAULT 'pending',
+            vpn_state TEXT NOT NULL DEFAULT 'not_started',
+            tax_state TEXT NOT NULL DEFAULT 'not_started',
+            refund_state TEXT NOT NULL DEFAULT 'none',
+            subscription_id INTEGER,
+            receipt_uuid TEXT UNIQUE,
+            receipt_url TEXT,
+            last_error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(payment_id) REFERENCES payments(payment_id)
+        )''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id INTEGER NOT NULL,

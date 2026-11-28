@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 from refund_fulfillment import CUTOFF, LAST_HISTORICAL_ID
+from balance_ledger import deposit_scope_sql
 
 PAGE_SIZE = 50
 FILTERS = {
@@ -13,7 +14,7 @@ FILTERS = {
     "refund": "Возвраты", "review": "Требуют сверки",
     "historical": "Исторические",
 }
-NEW = "(p.id > ? AND datetime(p.created_at) >= datetime(?) AND p.amount_rub > 0)"
+NEW = "(p.id > ? AND datetime(p.created_at) >= datetime(?) AND p.amount_rub > 0 AND p.tariff_id<>0)"
 REVIEW = """(j.vpn_state IN ('needs_review','processing')
  OR j.tax_state IN ('needs_review','processing')
  OR j.refund_state IN ('partial_review','full_review','full_processing'))"""
@@ -77,7 +78,7 @@ def load_journal(path, selected="all", page=1):
         page = 1
     cte = """WITH journal AS (
         SELECT p.id,p.amount_rub,p.status,p.created_at,
-          u.first_name AS customer,t.name AS tariff,
+          p.tariff_id,u.first_name AS customer,CASE WHEN p.tariff_id=0 THEN 'Пополнение баланса' ELSE t.name END AS tariff,
           j.payment_state,j.vpn_state,j.tax_state,j.refund_state,
           j.subscription_id,j.receipt_uuid,j.receipt_url,
           CASE WHEN """ + NEW + """ THEN 1 ELSE 0 END AS is_new,
@@ -93,6 +94,7 @@ def load_journal(path, selected="all", page=1):
         db.row_factory=sqlite3.Row
         db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
+        cte=cte.replace(NEW,"("+NEW+" OR "+deposit_scope_sql(db)+")")
         stats = dict(db.execute(cte+"""
             SELECT COUNT(*) AS total,
               COALESCE(SUM(CASE WHEN status='paid' AND amount_rub>0 THEN amount_rub ELSE 0 END),0) AS gross,
@@ -114,6 +116,8 @@ def load_journal(path, selected="all", page=1):
             for group,key in (("payment","status"),("provider","payment_state"),("vpn","vpn_state"),
                               ("tax","tax_state"),("refund","refund_state")):
                 row[group+"_display"]=status_display(group,row[key])
+            if row["tariff_id"] == 0 and row["vpn_state"] == "done":
+                row["vpn_display"] = {"label":"Зачислено","style":"success"}
             if row["refund_state"] == "full_done":
                 row["payment_display"] = status_display("payment", "returned")
             row["display_date"] = display_date(row["created_at"], row["is_new"])

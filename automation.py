@@ -208,77 +208,14 @@ class AutomationManager:
             logger.error(f"Ошибка сохранения уведомления: {e}")
     
     async def auto_renew_subscriptions(self):
-        """Авто-продление подписок (если включено)"""
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        # Проверяем, включено ли авто-продление
-        c.execute("SELECT value FROM settings WHERE key = 'auto_renew_enabled'")
-        auto_renew = c.fetchone()
-        if not auto_renew or auto_renew[0] != 'true':
-            conn.close()
-            return
-        
-        # Подписки, которые истекают сегодня и у которых есть авто-продление
-        c.execute('''
-            SELECT s.id, s.telegram_id, s.tariff_id, s.end_date, t.price_rub
-            FROM subscriptions s
-            JOIN tariffs t ON t.id = s.tariff_id
-            WHERE s.is_active = 1 
-            AND date(s.end_date) = date('now')
-            AND s.auto_renew = 1
-        ''')
-        renewals = c.fetchall()
-        conn.close()
-        
-        for sub in renewals:
-            sub_id, telegram_id, tariff_id, end_date, price = sub
-            
-            # Проверяем, есть ли у пользователя баланс
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            c.execute('SELECT balance FROM users WHERE telegram_id = ?', (telegram_id,))
-            user = c.fetchone()
-            conn.close()
-            
-            if user and user[0] >= price:
-                # Списываем деньги
-                conn = sqlite3.connect(self.db_path)
-                c = conn.cursor()
-                c.execute('UPDATE users SET balance = balance - ? WHERE telegram_id = ?', (price, telegram_id))
-                
-                # Продлеваем подписку
-                new_end_date = datetime.fromisoformat(end_date) + timedelta(days=30)
-                c.execute('''
-                    UPDATE subscriptions 
-                    SET end_date = ?, is_active = 1
-                    WHERE id = ?
-                ''', (new_end_date.isoformat(), sub_id))
-                conn.commit()
-                conn.close()
-                
-                # Уведомляем пользователя
-                await self.init_bot()
-                if self.bot:
-                    await self.send_notification(
-                        telegram_id,
-                        f"✅ <b>Подписка продлена!</b>\n\n"
-                        f"💰 С вашего баланса списано {price:.0f}₽\n"
-                        f"📅 Новая дата окончания: {new_end_date.strftime('%d.%m.%Y')}\n\n"
-                        f"Спасибо, что остаётесь с нами! 🚀"
-                    )
-                logger.info(f"✅ Подписка {sub_id} продлена для пользователя {telegram_id}")
-            else:
-                # Недостаточно средств
-                await self.init_bot()
-                if self.bot:
-                    await self.send_notification(
-                        telegram_id,
-                        f"⚠️ <b>Недостаточно средств для продления!</b>\n\n"
-                        f"На вашем балансе недостаточно средств для авто-продления.\n"
-                        f"Пополните баланс в разделе «👤 Профиль»."
-                    )
-                logger.warning(f"⚠️ Недостаточно средств у пользователя {telegram_id} для продления")
+        """Use the same guarded worker as every other automatic entry point."""
+        from auto_renew import AutoRenewManager
+        manager = AutoRenewManager(db_path=self.db_path, bot=self.bot)
+        try:
+            await manager.process_renewals()
+        finally:
+            if self.bot is None:
+                self.bot = manager.bot
 
     async def run_automation(self):
         """Запуск автоматизации"""

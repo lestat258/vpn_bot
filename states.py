@@ -22,6 +22,11 @@ class AdminAddKey(StatesGroup):
     user_id = State()
     tariff_id = State()
     days = State()
+    confirm = State()
+
+class AdminExtendKey(StatesGroup):
+    days = State()
+    confirm = State()
 
 class SendMessageToUser(StatesGroup):
     user_id = State()
@@ -41,10 +46,12 @@ class EditTariff(StatesGroup):
 class AdminDeposit(StatesGroup):
     amount = State()
     user_id = State()
+    confirm = State()
 
 class AdminWithdraw(StatesGroup):
     amount = State()
     user_id = State()
+    confirm = State()
 
 class AdminAddKeyForUser(StatesGroup):
     user_id = State()

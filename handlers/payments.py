@@ -2,8 +2,17 @@
 Обработчики платежей и тарифов
 """
 from runtime_config import DB_PATH
+from screen_navigation import render_screen
+from html import escape
+from subscription_renewal import renewable_subscriptions, renewal_tariff, expiry_presentation
 import logging
+import asyncio
 import sqlite3
+from promo_checkout import create_checkout, request_key, check_open_checkout
+from promo_reservations import (ReservationBusy, ZeroPayable, archive_info, set_archived,
+    prepare_full_price, full_price_details)
+from balance_ledger import rubles, kopecks
+from form_navigation import is_current_screen
 from datetime import datetime, timedelta
 from aiogram import Router, types, F, Bot
 
@@ -96,7 +105,7 @@ async def process_tariff(callback: types.CallbackQuery):
     # ============ ПРОВЕРКА НА ПРОБНЫЙ ТАРИФ ============
     if price == 0 and ('Пробный' in name or 'Тестовый' in name):
         if has_used_trial(callback.from_user.id):
-            await callback.message.answer(
+            await render_screen(callback.message, 
                 "❌ Вы уже использовали пробный доступ.\n\n"
                 "Для продолжения выберите платный тариф в разделе «📋 Купить ключ».",
                 reply_markup=get_tariffs_keyboard(),
@@ -109,8 +118,8 @@ async def process_tariff(callback: types.CallbackQuery):
         return
 
     # ============ ПРОВЕРКА НА АКТИВНУЮ ПОДПИСКУ ============
-    active_subs = get_active_subscriptions(callback.from_user.id)
-    logging.info(f"🔍 Найдено активных подписок: {len(active_subs)}")
+    active_subs = renewable_subscriptions(DB_PATH, callback.from_user.id)
+    logging.info(f"🔍 Найдено ключей для продления: {len(active_subs)}")
 
     # ============ ПОКАЗЫВАЕМ ДВЕ КНОПКИ ============
     if active_subs and price > 0:
@@ -126,9 +135,9 @@ async def process_tariff(callback: types.CallbackQuery):
             [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_tariffs")]
         ])
 
-        await callback.message.answer(
+        await render_screen(callback.message, 
             f"📋 <b>{name}</b>\n\n"
-            f"У вас уже есть активная подписка.\n"
+            f"У вас уже есть ключ.\n"
             f"Выберите действие:",
             reply_markup=kb,
             parse_mode="HTML"
@@ -148,20 +157,20 @@ async def handle_renew_select(callback: types.CallbackQuery):
     """Показывает список активных подписок для выбора, какую продлить"""
     tariff_id = int(callback.data.split("_")[2])
 
-    tariff = get_tariff_by_id(tariff_id)
+    tariff = renewal_tariff(DB_PATH, tariff_id)
 
     if not tariff:
-        await callback.message.answer("❌ Тариф не найден", parse_mode="HTML")
+        await render_screen(callback.message, "❌ Тариф не найден", parse_mode="HTML")
         await callback.answer()
         return
 
     tariff_id, name, price, days, traffic_gb, ip_limit = tariff
 
-    active_subs = get_active_subscriptions(callback.from_user.id)
+    active_subs = renewable_subscriptions(DB_PATH, callback.from_user.id)
 
     if not active_subs:
-        await callback.message.answer(
-            "❌ У вас нет активных подписок для продления.\n\n"
+        await render_screen(callback.message, 
+            "❌ У вас нет доступных подписок для продления.\n\n"
             "Вы можете купить новый ключ.",
             reply_markup=get_tariffs_keyboard(),
             parse_mode="HTML"
@@ -171,11 +180,11 @@ async def handle_renew_select(callback: types.CallbackQuery):
 
     buttons = []
     for sub in active_subs:
-        sub_id, tariff_id_sub, xui_email, end_date, tariff_name_sub = sub
-        days_left = (datetime.fromisoformat(end_date) - datetime.now()).days
-        status = "🔴" if days_left <= 0 else "🟢"
+        sub_id, end_date, tariff_name_sub = sub
+        current, date_label, _ = expiry_presentation(end_date)
+        status = "🟢" if current else "🔴"
         buttons.append([types.InlineKeyboardButton(
-            text=f"{status} {tariff_name_sub} (до {end_date[:10]}, {days_left} дн.)",
+            text=f"{status} №{sub_id} {tariff_name_sub} ({'до' if current else 'истёк'} {date_label})",
             callback_data=f"renew_choose_{tariff_id}_{sub_id}"
         )])
 
@@ -186,9 +195,9 @@ async def handle_renew_select(callback: types.CallbackQuery):
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    await callback.message.answer(
+    await render_screen(callback.message, 
         f"📋 <b>Выберите подписку для продления</b>\n\n"
-        f"Выберите, какую из активных подписок вы хотите продлить:",
+        f"Выберите, какую подписку вы хотите продлить:",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -198,34 +207,33 @@ async def handle_renew_select(callback: types.CallbackQuery):
 # ОБРАБОТЧИК ВЫБОРА КОНКРЕТНОЙ ПОДПИСКИ
 # ============================================================
 
+async def checkout_renewal(callback, *, direct):
+    prefix = "extend_tariff_" if direct else "renew_choose_"
+    try:
+        a,b = callback.data.removeprefix(prefix).split("_")
+        tariff_id,subscription_id = int(a),int(b)
+        if min(tariff_id,subscription_id)<=0:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Некорректный выбор", show_alert=True)
+        return
+    tariff = renewal_tariff(DB_PATH, tariff_id)
+    if not tariff or not renewable_subscriptions(DB_PATH,callback.from_user.id,subscription_id):
+        await callback.answer("Продление недоступно. Выберите ключ и тариф заново.",show_alert=True)
+        return
+    await process_payment(callback,*tariff,action="renew",subscription_id=subscription_id,
+        back_to=f"renew_from_key_{subscription_id}" if direct else f"renew_select_{tariff_id}")
+
+
+@router.callback_query(F.data.startswith("extend_tariff_"))
+async def handle_direct_renewal(callback: types.CallbackQuery):
+    await checkout_renewal(callback,direct=True)
+
+
 @router.callback_query(F.data.startswith("renew_choose_"))
 async def handle_renew_choose(callback: types.CallbackQuery):
-    """Обработчик выбора конкретной подписки для продления"""
-    parts = callback.data.split("_")
-    tariff_id = int(parts[2])
-    subscription_id = int(parts[3])
+    await checkout_renewal(callback,direct=False)
 
-    tariff = get_tariff_by_id(tariff_id)
-
-    if not tariff:
-        await callback.message.answer("❌ Тариф не найден", parse_mode="HTML")
-        await callback.answer()
-        return
-
-    tariff_id, name, price, days, traffic_gb, ip_limit = tariff
-
-    await process_payment(
-        callback,
-        tariff_id,
-        name,
-        price,
-        days,
-        traffic_gb,
-        ip_limit,
-        action='renew',
-        subscription_id=subscription_id,
-        back_to=f'renew_select_{tariff_id}'
-    )
 
 # ============================================================
 # ОБРАБОТЧИК ПОКУПКИ НОВОГО КЛЮЧА
@@ -239,7 +247,7 @@ async def handle_new_key(callback: types.CallbackQuery):
     tariff = get_tariff_by_id(tariff_id)
 
     if not tariff:
-        await callback.message.answer("❌ Тариф не найден", parse_mode="HTML")
+        await render_screen(callback.message, "❌ Тариф не найден", parse_mode="HTML")
         await callback.answer()
         return
 
@@ -324,121 +332,166 @@ async def create_free_subscription(callback, tariff_id, name, days, traffic_gb, 
 # ОБРАБОТКА ПЛАТЕЖА
 # ============================================================
 
-async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip_limit, action='new_key', subscription_id=None, back_to='back_to_tariffs'):
+async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip_limit, action='new_key', subscription_id=None, back_to='back_to_tariffs', full_price_token=None):
     """Обрабатывает создание платежа"""
-    discount_percent, discount_amount = get_promocode_discount(callback.from_user.id)
-    applied_promo = get_applied_promocode(callback.from_user.id)
-
-    final_price = price
-    applied_discount = 0
-    promo_code = None
-
-    if applied_promo:
-        final_price, applied_discount = apply_discount(price, applied_promo)
-        promo_code = applied_promo['code']
-        logging.info(f"💰 Применён промокод {promo_code}: скидка {applied_discount:.2f}₽")
-
-    if discount_percent > 0:
-        promo_discount = price * discount_percent / 100
-        if promo_discount > applied_discount:
-            final_price = price * (100 - discount_percent) / 100
-            applied_discount = promo_discount
-            promo_code = None
-    elif discount_amount > 0:
-        if discount_amount > applied_discount:
-            final_price = max(0, price - discount_amount)
-            applied_discount = discount_amount
-            promo_code = None
-
-    logging.info(f"💰 Цена: {price}, Скидка: {discount_percent}% / {discount_amount}₽, Итог: {final_price:.2f}")
-
+    target_text = ""
+    if action == "renew":
+        rows = renewable_subscriptions(DB_PATH, callback.from_user.id, subscription_id) if subscription_id is not None else []
+        if not rows or renewal_tariff(DB_PATH, tariff_id) != (tariff_id,name,price,days,traffic_gb,ip_limit):
+            await callback.answer("Продление недоступно", show_alert=True)
+            return
+        target_id, end_date, target_name = rows[0]
+        current,date_label,_ = expiry_presentation(end_date)
+        target_text = f"🔑 Продление ключа №{target_id}: {escape(target_name)} ({'до' if current else 'истёк'} {date_label})\n"
     try:
-        bot_username = (await callback.bot.get_me()).username
-        if not bot_username:
-            raise RuntimeError("Telegram bot username unavailable for payment return URL")
-        payment = Payment.create({
-            "amount": {"value": f"{final_price:.2f}", "currency": "RUB"},
-            "confirmation": {"type": "redirect", "return_url": f"https://t.me/{bot_username}"},
-            "capture": True,
-            "description": f"VPN {name}" + (f" (скидка {applied_discount:.2f}₽)" if applied_discount > 0 else ""),
-            "metadata": {
-                "telegram_id": callback.from_user.id,
-                "tariff_id": tariff_id,
-                "action": action,
-                "subscription_id": subscription_id if action == 'renew' else None,
-                "original_price": price,
-                "discount_amount": applied_discount,
-                "discount_percent": discount_percent,
-                "promocode": promo_code,
-                "applied_promocode_id": applied_promo['id'] if applied_promo else None
-            }
-        })
+        username = (await callback.bot.get_me()).username
+        if not username:
+            raise RuntimeError("Telegram bot username unavailable")
+        amount, discount, url = await asyncio.to_thread(
+            create_checkout, DB_PATH, Payment, request_key(callback.bot.id, full_price_token or callback.id),
+            callback.from_user.id, tariff_id, name, price, username,
+            action=action, subscription_id=subscription_id, full_price_token=full_price_token)
+        buttons = []
+        if url:
+            buttons.append([types.InlineKeyboardButton(text=f"💳 Оплатить {rubles(amount):.2f} ₽",url=url)])
+        elif discount:
+            buttons.append([types.InlineKeyboardButton(text="Проверить счёт",callback_data="promo_pending")])
+        buttons.append([types.InlineKeyboardButton(text="🔙 Назад",callback_data=back_to)])
+        kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+        text = f"📋 <b>{escape(name)}</b>\n" + target_text + f"💰 {price:.2f} ₽"
+        if full_price_token:
+            text += "\nНовый счёт без скидки. Отложенный счёт остаётся действующим до отмены ЮKassa."
+        if discount:
+            text += f" → <b>{rubles(amount):.2f} ₽</b> (скидка {rubles(discount):.2f} ₽)"
+            text += "\nПромокод зарезервирован до подтверждения или отмены оплаты."
+        text += f"\n📅 {days} дней\n\n"
+        text += "Нажмите кнопку для оплаты:" if url else "Ссылка недоступна. Проверьте счёт или обратитесь в поддержку."
+        await render_screen(callback.message,text,reply_markup=kb,parse_mode="HTML")
+    except ReservationBusy:
+        token=await asyncio.to_thread(prepare_full_price,DB_PATH,callback.from_user.id,
+                                      tariff_id,price,action,subscription_id)
+        buttons=[]
+        if token:
+            text=(f"📋 <b>{escape(name)}</b>\n"+target_text
+                  + f"💰 <b>{price:.2f} ₽</b> без скидки\n\n"
+                  "Скидка остаётся в отложенном счёте. Старую ссылку всё ещё можно оплатить; "
+                  "если оплатить оба счёта, будут обработаны обе покупки.\n\n"
+                  "Создать отдельный счёт за полную стоимость?")
+            buttons.append([types.InlineKeyboardButton(text=f"Подтвердить {price:.2f} ₽ без скидки",
+                callback_data=f"promo_full_{token}")])
+        else:
+            text="У вас уже есть счёт с зарезервированной скидкой. Проверьте его или отложите, чтобы выбрать другой тариф."
+        buttons.append([types.InlineKeyboardButton(text="Проверить ожидающий счёт",callback_data="promo_pending")])
+        buttons.append([types.InlineKeyboardButton(text="🔙 Назад",callback_data=back_to)])
+        await render_screen(callback.message,text,reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),parse_mode="HTML")
+    except ZeroPayable:
+        await callback.answer("Нулевая сумма не поддерживается. Обратитесь в поддержку.",show_alert=True)
+        return
+    except Exception as exc:
+        logging.error("Checkout requires review: %s",type(exc).__name__)
+        kb=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="Проверить ожидающий счёт",callback_data="promo_pending")],
+            [types.InlineKeyboardButton(text="🔙 Назад",callback_data=back_to)]])
+        await render_screen(callback.message,"Не удалось подтвердить создание счёта. Проверьте ожидающий счёт или обратитесь в поддержку.",reply_markup=kb)
+    await callback.answer()
 
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('INSERT INTO payments (payment_id, telegram_id, tariff_id, amount_rub, status) VALUES (?,?,?,?,?)',
-                  (payment.id, callback.from_user.id, tariff_id, final_price, 'pending'))
-        conn.commit()
-        conn.close()
 
-        set_setting(f'promocode_user_{callback.from_user.id}', '')
+def current_checkout_button(callback):
+    """Require the action to be displayed on the current bot screen."""
+    message=callback.message
+    if not is_current_screen(message,getattr(message,"message_id",None)):
+        return False
+    markup=getattr(message,"reply_markup",None)
+    return any(b.callback_data==callback.data for row in getattr(markup,"inline_keyboard",[]) for b in row)
 
-        kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text=f"💳 Оплатить {final_price:.0f}₽", url=payment.confirmation.confirmation_url)],
-            [types.InlineKeyboardButton(text="🔙 Назад", callback_data=back_to)]
-        ])
 
-        await callback.message.answer(
-            f"📋 <b>{name}</b>\n"
-            f"💰 {price:.0f}₽"
-            + (f" → <b>{final_price:.0f}₽</b> (скидка {discount_percent}%)" if discount_percent > 0 or discount_amount > 0 else "")
-            + f"\n📅 {days} дней\n\n"
-            "Нажмите кнопку для оплаты:",
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logging.error(f"Payment error: {e}")
-        await callback.message.answer(
-            f"❌ Ошибка при создании платежа: {e}\n\n"
-            "Попробуйте позже или обратитесь в поддержку.",
-            parse_mode="HTML"
-        )
+@router.callback_query(F.data.startswith("promo_full_"))
+async def confirm_full_price(callback: types.CallbackQuery):
+    token=callback.data.removeprefix("promo_full_")
+    if not current_checkout_button(callback):
+        await callback.answer("Выберите тариф заново.",show_alert=True)
+        return
+    details=await asyncio.to_thread(full_price_details,DB_PATH,token,callback.from_user.id)
+    if not details:
+        await callback.answer("Подтверждение устарело. Выберите тариф заново.",show_alert=True)
+        return
+    tariff=renewal_tariff(DB_PATH,details["tariff_id"])
+    if not tariff or kopecks(tariff[2])!=details["original_kopecks"]:
+        await callback.answer("Тариф или стоимость изменились. Выберите заново.",show_alert=True)
+        return
+    subscription_id=details["subscription_id"]
+    await process_payment(callback,*tariff,action=details["action"],subscription_id=subscription_id,
+        back_to=f"renew_from_key_{subscription_id}" if subscription_id else "back_to_tariffs",
+        full_price_token=token)
 
+
+@router.callback_query(F.data.startswith("promo_archive_") | F.data.startswith("promo_restore_"))
+async def change_promo_archive(callback: types.CallbackQuery):
+    if not current_checkout_button(callback):
+        await callback.answer("Откройте ожидающий счёт заново.",show_alert=True)
+        return
+    try:
+        order_id=int(callback.data.rsplit("_",1)[1])
+        archived=callback.data.startswith("promo_archive_")
+    except ValueError:
+        await callback.answer("Некорректный счёт.",show_alert=True)
+        return
+    if not await asyncio.to_thread(set_archived,DB_PATH,callback.from_user.id,order_id,archived):
+        await callback.answer("Состояние счёта изменилось. Проверьте статус.",show_alert=True)
+        return
+    await promo_pending(callback)
+
+
+@router.callback_query(F.data == "promo_pending")
+async def promo_pending(callback: types.CallbackQuery):
+    try:
+        status,amount,url=await asyncio.to_thread(check_open_checkout,DB_PATH,Payment,callback.from_user.id)
+    except Exception as exc:
+        logging.warning("Discount checkout lookup failed: %s",type(exc).__name__)
+        status,amount,url="review",None,None
+    texts={
+        "none":"Нет ожидающего счёта со скидкой.",
+        "pending":"Счёт ожидает оплаты. Скидка зарезервирована.",
+        "canceled":"ЮKassa подтвердила отмену. Резерв скидки снят; действующий промокод снова доступен.",
+        "paid":"Оплата подтверждена ЮKassa. Ожидается обработка платежа.",
+        "review":"Статус счёта требует сверки. Скидка не списана повторно. Обратитесь в поддержку.",
+    }
+    text=texts[status]
+    buttons=[]
+    if amount is not None:
+        text+=f"\nСумма: {rubles(amount):.2f} ₽"
+    if status=="pending":
+        info=await asyncio.to_thread(archive_info,DB_PATH,callback.from_user.id)
+        if info and info["archived"]:
+            text+="\n\nСчёт отложен. Скидка остаётся в резерве, старая платёжная ссылка не отменена. Можно выбрать другой тариф без скидки."
+            buttons.append([types.InlineKeyboardButton(text="Вернуть счёт к оплате",callback_data=f"promo_restore_{info['order_id']}")])
+        else:
+            if url:
+                buttons.append([types.InlineKeyboardButton(text="💳 Оплатить",url=url)])
+            if info:
+                text+="\n\nМожно отложить счёт, но это не отменит платёжную ссылку и не освободит скидку."
+                buttons.append([types.InlineKeyboardButton(text="Отложить счёт",callback_data=f"promo_archive_{info['order_id']}")])
+    if status in ("pending","paid","review"):
+        buttons.append([types.InlineKeyboardButton(text="Обновить статус",callback_data="promo_pending")])
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад",callback_data="promo_achievements")])
+    await render_screen(callback.message,text,reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 # ============================================================
 # ПРОДЛЕНИЕ (ПРЯМОЙ ВЫЗОВ)
 # ============================================================
 
-@router.callback_query(F.data.startswith("renew_"))
+@router.callback_query(F.data.regexp(r"^renew_[0-9]+_[0-9]+$"))
 async def handle_renew(callback: types.CallbackQuery):
-    """Продление существующей подписки (прямой вызов)"""
-    parts = callback.data.split("_")
-    tariff_id = int(parts[1])
-    subscription_id = int(parts[2])
-
-    tariff = get_tariff_by_id(tariff_id)
-
-    if not tariff:
-        await callback.message.answer("❌ Тариф не найден", parse_mode="HTML")
-        await callback.answer()
+    """Legacy explicit-ID buttons; never infer a target."""
+    tariff_id,subscription_id=map(int,callback.data.split("_")[1:])
+    tariff=renewal_tariff(DB_PATH,tariff_id)
+    if not tariff or not renewable_subscriptions(DB_PATH,callback.from_user.id,subscription_id):
+        await callback.answer("Продление недоступно",show_alert=True)
         return
+    await process_payment(callback,*tariff,action="renew",subscription_id=subscription_id,
+                          back_to=f"renew_from_key_{subscription_id}")
 
-    tariff_id, name, price, days, traffic_gb, ip_limit = tariff
-
-    await process_payment(
-        callback,
-        tariff_id,
-        name,
-        price,
-        days,
-        traffic_gb,
-        ip_limit,
-        action='renew',
-        subscription_id=subscription_id,
-        back_to=f'renew_select_{tariff_id}'
-    )
 
 # ============================================================
 # НАВИГАЦИЯ
@@ -447,8 +500,7 @@ async def handle_renew(callback: types.CallbackQuery):
 @router.callback_query(F.data == "back_to_tariffs")
 async def back_to_tariffs(callback: types.CallbackQuery):
     """Возврат к списку тарифов"""
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "Выберите подходящий тариф:",
         reply_markup=get_tariffs_keyboard(),
         parse_mode="HTML"
@@ -458,8 +510,7 @@ async def back_to_tariffs(callback: types.CallbackQuery):
 @router.callback_query(F.data == "back_to_main")
 async def back_to_main(callback: types.CallbackQuery):
     """Возврат в главное меню"""
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "Главное меню:",
         reply_markup=get_main_keyboard(callback.from_user.id),
         parse_mode="HTML"
@@ -469,8 +520,7 @@ async def back_to_main(callback: types.CallbackQuery):
 @router.callback_query(F.data == "back_to_renew_select")
 async def back_to_renew_select(callback: types.CallbackQuery):
     """Возврат к выбору ключа для продления"""
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "Выберите тариф, затем подписку для продления:",
         reply_markup=get_tariffs_keyboard(),
         parse_mode="HTML"

@@ -6,6 +6,7 @@ from contextlib import closing
 from pathlib import Path
 from tax_fulfillment import transaction
 from refund_fulfillment import CUTOFF, LAST_HISTORICAL_ID
+from balance_ledger import deposit_scope_sql
 
 LOG = logging.getLogger(__name__)
 LABELS = {
@@ -33,7 +34,7 @@ def claim_alerts(path):
             SELECT p.id, j.payment_state, j.vpn_state, j.tax_state, j.refund_state,
                    COALESCE(datetime(j.updated_at)<=datetime('now','-15 minutes'),0) AS stale
               FROM payments p JOIN payment_processing j USING(payment_id)
-             WHERE p.id>? AND datetime(p.created_at)>=datetime(?)
+             WHERE ((p.id>? AND datetime(p.created_at)>=datetime(?) AND p.tariff_id<>0) OR """+deposit_scope_sql(db)+""")
                AND p.amount_rub>0 AND j.is_legacy=0
              ORDER BY p.id
         """, (LAST_HISTORICAL_ID,CUTOFF)).fetchall()

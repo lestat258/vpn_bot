@@ -20,7 +20,10 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
+from callback_navigation import CurrentCallbackNavigation
+from form_navigation import UserFormNavigation
+from admin_form_navigation import AdminFormNavigation
 from aiogram.types import BotCommand, BotCommandScopeDefault
 
 
@@ -148,7 +151,12 @@ else:
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher(storage=storage, events_isolation=SimpleEventIsolation())
+dp.message.outer_middleware(UserFormNavigation())
+dp.callback_query.outer_middleware(CurrentCallbackNavigation())
+dp.callback_query.outer_middleware(UserFormNavigation())
+dp.message.outer_middleware(AdminFormNavigation(admin.ADMIN_ID))
+dp.callback_query.outer_middleware(AdminFormNavigation(admin.ADMIN_ID))
 
 # ============================================================
 # КОМАНДЫ БОТА

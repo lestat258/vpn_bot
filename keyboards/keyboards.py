@@ -2,6 +2,7 @@
 Все клавиатуры для бота
 """
 from runtime_config import DB_PATH
+from subscription_renewal import expiry_presentation
 import sqlite3
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from datetime import datetime
@@ -30,7 +31,7 @@ def get_main_keyboard(telegram_id=None):
         if is_admin:
             buttons.append([KeyboardButton(text="🔧 Админ-панель")])
     
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, persistent=True)
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, is_persistent=True, one_time_keyboard=False)
 
 def get_device_keyboard():
     """Клавиатура выбора устройства"""
@@ -42,11 +43,14 @@ def get_device_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_tariffs_keyboard():
+def get_tariffs_keyboard(subscription_id=None):
     """Клавиатура выбора тарифа"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('SELECT id, name, price_rub, duration_days FROM tariffs WHERE is_active = 1 ORDER BY price_rub')
+    query = 'SELECT id, name, price_rub, duration_days FROM tariffs WHERE is_active = 1'
+    if subscription_id is not None:
+        query += ' AND price_rub>0 AND duration_days>0'
+    c.execute(query + ' ORDER BY price_rub')
     tariffs = c.fetchall()
     conn.close()
 
@@ -54,9 +58,11 @@ def get_tariffs_keyboard():
     for t in tariffs:
         buttons.append([InlineKeyboardButton(
             text=f"📦 {t[1]} — {t[2]:.0f} ₽ / {t[3]} дн.",
-            callback_data=f"tariff_{t[0]}"
+            callback_data=(f"tariff_{t[0]}" if subscription_id is None
+                           else f"extend_tariff_{t[0]}_{subscription_id}")
         )])
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад",
+        callback_data=("back_to_main" if subscription_id is None else f"key_{subscription_id}"))])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_admin_keyboard():
@@ -86,10 +92,10 @@ def get_keys_keyboard(telegram_id):
     buttons = []
     for sub in subs:
         sub_id, email, end_date, tariff_name = sub
-        days_left = (datetime.fromisoformat(end_date) - datetime.now()).days
-        status = "✅" if days_left > 0 else "❌"
+        current, date_label, _ = expiry_presentation(end_date)
+        status = "✅" if current else "❌"
         buttons.append([InlineKeyboardButton(
-            text=f"{status} {tariff_name} (до {end_date[:10]})",
+            text=f"{status} {tariff_name} ({'до' if current else 'истёк'} {date_label})",
             callback_data=f"key_{sub_id}"
         )])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_profile")])

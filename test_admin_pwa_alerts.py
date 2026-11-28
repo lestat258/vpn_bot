@@ -48,6 +48,7 @@ class AlertTests(unittest.IsolatedAsyncioTestCase):
                     ('ok',0,'verified','done','done','none',CURRENT_TIMESTAMP),
                     ('free',0,'verified','needs_review','needs_review','full_review',CURRENT_TIMESTAMP),
                     ('past',0,'verified','needs_review','needs_review','full_review',CURRENT_TIMESTAMP);
+                ALTER TABLE payments ADD COLUMN tariff_id INTEGER DEFAULT 1;
             """)
 
     def test_receipt_switch(self):

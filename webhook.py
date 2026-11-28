@@ -3,7 +3,9 @@
 Webhook сервер для обработки платежей ЮKassa
 """
 from runtime_config import DB_PATH
+from balance_ledger import is_registered, credit_verified, record_deposit_change, metadata_matches, kopecks, rubles
 import logging
+import os
 import json
 import sqlite3
 import asyncio
@@ -109,11 +111,33 @@ async def get_tariff_info(tariff_id: int) -> Optional[Dict]:
 
 async def process_payment_success(payment_id, data):
     """Fulfill a payment previously verified through YooKassa API."""
-    from payment_fulfillment import process_verified_payment
+    from payment_fulfillment import process_verified_payment, _telegram_notify
     from tax_fulfillment import queue_verified
+    if await asyncio.to_thread(is_registered,DB_PATH,payment_id):
+        obj=data["object"]
+        if obj.get("id")!=payment_id:
+            raise ValueError("Deposit payment identity mismatch")
+        refund=obj.get("refunded_amount")
+        # Require an explicit zero refund from the independently verified provider.
+        if refund is None or refund.currency!="RUB":
+            raise ValueError("Deposit refund state unavailable")
+        if kopecks(refund.value)>0:
+            await asyncio.to_thread(record_deposit_change,DB_PATH,payment_id,obj["metadata"],refund=refund.value)
+            return True
+        state,owner,balance=await asyncio.to_thread(credit_verified,DB_PATH,payment_id,obj["metadata"])
+        if state=="credited":
+            try:
+                await _telegram_notify(owner,f"✅ Баланс пополнен.\nБаланс после пополнения: {rubles(balance):.2f} ₽",None,include_guide=False)
+            except Exception:
+                logger.warning("Deposit credited; notification not confirmed")
+        return state in ("credited","done","held")
+    if str(data["object"]["metadata"].get("tariff_id"))=="0":
+        return False
     # Commit verified fiscal work before fulfillment. The dedicated worker
     # independently rechecks YooKassa and never blocks the VPN response.
     from refund_fulfillment import scope, record_refund, money
+    from promo_reservations import settle_verified_success
+    await asyncio.to_thread(settle_verified_success, DB_PATH, payment_id, data["object"])
     if await asyncio.to_thread(scope, DB_PATH, payment_id) == "new":
         refunded = data["object"].get("refunded_amount")
         if refunded is not None and money(refunded.value) > 0:
@@ -129,8 +153,8 @@ async def process_payment_success(payment_id, data):
 # ВЕБХУК
 # ============================================================
 
-async def verify_provider_payment(payment_id, expected_status='succeeded'):
-    """Read-only provider lookup and validation shared by webhook and tax worker."""
+async def verify_provider_payment(payment_id, expected_status='succeeded', *, allow_recovery=False):
+    """Verify provider state; only webhook may recover a missing local binding."""
     from decimal import Decimal
 
     rows = await async_get_db_query(
@@ -140,8 +164,9 @@ async def verify_provider_payment(payment_id, expected_status='succeeded'):
     )
 
     if not rows:
-        logger.warning("Unknown payment: %s", payment_id)
-        return None, web.Response(status=404, text="Not Found")
+        from promo_reservations import has_unbound
+        if not allow_recovery or not await asyncio.to_thread(has_unbound,DB_PATH):
+            return None, web.Response(status=404,text="Not Found")
 
     shop_id = get_setting("yookassa_shop_id")
     stored_secret = get_setting("yookassa_secret_key")
@@ -178,6 +203,20 @@ async def verify_provider_payment(payment_id, expected_status='succeeded'):
     ):
         return None, web.Response(status=403, text="Unconfirmed")
 
+    if not rows:
+        from promo_reservations import recover_verified_binding, ReservationConflict
+        try:
+            if verified.amount.currency!="RUB" or (expected_status=="canceled" and getattr(verified,"captured_at",None) is not None):
+                return None,web.Response(status=403,text="Unconfirmed")
+            await asyncio.to_thread(recover_verified_binding,DB_PATH,payment_id,
+                getattr(verified,"metadata",None),verified.amount.value)
+            # Another verifier may have attached it concurrently.
+            rows=await async_get_db_query("SELECT telegram_id, tariff_id, amount_rub FROM payments WHERE payment_id = ?",(payment_id,))
+            if not rows:
+                return None,web.Response(status=404,text="Not Found")
+        except (ReservationConflict,ValueError,sqlite3.Error):
+            return None,web.Response(status=409,text="Review required")
+
     try:
         expected = Decimal(
             f"{float(rows[0]['amount_rub']):.2f}"
@@ -204,10 +243,22 @@ async def verify_provider_payment(payment_id, expected_status='succeeded'):
         logger.error("Metadata mismatch: %s", payment_id)
         return None, web.Response(status=403, text="Metadata mismatch")
 
+    if rows[0]["tariff_id"]==0:
+        if not await asyncio.to_thread(is_registered,DB_PATH,payment_id) or not metadata_matches(
+                rows[0]["telegram_id"],kopecks(rows[0]["amount_rub"]),metadata):
+            return None,web.Response(status=403,text="Deposit metadata mismatch")
+
+    from promo_reservations import validate_binding, ReservationConflict
+    try:
+        await asyncio.to_thread(validate_binding, DB_PATH, payment_id, metadata, actual)
+    except (ReservationConflict, ValueError):
+        return None, web.Response(status=403, text="Discount order mismatch")
+
     verified_data = {
         "object": {
             "id": payment_id,
             "metadata": metadata,
+            "amount_rub": str(actual),
             "captured_at": getattr(verified, "captured_at", None),
             "refunded_amount": getattr(verified, "refunded_amount", None)
         }
@@ -260,16 +311,23 @@ async def handle_payment_change(event, obj):
     category = await asyncio.to_thread(scope, DB_PATH, payment_id)
     if category == "historical":
         return web.Response(status=200, text="OK")
-    if category != "new":
+    if category != "new" and not (category=="unknown" and event=="payment.canceled"):
         return web.Response(status=404, text="Not Found")
 
     if event == "payment.canceled":
-        verified, error = await verify_provider_payment(payment_id, "canceled")
+        verified, error = await verify_provider_payment(payment_id, "canceled", allow_recovery=True)
         if error is not None:
             return error
         if verified["object"].get("captured_at") is not None:
             return web.Response(status=409, text="Review required")
-        state = await asyncio.to_thread(record_canceled, DB_PATH, payment_id)
+        if await asyncio.to_thread(scope, DB_PATH, payment_id)!="new":
+            return web.Response(status=404,text="Not Found")
+        if await asyncio.to_thread(is_registered,DB_PATH,payment_id):
+            state=await asyncio.to_thread(record_deposit_change,DB_PATH,payment_id,
+                                          verified["object"]["metadata"],canceled=True)
+        else:
+            state = await asyncio.to_thread(record_canceled, DB_PATH, payment_id,
+                metadata=verified["object"]["metadata"], amount=verified["object"]["amount_rub"])
     else:
         refund = await fetch_verified_refund(object_id)
         if (str(getattr(refund,"id","")) != object_id
@@ -284,7 +342,13 @@ async def handle_payment_change(event, obj):
         if (aggregate is None or aggregate.currency != "RUB"
                 or not 0 < money(refund.amount.value) <= money(aggregate.value)):
             return web.Response(status=409, text="Refund mismatch")
-        state = await asyncio.to_thread(record_refund, DB_PATH, payment_id, money(aggregate.value))
+        if await asyncio.to_thread(is_registered,DB_PATH,payment_id):
+            state=await asyncio.to_thread(record_deposit_change,DB_PATH,payment_id,
+                                          verified["object"]["metadata"],refund=aggregate.value)
+        else:
+            from promo_reservations import settle_verified_success
+            await asyncio.to_thread(settle_verified_success, DB_PATH, payment_id, verified["object"])
+            state = await asyncio.to_thread(record_refund, DB_PATH, payment_id, money(aggregate.value))
     if state.endswith("review"):
         logger.warning("Payment change requires manual reconciliation")
     return web.Response(status=200, text="OK")
@@ -322,6 +386,7 @@ async def tax_worker_context(app):
     from refund_fulfillment import drain_refunds
     from payment_admin_alerts import alert_worker
     from system_monitor import monitor_worker, delivery_worker
+    from auto_renewal_worker import renewal_worker
 
     async def worker():
         while True:
@@ -339,6 +404,7 @@ async def tax_worker_context(app):
     alerts = asyncio.create_task(alert_worker(DB_PATH))
     monitoring = asyncio.create_task(monitor_worker(DB_PATH))
     monitor_delivery = asyncio.create_task(delivery_worker(DB_PATH))
+    renewal = asyncio.create_task(renewal_worker(DB_PATH))
     try:
         yield
     finally:
@@ -346,7 +412,8 @@ async def tax_worker_context(app):
         alerts.cancel()
         monitoring.cancel()
         monitor_delivery.cancel()
-        for pending in (task, alerts, monitoring, monitor_delivery):
+        renewal.cancel()
+        for pending in (task, alerts, monitoring, monitor_delivery, renewal):
             with suppress(asyncio.CancelledError):
                 await pending
 
@@ -374,7 +441,7 @@ async def handle_webhook(request):
         if not isinstance(payment_id, str) or not payment_id or len(payment_id) > 128:
             return web.Response(status=400, text="Bad Request")
 
-        verified_data, error = await verify_provider_payment(payment_id)
+        verified_data, error = await verify_provider_payment(payment_id, allow_recovery=True)
         if error is not None:
             return error
 
@@ -406,4 +473,4 @@ if __name__ == "__main__":
     app.router.add_get('/health', lambda r: web.Response(text='OK'))
     
     logger.info("🚀 Webhook server started on port 8081")
-    web.run_app(app, host='0.0.0.0', port=8081)
+    web.run_app(app, host=os.environ.get("VPN4US_WEBHOOK_BIND", "0.0.0.0"), port=8081)

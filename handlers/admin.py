@@ -2,6 +2,16 @@
 Административные хендлеры бота
 """
 from runtime_config import BACKUP_DIR, DB_PATH
+from balance_ledger import admin_adjust, rubles, kopecks, MAX_KOPECKS
+from admin_form_navigation import begin as form_begin, step as form_step, retry as form_retry, finish as form_finish
+from admin_form_navigation import parent_for, back_keyboard, CONFIRM_TOKEN, callback_is_current, private_admin, FORM_SCREEN
+from screen_navigation import render_screen
+from contextlib import closing
+from html import escape
+import math
+from urllib.parse import urlsplit
+from encryption import encrypt
+from aiogram.exceptions import TelegramAPIError
 import logging
 import sqlite3
 import json
@@ -28,6 +38,7 @@ from states import (
     EditText,
     SendMessageToUser,
     AdminAddKey,
+    AdminExtendKey,
     EditTariff,
     AdminDeposit,
     AdminWithdraw
@@ -60,7 +71,7 @@ async def admin_users(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "👥 <b>Выберите пользователя:</b>",
         reply_markup=get_user_list_keyboard(),
         parse_mode="HTML"
@@ -92,16 +103,16 @@ async def admin_user_card(callback: types.CallbackQuery):
 
     text = (
         f"👤 <b>Карточка пользователя</b>\n\n"
-        f"📛 Имя: {first_name or 'Не указано'}\n"
+        f"📛 Имя: {escape(first_name or 'Не указано')}\n"
         f"🆔 ID: {telegram_id}\n"
-        f"📝 Username: @{username or 'Нет'}\n"
+        f"📝 Username: @{escape(username or 'Нет')}\n"
         f"📅 Регистрация: {created_at[:10] if created_at else 'Неизвестно'}\n"
         f"🔑 Ключей: {keys_count}\n"
         f"💰 Баланс: {balance or 0:.2f} ₽\n"
         f"🚫 Статус: {'🔴 Заблокирован' if is_blocked else '🟢 Активен'}"
     )
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         text,
         reply_markup=get_user_action_keyboard(telegram_id),
         parse_mode="HTML"
@@ -133,16 +144,16 @@ async def admin_back_to_user_card(callback: types.CallbackQuery):
 
     text = (
         f"👤 <b>Карточка пользователя</b>\n\n"
-        f"📛 Имя: {first_name or 'Не указано'}\n"
+        f"📛 Имя: {escape(first_name or 'Не указано')}\n"
         f"🆔 ID: {telegram_id}\n"
-        f"📝 Username: @{username or 'Нет'}\n"
+        f"📝 Username: @{escape(username or 'Нет')}\n"
         f"📅 Регистрация: {created_at[:10] if created_at else 'Неизвестно'}\n"
         f"🔑 Ключей: {keys_count}\n"
         f"💰 Баланс: {balance or 0:.2f} ₽\n"
         f"🚫 Статус: {'🔴 Заблокирован' if is_blocked else '🟢 Активен'}"
     )
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         text,
         reply_markup=get_user_action_keyboard(telegram_id),
         parse_mode="HTML"
@@ -172,7 +183,7 @@ async def admin_list_keys_for_user(callback: types.CallbackQuery):
     buttons = []
 
     if not subs:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             "🔑 <b>У пользователя нет ключей</b>",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
                 [types.InlineKeyboardButton(text="➕ Добавить ключ", callback_data=f"user_add_key_{telegram_id}")],
@@ -195,7 +206,7 @@ async def admin_list_keys_for_user(callback: types.CallbackQuery):
     buttons.append([types.InlineKeyboardButton(text="➕ Добавить ключ", callback_data=f"user_add_key_{telegram_id}")])
     buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_back_to_{telegram_id}")])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"🔑 <b>Ключи пользователя</b>\n\nВыберите ключ для управления или добавьте новый:",
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
@@ -232,8 +243,8 @@ async def admin_key_detail(callback: types.CallbackQuery):
 
     text = (
         f"🔑 <b>Карточка ключа</b>\n\n"
-        f"📦 Тариф: {tariff_name}\n"
-        f"📧 Email: <code>{email}</code>\n"
+        f"📦 Тариф: {escape(tariff_name)}\n"
+        f"📧 Email: <code>{escape(email or '')}</code>\n"
         f"📅 Создан: {start_date[:10] if start_date else 'Неизвестно'}\n"
         f"📅 Истекает: {end_date[:10]}\n"
         f"⏳ Осталось: {days_left} дн.\n"
@@ -246,215 +257,150 @@ async def admin_key_detail(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад к ключам", callback_data=f"user_list_keys_{user_id}")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         text,
         reply_markup=kb,
         parse_mode="HTML"
     )
     await callback.answer()
 
+def admin_issue_tariff(tariff_id):
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        return db.execute("""SELECT id,name,price_rub,duration_days,traffic_gb,ip_limit FROM tariffs
+                             WHERE id=? AND is_active=1 AND duration_days>0""",(tariff_id,)).fetchone()
+
+
+def admin_issue_owner(user_id):
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        return bool(db.execute("SELECT 1 FROM users WHERE telegram_id=? AND is_blocked=0",(user_id,)).fetchone())
+
+
 @router.callback_query(F.data.startswith("user_add_key_"))
 async def admin_add_key_for_user(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
+    try:
+        user_id=int(callback.data.removeprefix("user_add_key_"))
+        if user_id<=0 or not admin_issue_owner(user_id):
+            raise ValueError
+    except ValueError:
+        await callback.answer("Пользователь недоступен",show_alert=True)
+        return
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        tariffs=db.execute("SELECT id,name,price_rub,duration_days FROM tariffs WHERE is_active=1 AND duration_days>0").fetchall()
+    if not tariffs:
+        await callback.answer("Нет доступных тарифов",show_alert=True)
+        return
+    kb=types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text=f"{t[1]} — {t[2]}₽ / {t[3]} дн.",
+            callback_data=f"admin_tariff_select_{t[0]}|{user_id}")] for t in tariffs])
+    extend_temp.pop(callback.from_user.id,None)
+    await form_begin(callback,state,AdminAddKey.tariff_id,
+        f"🔑 Выдача нового ключа пользователю {user_id}\nВыберите тариф:",fields={"user_id":user_id},keyboard=kb)
 
-    telegram_id = int(callback.data.replace("user_add_key_", ""))
-    await state.update_data(user_id=telegram_id)
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, name, price_rub, duration_days FROM tariffs WHERE is_active = 1')
-    tariffs = c.fetchall()
-    conn.close()
-
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(
-            text=f"{t[1]} — {t[2]}₽ / {t[3]} дн.",
-            callback_data=f"admin_tariff_select_{t[0]}|{telegram_id}"
-        )] for t in tariffs
-    ] + [[types.InlineKeyboardButton(text="🔙 Назад к карточке", callback_data=f"user_back_to_{telegram_id}")]])
-
-    await callback.message.edit_text(
-        "Выберите тариф для добавления:",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-    await state.set_state(AdminAddKey.tariff_id)
-    await callback.answer()
 
 @router.callback_query(F.data.startswith("admin_tariff_select_"))
 async def admin_add_key_tariff(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-
-    parts = callback.data.split("|")
-    tariff_id = int(parts[0].replace("admin_tariff_select_", ""))
-    user_id = int(parts[1]) if len(parts) > 1 else None
-
-    tariff = get_tariff_by_id(tariff_id)
-
-    if not tariff:
-        await callback.message.edit_text("❌ Тариф не найден")
-        await callback.answer()
+    data=await state.get_data()
+    try:
+        raw=callback.data.removeprefix("admin_tariff_select_").split("|")
+        tariff_id,user_id=map(int,raw)
+        if user_id!=data.get("user_id") or not admin_issue_owner(user_id):
+            raise ValueError
+    except ValueError:
+        await callback.answer("Выберите пользователя заново",show_alert=True)
         return
+    tariff=admin_issue_tariff(tariff_id)
+    if not tariff:
+        await callback.answer("Тариф недоступен",show_alert=True)
+        return
+    await form_begin(callback,state,AdminAddKey.days,
+        f"📦 Тариф: {tariff[1]}\n📅 Дней: {tariff[3]}\n\nВведите срок в днях или /skip для стандартного:",
+        fields={"user_id":user_id,"tariff_id":tariff_id,"tariff":tariff})
 
-    await state.update_data(tariff_id=tariff_id)
 
-    kb = get_back_keyboard(f"user_add_key_{user_id}")
-
-    await callback.message.edit_text(
-        f"📦 Тариф: {tariff[1]}\n"
-        f"📅 Дней: {tariff[3]}\n\n"
-        "Введите количество дней подписки\n"
-        "(или отправьте /skip для стандартного):",
-        reply_markup=kb
-    )
-    await state.set_state(AdminAddKey.days)
-    await callback.answer()
-
-# ============================================================
-# ИСПРАВЛЕНО: ИСПОЛЬЗУЕТ vpn_service
-# ============================================================
 @router.message(AdminAddKey.days)
 async def admin_add_key_days(message: types.Message, state: FSMContext):
-    if message.text == "/skip":
-        days = None
-    else:
-        try:
-            days = int(message.text)
-            if days <= 0:
-                await message.answer("❌ Введите положительное число:")
-                return
-        except ValueError:
-            await message.answer("❌ Введите число или /skip:")
-            return
-
-    data = await state.get_data()
-    user_id = data['user_id']
-    tariff_id = data['tariff_id']
-
-    tariff = get_tariff_by_id(tariff_id)
-
-    if not tariff:
-        await message.answer("❌ Тариф не найден")
-        await state.clear()
+    data=await state.get_data()
+    tariff=admin_issue_tariff(data["tariff_id"])
+    if not tariff or tuple(data["tariff"])!=tariff or not admin_issue_owner(data["user_id"]):
+        await form_finish(message,state,"Пользователь или тариф изменились. Откройте форму заново.")
         return
+    try:
+        days=tariff[3] if message.text=="/skip" else int(message.text)
+        if not 1<=days<=36500:
+            raise ValueError
+    except (ValueError,TypeError,OverflowError):
+        await form_retry(message,state,"❌ Введите целое число от 1 до 36500 или /skip.")
+        return
+    await form_step(message,state,AdminAddKey.confirm,
+        f"Подтвердите выдачу нового ключа\n\nПользователь: {data['user_id']}\n"
+        f"Тариф: {tariff[1]}\nСрок: {days} дн.\nТрафик: {tariff[4] or '∞'} ГБ\n"
+        f"Лимит IP: {tariff[5]}\n\nОплата не списывается.",days=days)
 
-    tariff_id, tariff_name, price, default_days, traffic_gb, ip_limit = tariff
-    days = days or default_days
-
-    # Используем vpn_service для создания подписки
-    result = await vpn_service.create_subscription(
-        telegram_id=user_id,
-        tariff_id=tariff_id,
-        days=days,
-        traffic_gb=traffic_gb,
-        ip_limit=ip_limit
-    )
-
-    if result['success']:
-        kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="🔙 Назад к карточке", callback_data=f"user_back_to_{user_id}")],
-            [types.InlineKeyboardButton(text="➕ Добавить еще ключ", callback_data=f"user_add_key_{user_id}")]
-        ])
-
-        await message.answer(
-            f"✅ <b>Ключ создан!</b>\n\n"
-            f"👤 Пользователь: {user_id}\n"
-            f"📦 Тариф: {tariff_name}\n"
-            f"📅 Дней: {days}\n"
-            f"📅 До: {result['end_date'].strftime('%d.%m.%Y')}\n\n"
-            f"🔗 <b>Ссылка:</b>\n"
-            f"<code>{result['link']}</code>",
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
-
-        try:
-            await message.bot.send_message(
-                chat_id=user_id,
-                text=f"🎉 <b>Администратор выдал вам ключ!</b>\n\n"
-                     f"📦 Тариф: {tariff_name}\n"
-                     f"📅 Действует до: {result['end_date'].strftime('%d.%m.%Y')}\n\n"
-                     f"🔗 <b>Ссылка для подключения:</b>\n"
-                     f"<code>{result['link']}</code>\n\n"
-                     f"Вставьте ссылку в приложение-клиент",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            logging.error(f"Failed to notify user: {e}")
-    else:
-        kb = get_back_keyboard(f"user_back_to_{user_id}")
-        await message.answer(
-            f"❌ Не удалось создать ключ: {result.get('error', 'Неизвестная ошибка')}",
-            reply_markup=kb
-        )
-
-    await state.clear()
 
 @router.callback_query(F.data.startswith("user_send_message_"))
 async def send_message_from_user_card(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
+    try:
+        telegram_id=int(callback.data.removeprefix("user_send_message_"))
+        if telegram_id<=0:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Некорректный пользователь",show_alert=True)
+        return
+    user=get_user_by_telegram_id(telegram_id)
+    if not user:
+        await callback.answer("Пользователь не найден",show_alert=True)
+        return
+    user_name=user[2] or user[3] or str(telegram_id)
+    extend_temp.pop(callback.from_user.id,None)
+    await form_begin(callback,state,SendMessageToUser.message_text,
+        f"💬 Отправка сообщения пользователю\n\n👤 Пользователь: {user_name}\n"
+        f"🆔 ID: {telegram_id}\n\nВведите текст сообщения (поддерживается HTML). "
+        "После ввода сообщение будет отправлено сразу.",
+        fields={"user_id":telegram_id,"user_name":user_name})
 
-    telegram_id = int(callback.data.replace("user_send_message_", ""))
-
-    user = get_user_by_telegram_id(telegram_id)
-    user_name = user[2] or user[3] or str(telegram_id) if user else str(telegram_id)
-
-    await state.update_data(user_id=telegram_id, user_name=user_name)
-
-    kb = get_back_keyboard(f"user_{telegram_id}")
-
-    await callback.message.edit_text(
-        f"💬 <b>Отправка сообщения пользователю</b>\n\n"
-        f"👤 Пользователь: <b>{user_name}</b>\n"
-        f"🆔 ID: <code>{telegram_id}</code>\n\n"
-        f"✏️ Введите текст сообщения (поддерживается HTML):",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-    await state.set_state(SendMessageToUser.message_text)
-    await callback.answer()
 
 @router.message(SendMessageToUser.message_text)
 async def send_message_process(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    user_id = data.get('user_id')
-    user_name = data.get('user_name', 'Пользователь')
-
-    if not user_id:
-        await message.answer("❌ Ошибка: ID пользователя не найден")
-        await state.clear()
+    data=await state.get_data()
+    user_id=data.get("user_id")
+    if type(user_id) is not int or user_id<=0 or not get_user_by_telegram_id(user_id):
+        await form_finish(message,state,"Пользователь не найден. Сообщение не отправлено.")
         return
-
+    if len(message.text.encode("utf-16-le"))//2>3900:
+        await form_retry(message,state,"❌ Сообщение слишком длинное (до 3900 символов UTF-16).")
+        return
+    # Never retry an ambiguous Telegram send; preserve the recipient-specific back button.
     try:
-        if message.text:
-            await message.bot.send_message(
-                chat_id=user_id,
-                text=f"📨 <b>Сообщение от администратора</b>\n\n{message.text}",
-                parse_mode="HTML"
-            )
-            await message.answer(f"✅ Сообщение отправлено пользователю {user_name}")
-        else:
-            await message.answer("❌ Отправьте текст")
-            return
+        await message.bot.send_message(chat_id=user_id,
+            text=f"📨 <b>Сообщение от администратора</b>\n\n{message.text}",parse_mode="HTML")
+    except Exception as exc:
+        logging.warning("Admin message delivery requires review: %s",type(exc).__name__)
+        await form_finish(message,state,"Не удалось подтвердить отправку. Проверьте доставку перед повтором.")
+        return
+    await form_finish(message,state,f"✅ Сообщение отправлено пользователю {data.get('user_name',user_id)}.")
 
-        await state.clear()
-        await message.answer(
-            f"👤 <b>Карточка пользователя</b>\n\n"
-            f"📛 Имя: {user_name}\n"
-            f"🆔 ID: {user_id}",
-            reply_markup=get_user_action_keyboard(user_id),
-            parse_mode="HTML"
-        )
 
-    except Exception as e:
-        await message.answer(f"❌ Ошибка отправки: {e}")
-        await state.clear()
+def admin_balance_keyboard(telegram_id, *, review=False):
+    buttons = []
+    if not review:
+        buttons.extend([
+            [types.InlineKeyboardButton(text="💰 Пополнить", callback_data=f"user_deposit_{telegram_id}")],
+            [types.InlineKeyboardButton(text="💸 Списать", callback_data=f"user_withdraw_{telegram_id}")]
+        ])
+    else:
+        buttons.append([types.InlineKeyboardButton(text="🔍 Проверить баланс", callback_data=f"user_balance_{telegram_id}")])
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_back_to_{telegram_id}")])
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 @router.callback_query(F.data.startswith("user_balance_"))
 async def admin_user_balance(callback: types.CallbackQuery):
@@ -463,7 +409,10 @@ async def admin_user_balance(callback: types.CallbackQuery):
         return
 
     telegram_id = int(callback.data.replace("user_balance_", ""))
+    await render_admin_balance(callback, telegram_id)
 
+
+async def render_admin_balance(callback, telegram_id, *, canceled=False):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT balance FROM users WHERE telegram_id = ?', (telegram_id,))
@@ -477,13 +426,10 @@ async def admin_user_balance(callback: types.CallbackQuery):
 
     balance = user[0] or 0
 
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="💰 Пополнить", callback_data=f"user_deposit_{telegram_id}")],
-        [types.InlineKeyboardButton(text="💸 Списать", callback_data=f"user_withdraw_{telegram_id}")],
-        [types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"user_back_to_{telegram_id}")]
-    ])
+    kb = admin_balance_keyboard(telegram_id)
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
+        ("❌ Операция отменена\n\n" if canceled else "") +
         f"💰 <b>Баланс пользователя</b>\n\n"
         f"Текущий баланс: <b>{balance:.2f} ₽</b>\n\n"
         f"Выберите действие:",
@@ -492,104 +438,127 @@ async def admin_user_balance(callback: types.CallbackQuery):
     )
     await callback.answer()
 
-@router.callback_query(F.data.startswith("user_deposit_"))
-async def admin_deposit_start(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Доступ запрещён")
+def admin_balance_snapshot(owner):
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        row=db.execute("SELECT balance FROM users WHERE telegram_id=?",(owner,)).fetchone()
+    return kopecks(row[0] or 0) if row else None
+
+
+async def admin_balance_start(callback,state,*,withdraw):
+    if not private_admin(callback,ADMIN_ID) or not callback_is_current(callback):
+        await callback.answer("Откройте актуальный баланс пользователя.",show_alert=True)
         return
-
-    telegram_id = int(callback.data.replace("user_deposit_", ""))
-    await state.update_data(user_id=telegram_id)
-    await state.set_state(AdminDeposit.amount)
-
-    await callback.message.edit_text(
-        "💰 <b>Пополнение баланса</b>\n\n"
-        "Введите сумму пополнения (в рублях):",
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-@router.message(AdminDeposit.amount)
-async def admin_deposit_process(message: types.Message, state: FSMContext):
+    prefix="user_withdraw_" if withdraw else "user_deposit_"
     try:
-        amount = float(message.text)
-        data = await state.get_data()
-        user_id = data.get('user_id')
+        owner=int(callback.data.removeprefix(prefix))
+        if owner<=0:
+            raise ValueError
+        balance=admin_balance_snapshot(owner)
+        if balance is None:
+            raise ValueError
+    except (ValueError,TypeError,OverflowError):
+        await callback.answer("Пользователь или баланс недоступен.",show_alert=True)
+        return
+    extend_temp.pop(callback.from_user.id,None)
+    label="Списание" if withdraw else "Пополнение"
+    group=AdminWithdraw if withdraw else AdminDeposit
+    await form_begin(callback,state,group.amount,
+        f"{label} баланса\n\nПользователь: {owner}\nТекущий баланс: {rubles(balance):.2f} ₽\n\n"
+        "Введите сумму в рублях:",fields={"user_id":owner})
 
-        if not user_id:
-            await message.answer("❌ Ошибка: пользователь не найден")
-            await state.clear()
-            return
 
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('UPDATE users SET balance = balance + ? WHERE telegram_id = ?', (amount, user_id))
-        c.execute('SELECT balance FROM users WHERE telegram_id = ?', (user_id,))
-        new_balance = c.fetchone()[0]
-        conn.commit()
-        conn.close()
+@router.callback_query(F.data.startswith("user_deposit_"))
+async def admin_deposit_start(callback: types.CallbackQuery,state: FSMContext):
+    await admin_balance_start(callback,state,withdraw=False)
 
-        await message.answer(f"✅ Баланс пополнен на <b>{amount:.2f} ₽</b>\n\nНовый баланс: <b>{new_balance:.2f} ₽</b>", parse_mode="HTML")
-        await state.clear()
-
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-        await state.clear()
 
 @router.callback_query(F.data.startswith("user_withdraw_"))
-async def admin_withdraw_start(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Доступ запрещён")
+async def admin_withdraw_start(callback: types.CallbackQuery,state: FSMContext):
+    await admin_balance_start(callback,state,withdraw=True)
+
+
+async def admin_balance_operation(message,state,*,withdraw):
+    if not private_admin(message,ADMIN_ID):
+        await state.clear()
+        await message.answer("⛔ Доступ запрещён")
         return
+    data=await state.get_data()
+    owner=data.get("user_id")
+    if type(owner) is not int or owner<=0:
+        await form_finish(message,state,"Пользователь не выбран. Откройте карточку заново.")
+        return
+    try:
+        n=kopecks((message.text or "").strip().replace(",","."),positive=True,maximum=MAX_KOPECKS)
+    except (ValueError,TypeError,OverflowError):
+        await form_retry(message,state,"❌ Введите сумму от 0,01 до 100000 ₽, не более двух знаков после запятой.")
+        return
+    balance=admin_balance_snapshot(owner)
+    if balance is None:
+        await form_finish(message,state,"Пользователь не найден.")
+        return
+    if withdraw and n>balance:
+        await form_retry(message,state,f"❌ Недостаточно средств. Текущий баланс: {rubles(balance):.2f} ₽.")
+        return
+    label="Списание" if withdraw else "Пополнение"
+    sign="−" if withdraw else "+"
+    group=AdminWithdraw if withdraw else AdminDeposit
+    await form_step(message,state,group.confirm,
+        f"Подтвердите операцию: {label.lower()}\n\nПользователь: {owner}\n"
+        f"Сумма: {sign}{rubles(n):.2f} ₽\nБаланс на момент проверки: {rubles(balance):.2f} ₽\n\n"
+        "Это ручная корректировка внутреннего баланса. Банковский платёж или возврат не создаётся.",
+        amount=f"{rubles(n):.2f}")
 
-    telegram_id = int(callback.data.replace("user_withdraw_", ""))
-    await state.update_data(user_id=telegram_id)
-    await state.set_state(AdminWithdraw.amount)
 
-    await callback.message.answer(
-        "💸 <b>Списание баланса</b>\n\n"
-        "Введите сумму списания (в рублях):",
-        parse_mode="HTML"
-    )
-    await callback.answer()
+@router.message(AdminDeposit.amount)
+async def admin_deposit_process(message: types.Message,state: FSMContext):
+    await admin_balance_operation(message,state,withdraw=False)
+
 
 @router.message(AdminWithdraw.amount)
-async def admin_withdraw_process(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
-        await state.clear()
-        await message.answer("❌ Операция отменена")
+async def admin_withdraw_process(message: types.Message,state: FSMContext):
+    await admin_balance_operation(message,state,withdraw=True)
+
+
+@router.callback_query(F.data.startswith("admin_balance_apply_"))
+async def admin_balance_apply(callback: types.CallbackQuery,state: FSMContext):
+    current=await state.get_state()
+    data=await state.get_data()
+    if (current not in (AdminDeposit.confirm.state,AdminWithdraw.confirm.state)
+            or not private_admin(callback,ADMIN_ID) or not callback_is_current(callback)
+            or data.get(FORM_SCREEN)!=getattr(callback.message,"message_id",None)
+            or callback.data!=data.get(CONFIRM_TOKEN)):
+        await callback.answer("Подтверждение устарело.",show_alert=True)
         return
-
+    owner=data.get("user_id")
+    if type(owner) is not int or owner<=0:
+        await state.clear()
+        await callback.answer("Пользователь не выбран.",show_alert=True)
+        return
+    withdraw=current==AdminWithdraw.confirm.state
+    # Close the form before attempting any financial write. The same token
+    # is also the durable ledger identity, independent of callback/message ID.
+    token=callback.data
+    await state.clear()
+    await callback.answer()
+    review=False
     try:
-        amount = float(message.text)
-        if amount <= 0:
-            await message.answer("❌ Сумма должна быть больше 0")
-            return
+        amount=data["amount"]
+        n=kopecks(amount,positive=True,maximum=MAX_KOPECKS)
+        balance,changed=await asyncio.to_thread(admin_adjust,DB_PATH,
+            "admin-confirm:"+token,owner,callback.from_user.id,amount,withdraw=withdraw)
+        label="Списание" if withdraw else "Пополнение"
+        text=(f"✅ {label}: {rubles(n):.2f} ₽\nПользователь: {owner}\n"
+              f"Баланс после операции: {rubles(balance):.2f} ₽")
+        if not changed:
+            text="Операция уже учтена.\n"+text
+    except (ValueError,KeyError,TypeError):
+        text="Операция недоступна: проверьте сумму, остаток и наличие блокировки средств."
+    except Exception:
+        logging.error("Administrative balance operation requires review")
+        text="Результат операции не подтверждён. Проверьте журнал перед повтором."
+        review=True
+    await render_screen(callback.message,text,reply_markup=admin_balance_keyboard(owner,review=review))
 
-        data = await state.get_data()
-        user_id = data['user_id']
-
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('SELECT balance FROM users WHERE telegram_id = ?', (user_id,))
-        current_balance = c.fetchone()[0] or 0
-
-        if amount > current_balance:
-            await message.answer(f"❌ Недостаточно средств!\n\nТекущий баланс: <b>{current_balance:.2f} ₽</b>", parse_mode="HTML")
-            return
-
-        c.execute('UPDATE users SET balance = balance - ? WHERE telegram_id = ?', (amount, user_id))
-        c.execute('SELECT balance FROM users WHERE telegram_id = ?', (user_id,))
-        new_balance = c.fetchone()[0]
-        conn.commit()
-        conn.close()
-
-        await message.answer(f"✅ С баланса списано <b>{amount:.2f} ₽</b>\n\nНовый баланс: <b>{new_balance:.2f} ₽</b>", parse_mode="HTML")
-        await state.clear()
-
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-        await state.clear()
 
 @router.callback_query(F.data.startswith("user_block_"))
 async def admin_block_user(callback: types.CallbackQuery):
@@ -627,250 +596,201 @@ async def admin_tariffs(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, name, price_rub, duration_days, traffic_gb, ip_limit, is_active FROM tariffs')
-    tariffs = c.fetchall()
-    conn.close()
-
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        tariffs = conn.execute('SELECT id, name, price_rub, duration_days, traffic_gb, ip_limit, is_active FROM tariffs').fetchall()
     text = "📋 <b>Тарифы:</b>\n\n"
     for t in tariffs:
-        s = "✅" if t[6] else "❌"
+        status = "✅" if t[6] else "❌"
         tr = f"{t[4]:.0f} ГБ" if t[4] else "∞"
-        text += f"{s} <b>{t[1]}</b> — {t[2]:.0f}₽ / {t[3]}дн / {tr} / IP:{t[5]}\n"
-
+        text += f"{status} <b>{escape(t[1])}</b> — {t[2]:.2f}₽ / {t[3]}дн / {tr} / IP:{t[5]}\n"
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="➕ Добавить тариф", callback_data="admin_add_tariff")],
         [types.InlineKeyboardButton(text="✏️ Редактировать тариф", callback_data="admin_edit_tariff")],
         [types.InlineKeyboardButton(text="🗑 Удалить тариф", callback_data="admin_delete_tariff")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text,reply_markup=kb,parse_mode="HTML")
     await callback.answer()
+
+
+def tariff_number(text, *, integer=False, minimum=0):
+    value = int(text) if integer else float(text)
+    if not math.isfinite(value) or value < minimum:
+        raise ValueError("Invalid tariff value")
+    return value
+
 
 @router.callback_query(F.data == "admin_add_tariff")
 async def admin_add_tariff_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-    await callback.message.answer("Название тарифа:", parse_mode="HTML")
-    await state.set_state(AddTariff.name)
-    await callback.answer()
+    extend_temp.pop(callback.from_user.id,None)
+    await form_begin(callback,state,AddTariff.name,"Название тарифа:")
+
 
 @router.message(AddTariff.name)
 async def tariff_name(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await message.answer("Цена (₽):")
-    await state.set_state(AddTariff.price)
+    await form_step(message,state,AddTariff.price,"Цена (₽):",name=message.text.strip())
+
 
 @router.message(AddTariff.price)
 async def tariff_price(message: types.Message, state: FSMContext):
     try:
-        await state.update_data(price=float(message.text))
-        await message.answer("Дней:")
-        await state.set_state(AddTariff.days)
-    except:
-        await message.answer("❌ Введите число")
+        price=tariff_number(message.text)
+    except (ValueError,TypeError,OverflowError):
+        await form_retry(message,state,"❌ Введите неотрицательное число.")
+        return
+    await form_step(message,state,AddTariff.days,"Дней:",price=price)
+
 
 @router.message(AddTariff.days)
 async def tariff_days(message: types.Message, state: FSMContext):
     try:
-        await state.update_data(days=int(message.text))
-        await message.answer("Трафик (ГБ, 0=∞):")
-        await state.set_state(AddTariff.traffic)
-    except:
-        await message.answer("❌ Введите число")
+        days=tariff_number(message.text,integer=True,minimum=1)
+    except (ValueError,TypeError,OverflowError):
+        await form_retry(message,state,"❌ Введите целое число больше нуля.")
+        return
+    await form_step(message,state,AddTariff.traffic,"Трафик (ГБ, 0=∞):",days=days)
+
 
 @router.message(AddTariff.traffic)
 async def tariff_traffic(message: types.Message, state: FSMContext):
     try:
-        await state.update_data(traffic=float(message.text))
-        await message.answer("Лимит IP:")
-        await state.set_state(AddTariff.ip_limit)
-    except:
-        await message.answer("❌ Введите число")
+        traffic=tariff_number(message.text)
+    except (ValueError,TypeError,OverflowError):
+        await form_retry(message,state,"❌ Введите неотрицательное число.")
+        return
+    await form_step(message,state,AddTariff.ip_limit,"Лимит IP:",traffic=traffic)
+
 
 @router.message(AddTariff.ip_limit)
 async def tariff_ip(message: types.Message, state: FSMContext):
     try:
-        ip_limit = int(message.text)
-        data = await state.get_data()
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('INSERT INTO tariffs (name, price_rub, duration_days, traffic_gb, ip_limit) VALUES (?,?,?,?,?)',
-                  (data['name'], data['price'], data['days'], data['traffic'], ip_limit))
-        conn.commit()
-        conn.close()
-        await message.answer(f"✅ Тариф «{data['name']}» создан!")
-        await state.clear()
-    except:
-        await message.answer("❌ Введите число")
+        ip_limit=tariff_number(message.text,integer=True)
+    except (ValueError,TypeError,OverflowError):
+        await form_retry(message,state,"❌ Введите неотрицательное целое число.")
+        return
+    data=await state.get_data()
+    try:
+        with closing(sqlite3.connect(DB_PATH)) as conn,conn:
+            conn.execute('INSERT INTO tariffs (name, price_rub, duration_days, traffic_gb, ip_limit) VALUES (?,?,?,?,?)',
+                (data['name'],data['price'],data['days'],data['traffic'],ip_limit))
+    except (sqlite3.Error,OverflowError):
+        logging.exception("Admin tariff insert failed")
+        await form_finish(message,state,"Не удалось подтвердить создание тарифа. Проверьте список перед повтором.")
+        return
+    await form_finish(message,state,f"✅ Тариф «{data['name']}» создан!")
+
 
 @router.callback_query(F.data == "admin_edit_tariff")
 async def admin_edit_tariff_select(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, name, price_rub, duration_days, is_active FROM tariffs')
-    tariffs = c.fetchall()
-    conn.close()
-
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        tariffs=conn.execute('SELECT id, name, price_rub, duration_days, is_active FROM tariffs').fetchall()
     if not tariffs:
-        await callback.message.answer("📭 Нет тарифов для редактирования")
-        await callback.answer()
+        await callback.answer("Нет тарифов для редактирования",show_alert=True)
         return
+    kb=types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text=f"{'✅' if t[4] else '❌'} {t[1]} — {t[2]}₽ / {t[3]} дн.",
+            callback_data=f"admin_edit_tariff_select_{t[0]}")] for t in tariffs
+    ]+[[types.InlineKeyboardButton(text="🔙 Назад",callback_data="admin_tariffs")]])
+    extend_temp.pop(callback.from_user.id,None)
+    await form_begin(callback,state,EditTariff.tariff_id,"✏️ Выберите тариф для редактирования:",keyboard=kb)
 
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(
-            text=f"{'✅' if t[4] else '❌'} {t[1]} — {t[2]}₽ / {t[3]} дн.",
-            callback_data=f"admin_edit_tariff_select_{t[0]}"
-        )] for t in tariffs
-    ] + [[types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_tariffs")]])
-
-    await callback.message.edit_text(
-        "✏️ <b>Выберите тариф для редактирования:</b>",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-    await state.set_state(EditTariff.tariff_id)
-    await callback.answer()
 
 @router.callback_query(F.data.startswith("admin_edit_tariff_select_"))
 async def admin_edit_tariff_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-
-    tariff_id = int(callback.data.replace("admin_edit_tariff_select_", ""))
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, name, price_rub, duration_days, traffic_gb, ip_limit, is_active FROM tariffs WHERE id = ?', (tariff_id,))
-    tariff = c.fetchone()
-    conn.close()
-
-    if not tariff:
-        await callback.message.answer("❌ Тариф не найден")
-        await callback.answer()
+    try:
+        tariff_id=int(callback.data.removeprefix("admin_edit_tariff_select_"))
+    except ValueError:
+        await callback.answer("Некорректный тариф",show_alert=True)
         return
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        tariff=conn.execute('SELECT id, name, price_rub, duration_days, traffic_gb, ip_limit, is_active FROM tariffs WHERE id=?',
+                            (tariff_id,)).fetchone()
+    if not tariff:
+        await callback.answer("Тариф не найден. Вернитесь назад.",show_alert=True)
+        return
+    text=(f"✏️ Редактирование тарифа\n\n"
+          f"📛 Название: {tariff[1]}\n"
+          f"💰 Цена: {tariff[2]} ₽\n"
+          f"📅 Дней: {tariff[3]}\n"
+          f"📦 Трафик: {tariff[4] or '∞'} ГБ\n"
+          f"📱 IP: {tariff[5]}\n"
+          f"📊 Статус: {'✅ Активен' if tariff[6] else '❌ Неактивен'}\n\n"
+          "Введите новое название или /skip для пропуска:")
+    await form_begin(callback,state,EditTariff.name,text,fields={"tariff_id":tariff_id,"tariff":tariff})
 
-    await state.update_data(tariff_id=tariff_id, tariff=tariff)
 
-    text = f"✏️ <b>Редактирование тарифа</b>\n\n"
-    text += f"📛 Название: {tariff[1]}\n"
-    text += f"💰 Цена: {tariff[2]} ₽\n"
-    text += f"📅 Дней: {tariff[3]}\n"
-    text += f"📦 Трафик: {tariff[4] or '∞'} ГБ\n"
-    text += f"📱 IP: {tariff[5]}\n"
-    text += f"📊 Статус: {'✅ Активен' if tariff[6] else '❌ Неактивен'}\n\n"
-    text += "Введите <b>новое название</b> или отправьте /skip для пропуска:"
+async def edit_tariff_field(message,state,target,prompt,field,index,*,integer=False,minimum=0):
+    data=await state.get_data()
+    try:
+        value=data['tariff'][index] if message.text=="/skip" else tariff_number(message.text,integer=integer,minimum=minimum)
+    except (ValueError,TypeError,OverflowError):
+        await form_retry(message,state,"❌ Введите допустимое число или /skip.")
+        return
+    await form_step(message,state,target,prompt,**{field:value})
 
-    kb = get_back_keyboard("admin_tariffs")
-
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    await state.set_state(EditTariff.name)
-    await callback.answer()
 
 @router.message(EditTariff.name)
 async def edit_tariff_name(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    if message.text != "/skip":
-        await state.update_data(name=message.text)
-    else:
-        await state.update_data(name=data['tariff'][1])
+    data=await state.get_data()
+    name=data['tariff'][1] if message.text=="/skip" else message.text.strip()
+    await form_step(message,state,EditTariff.price,"💰 Введите новую цену (или /skip):",name=name)
 
-    await message.answer("💰 Введите <b>новую цену</b> (или /skip):", parse_mode="HTML")
-    await state.set_state(EditTariff.price)
 
 @router.message(EditTariff.price)
 async def edit_tariff_price(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    if message.text == "/skip":
-        await state.update_data(price=data['tariff'][2])
-    else:
-        try:
-            await state.update_data(price=float(message.text))
-        except:
-            await message.answer("❌ Введите число или /skip:")
-            return
+    await edit_tariff_field(message,state,EditTariff.days,"📅 Введите новое количество дней (или /skip):",
+        "price",2)
 
-    await message.answer("📅 Введите <b>новое количество дней</b> (или /skip):", parse_mode="HTML")
-    await state.set_state(EditTariff.days)
 
 @router.message(EditTariff.days)
 async def edit_tariff_days(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    if message.text == "/skip":
-        await state.update_data(days=data['tariff'][3])
-    else:
-        try:
-            await state.update_data(days=int(message.text))
-        except:
-            await message.answer("❌ Введите число или /skip:")
-            return
+    await edit_tariff_field(message,state,EditTariff.traffic,"📦 Введите новый трафик (ГБ, 0 = ∞) (или /skip):",
+        "days",3,integer=True,minimum=1)
 
-    await message.answer("📦 Введите <b>новый трафик (ГБ, 0 = ∞)</b> (или /skip):", parse_mode="HTML")
-    await state.set_state(EditTariff.traffic)
 
 @router.message(EditTariff.traffic)
 async def edit_tariff_traffic(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    if message.text == "/skip":
-        await state.update_data(traffic=data['tariff'][4])
-    else:
-        try:
-            await state.update_data(traffic=float(message.text))
-        except:
-            await message.answer("❌ Введите число или /skip:")
-            return
+    await edit_tariff_field(message,state,EditTariff.ip_limit,"📱 Введите новый лимит IP (или /skip):",
+        "traffic",4)
 
-    await message.answer("📱 Введите <b>новый лимит IP</b> (или /skip):", parse_mode="HTML")
-    await state.set_state(EditTariff.ip_limit)
 
 @router.message(EditTariff.ip_limit)
 async def edit_tariff_ip_limit(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    if message.text == "/skip":
-        await state.update_data(ip_limit=data['tariff'][5])
-    else:
-        try:
-            await state.update_data(ip_limit=int(message.text))
-        except:
-            await message.answer("❌ Введите число или /skip:")
-            return
+    data=await state.get_data()
+    old=data['tariff']
+    try:
+        ip_limit=old[5] if message.text=="/skip" else tariff_number(message.text,integer=True)
+    except (ValueError,TypeError,OverflowError):
+        await form_retry(message,state,"❌ Введите допустимое целое число или /skip.")
+        return
+    name,price,days,traffic=(data.get(k,old[i]) for k,i in (("name",1),("price",2),("days",3),("traffic",4)))
+    try:
+        with closing(sqlite3.connect(DB_PATH)) as conn,conn:
+            # Do not overwrite a concurrent web-admin change or active status.
+            changed=conn.execute("""UPDATE tariffs SET name=?, price_rub=?, duration_days=?, traffic_gb=?, ip_limit=?
+                WHERE id=? AND name IS ? AND price_rub IS ? AND duration_days IS ? AND traffic_gb IS ?
+                AND ip_limit IS ? AND is_active IS ?""",
+                (name,price,days,traffic,ip_limit,*old)).rowcount
+    except (sqlite3.Error,OverflowError):
+        logging.exception("Admin tariff update failed")
+        await form_finish(message,state,"Не удалось подтвердить обновление тарифа. Проверьте список.")
+        return
+    if changed!=1:
+        await form_finish(message,state,"Тариф изменён или удалён в другом сеансе. Откройте его заново.")
+        return
+    await form_finish(message,state,
+        f"✅ Тариф обновлён!\n\n📛 Название: {name}\n💰 Цена: {price} ₽\n"
+        f"📅 Дней: {days}\n📦 Трафик: {traffic or '∞'} ГБ\n📱 IP: {ip_limit}")
 
-    tariff_id = data['tariff_id']
-    name = data.get('name', data['tariff'][1])
-    price = data.get('price', data['tariff'][2])
-    days = data.get('days', data['tariff'][3])
-    traffic = data.get('traffic', data['tariff'][4])
-    ip_limit = data.get('ip_limit', data['tariff'][5])
-    is_active = data['tariff'][6]
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''UPDATE tariffs
-                 SET name = ?, price_rub = ?, duration_days = ?, traffic_gb = ?, ip_limit = ?, is_active = ?
-                 WHERE id = ?''',
-              (name, price, days, traffic or 0, ip_limit, is_active, tariff_id))
-    conn.commit()
-    conn.close()
-
-    await message.answer(
-        f"✅ <b>Тариф обновлён!</b>\n\n"
-        f"📛 Название: {name}\n"
-        f"💰 Цена: {price} ₽\n"
-        f"📅 Дней: {days}\n"
-        f"📦 Трафик: {traffic or '∞'} ГБ\n"
-        f"📱 IP: {ip_limit}\n"
-        f"📊 Статус: {'✅ Активен' if is_active else '❌ Неактивен'}",
-        parse_mode="HTML"
-    )
-    await state.clear()
 
 @router.callback_query(F.data == "admin_delete_tariff")
 async def admin_delete_tariff_start(callback: types.CallbackQuery):
@@ -896,7 +816,7 @@ async def admin_delete_tariff_start(callback: types.CallbackQuery):
         )] for t in tariffs
     ] + [[types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_tariffs")]])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "🗑 <b>Выберите тариф для удаления:</b>",
         reply_markup=kb,
         parse_mode="HTML"
@@ -927,7 +847,7 @@ async def admin_delete_tariff_confirm(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_tariffs")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"⚠️ <b>Удаление тарифа</b>\n\n"
         f"📦 Тариф: {tariff[1]}\n\n"
         f"<b>ВНИМАНИЕ!</b> Удаление тарифа не удалит существующие подписки.\n\n"
@@ -958,81 +878,112 @@ async def admin_delete_tariff_execute(callback: types.CallbackQuery):
 # АДМИН: ПРОДЛЕНИЕ КЛЮЧА (ИСПРАВЛЕНО: ИСПОЛЬЗУЕТ vpn_service)
 # ============================================================
 
+def admin_renew_target(sub_id):
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        return db.execute("""SELECT s.id,s.telegram_id,s.tariff_id,s.end_date,s.server_id,s.xui_client_uid,s.xui_subid
+            FROM subscriptions s JOIN users u ON u.telegram_id=s.telegram_id JOIN servers v ON v.id=s.server_id
+            WHERE s.id=? AND s.is_active=1 AND s.managed_by_vpn4us=1 AND u.is_blocked=0 AND v.is_active=1""",
+            (sub_id,)).fetchone()
+
+
 @router.callback_query(F.data.startswith("admin_extend_key_"))
-async def admin_extend_key_start(callback: types.CallbackQuery):
+async def admin_extend_key_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-
-    sub_id = int(callback.data.replace("admin_extend_key_", ""))
-    extend_temp[callback.from_user.id] = sub_id
-
-    await callback.message.answer(
-        "📅 <b>Продление ключа</b>\n\n"
-        "Введите количество дней для продления (числом):\n"
-        "(или отправьте 0 для отмены)",
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
     try:
-        await callback.message.delete()
-    except:
-        pass
-
-@router.message(lambda message: bool(message.from_user) and message.from_user.id == ADMIN_ID and message.from_user.id in extend_temp)
-async def admin_extend_key_process(message: types.Message):
-    if message.from_user.id not in extend_temp:
-        return
-
-    try:
-        days = int(message.text)
-        sub_id = extend_temp.pop(message.from_user.id)
-
-        if days <= 0:
-            await message.answer("❌ Операция отменена")
-            return
-
-        # Получаем информацию о подписке
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('SELECT end_date, xui_email, telegram_id, tariff_id FROM subscriptions WHERE id = ?', (sub_id,))
-        sub = c.fetchone()
-
-        if not sub:
-            await message.answer("❌ Подписка не найдена")
-            conn.close()
-            return
-
-        end_date, xui_email, user_id, tariff_id = sub
-
-        # Используем vpn_service для продления
-        result = await vpn_service.extend_subscription(
-            subscription_id=sub_id,
-            days_to_add=days,
-            tariff_id=tariff_id
-        )
-
-        if result['success']:
-            await message.answer(
-                f"✅ Ключ продлён на <b>{days} дн.</b>\n\n"
-                f"Новая дата: <b>{result['new_end_date'].strftime('%d.%m.%Y')}</b>",
-                parse_mode="HTML"
-            )
-        else:
-            await message.answer(
-                f"❌ Ошибка продления: {result.get('error', 'Неизвестная ошибка')}",
-                parse_mode="HTML"
-            )
-
-        conn.close()
-        await admin_list_keys_for_user_prepared(message, user_id)
-
+        sub_id=int(callback.data.removeprefix("admin_extend_key_"))
+        if sub_id<=0:
+            raise ValueError
     except ValueError:
-        await message.answer("❌ Введите число")
-    except Exception as e:
-        logging.error(f"❌ Ошибка продления: {e}")
-        await message.answer(f"❌ Ошибка: {e}")
+        await callback.answer("Некорректный ключ",show_alert=True)
+        return
+    target=admin_renew_target(sub_id)
+    if not target:
+        await callback.answer("Ключ недоступен для продления",show_alert=True)
+        return
+    extend_temp.pop(callback.from_user.id,None)
+    await form_begin(callback,state,AdminExtendKey.days,
+        f"📅 Продление ключа №{sub_id}\nПользователь: {target[1]}\nСрок до: {target[3][:10]}\n\n"
+        "Введите количество дней (или 0 для отмены):",
+        fields={"subscription_id":sub_id,"target":target})
+
+
+@router.message(AdminExtendKey.days)
+async def admin_extend_key_process(message: types.Message, state: FSMContext):
+    data=await state.get_data()
+    try:
+        days=int(message.text)
+        if not 0<=days<=36500:
+            raise ValueError
+    except (ValueError,TypeError,OverflowError):
+        await form_retry(message,state,"❌ Введите целое число от 1 до 36500.")
+        return
+    if days==0:
+        await form_finish(message,state,"Продление отменено.")
+        return
+    target=admin_renew_target(data["subscription_id"])
+    if not target or tuple(data["target"])!=target:
+        await form_finish(message,state,"Ключ изменился. Откройте карточку заново.")
+        return
+    await form_step(message,state,AdminExtendKey.confirm,
+        f"Подтвердите продление ключа №{target[0]}\n\nПользователь: {target[1]}\n"
+        f"Добавить: {days} дн.\n\nОплата не списывается.",days=days)
+
+
+@router.callback_query(F.data.startswith("admin_key_apply_"))
+async def admin_apply_key_operation(callback: types.CallbackQuery,state: FSMContext):
+    current=await state.get_state()
+    data=await state.get_data()
+    if (current not in (AdminAddKey.confirm.state,AdminExtendKey.confirm.state)
+            or not private_admin(callback,ADMIN_ID) or not callback_is_current(callback)
+            or data.get(FORM_SCREEN)!=getattr(callback.message,"message_id",None)
+            or callback.data!=data.get(CONFIRM_TOKEN)):
+        await callback.answer("Подтверждение устарело",show_alert=True)
+        return
+    parent=parent_for(current,data)
+    # One confirmation, one service attempt. Clear before any external mutation.
+    await state.clear()
+    await callback.answer()
+    days=data["days"]
+    if current==AdminAddKey.confirm.state:
+        user_id=data["user_id"]
+        tariff=admin_issue_tariff(data["tariff_id"])
+        if not tariff or tuple(data["tariff"])!=tariff or not admin_issue_owner(user_id):
+            result_text="Пользователь или тариф изменились. Откройте форму заново."
+        else:
+            try:
+                result=await vpn_service.create_subscription(telegram_id=user_id,tariff_id=tariff[0],days=days,
+                    traffic_gb=tariff[4],ip_limit=tariff[5],allow_additional_key=True)
+                if result.get("success"):
+                    date=result["end_date"].strftime("%d.%m.%Y")
+                    result_text=f"✅ Ключ создан!\nПользователь: {user_id}\nТариф: {tariff[1]}\nДо: {date}\n\n{result['link']}"
+                    try:
+                        await callback.bot.send_message(chat_id=user_id,
+                            text=f"🎉 <b>Администратор выдал вам ключ!</b>\n\n📦 Тариф: {escape(tariff[1])}\n"
+                                 f"📅 Действует до: {date}\n\n<code>{escape(result['link'])}</code>",
+                            parse_mode="HTML")
+                    except Exception:
+                        result_text+="\nНе удалось подтвердить доставку уведомления."
+                else:
+                    result_text="Выдача не подтверждена. Проверьте ключи и журнал выдачи перед повтором."
+            except Exception as exc:
+                logging.warning("Manual key issuance requires review: %s",type(exc).__name__)
+                result_text="Выдача не подтверждена. Проверьте ключи и журнал выдачи перед повтором."
+    else:
+        target=admin_renew_target(data["subscription_id"])
+        if not target or tuple(data["target"])!=target:
+            result_text="Ключ изменился. Откройте карточку заново."
+        else:
+            try:
+                result=await vpn_service.extend_subscription(subscription_id=target[0],days_to_add=days,tariff_id=target[2])
+                result_text=(f"✅ Ключ продлён на {days} дн.\nНовая дата: {result['new_end_date'].strftime('%d.%m.%Y')}"
+                    if result.get("success") else "Продление не подтверждено. Проверьте ключ и панель перед повтором.")
+            except Exception as exc:
+                logging.warning("Manual renewal requires review: %s",type(exc).__name__)
+                result_text="Продление не подтверждено. Проверьте ключ и панель перед повтором."
+    await render_screen(callback.message,result_text,reply_markup=back_keyboard(parent))
+
 
 async def admin_list_keys_for_user_prepared(message, user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -1116,7 +1067,7 @@ async def admin_servers_menu(callback: types.CallbackQuery):
             [types.InlineKeyboardButton(text="➕ Добавить сервер", callback_data="admin_add_server")],
             [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
         ])
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
         await callback.answer()
         return
 
@@ -1139,7 +1090,7 @@ async def admin_servers_menu(callback: types.CallbackQuery):
             status_emoji = "🔴"
             status_text = "❌ Недоступен"
 
-        text += f"{status_emoji} <b>{name}</b>\n"
+        text += f"{status_emoji} <b>{escape(name)}</b>\n"
         text += f"   Статус: {status_text}\n"
         text += f"   ID: {server_id}\n\n"
 
@@ -1152,7 +1103,7 @@ async def admin_servers_menu(callback: types.CallbackQuery):
     buttons.append([types.InlineKeyboardButton(text="➕ Добавить сервер", callback_data="admin_add_server")])
     buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         text,
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
@@ -1206,7 +1157,7 @@ async def server_detail(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад к списку", callback_data="admin_servers_menu")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("server_check_"))
@@ -1217,7 +1168,7 @@ async def server_check(callback: types.CallbackQuery):
 
     server_id = int(callback.data.replace("server_check_", ""))
 
-    await callback.message.edit_text("⏳ Проверка сервера...", parse_mode="HTML")
+    await render_screen(callback.message,"⏳ Проверка сервера...", parse_mode="HTML")
 
     try:
         result = server_manager.check_server_health(server_id)
@@ -1284,7 +1235,7 @@ async def server_delete_handler(callback: types.CallbackQuery):
             [types.InlineKeyboardButton(text="❌ Отмена", callback_data=f"server_detail_{server_id}")]
         ])
 
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             f"⚠️ <b>Удаление сервера</b>\n\n"
             f"Сервер: <b>{server[0]}</b>\n\n"
             f"<b>ВНИМАНИЕ!</b> Это действие удалит сервер из базы данных.\n\n"
@@ -1300,33 +1251,70 @@ async def admin_add_server_start(callback: types.CallbackQuery, state: FSMContex
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-    await callback.message.answer("Название сервера:", parse_mode="HTML")
-    await state.set_state(AddServer.name)
-    await callback.answer()
+    extend_temp.pop(callback.from_user.id,None)
+    await form_begin(callback,state,AddServer.name,"Название сервера:")
+
 
 @router.message(AddServer.name)
 async def server_name(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await message.answer("URL панели:")
-    await state.set_state(AddServer.url)
+    name=message.text.strip()
+    if len(name)>100:
+        await form_retry(message,state,"❌ Название должно быть не длиннее 100 символов.")
+        return
+    await form_step(message,state,AddServer.url,"URL панели (https:// или http://):",name=name)
+
+
+def panel_url(value):
+    value=value.strip()
+    parsed=urlsplit(value)
+    if (len(value)>2048 or any(c.isspace() for c in value)
+            or parsed.scheme not in ("http","https") or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment
+            or parsed.port==0):
+        raise ValueError("Invalid panel URL")
+    return value.rstrip("/")
+
 
 @router.message(AddServer.url)
 async def server_url(message: types.Message, state: FSMContext):
-    await state.update_data(url=message.text)
-    await message.answer("API Token:")
-    await state.set_state(AddServer.token)
+    try:
+        url=panel_url(message.text)
+    except ValueError:
+        await form_retry(message,state,"❌ Введите адрес панели без логина, пароля, параметров и фрагмента.")
+        return
+    await form_step(message,state,AddServer.token,
+        "API Token (будет зашифрован в базе; бот попробует удалить сообщение с токеном):",url=url)
+
 
 @router.message(AddServer.token)
 async def server_token(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('INSERT INTO servers (name, url, api_token, is_active, status) VALUES (?,?,?,?,?)',
-              (data['name'], data['url'], message.text, 1, 'pending'))
-    conn.commit()
-    conn.close()
-    await message.answer(f"✅ Сервер «{data['name']}» добавлен!", parse_mode="HTML")
-    await state.clear()
+    data=await state.get_data()
+    token=message.text.strip()
+    removed=True
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        removed=False
+    notice="" if removed else "\nУдалите сообщение с токеном вручную."
+    if not token or len(token)>4096 or any(c.isspace() for c in token):
+        await form_retry(message,state,"❌ Некорректный токен."+notice)
+        return
+    try:
+        encoded=encrypt(token)
+        with closing(sqlite3.connect(DB_PATH)) as conn,conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM servers WHERE rtrim(url,'/')=?",(data["url"],)).fetchone():
+                result="Сервер с таким URL уже есть. Новый сервер не добавлен."
+            else:
+                conn.execute("INSERT INTO servers(name,url,api_token,is_active,status) VALUES(?,?,?,?,?)",
+                    (data["name"],data["url"],encoded,1,"pending"))
+                result=f"✅ Сервер «{data['name']}» добавлен. Проверка соединения ещё не выполнена."
+    except Exception as exc:
+        logging.warning("Admin server insert requires review: %s",type(exc).__name__)
+        result="Не удалось подтвердить добавление сервера. Проверьте список перед повтором."
+    await form_finish(message,state,result+notice)
+
 
 # ============================================================
 # АДМИН: СТАТИСТИКА
@@ -1351,64 +1339,71 @@ async def admin_stats(callback: types.CallbackQuery):
     text = f"📊 <b>Статистика:</b>\n\n👤 Пользователей: {users}\n✅ Подписок: {subs}\n💰 Платежей: {paid[0] or 0} на {paid[1] or 0:.0f}₽"
     kb = get_back_keyboard("admin_back_to_menu")
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 # ============================================================
 # АДМИН: ТЕКСТЫ
 # ============================================================
 
+ADMIN_TEXT_FIELDS = {
+    'text_welcome': '🎉 Приветственное',
+    'text_install_vpn': '📥 Установить VPN',
+    'text_android_instruction': '🤖 Android инструкция',
+    'text_ios_instruction': '🍏 iOS инструкция',
+    'text_windows_instruction': '💻 Windows инструкция',
+    'text_faq': '❓ Вопросы (FAQ)'
+}
+
+
 @router.callback_query(F.data == "admin_texts")
 async def admin_texts(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-
-    fields = {
-        'text_welcome': '🎉 Приветственное',
-        'text_install_vpn': '📥 Установить VPN',
-        'text_android_instruction': '🤖 Android инструкция',
-        'text_ios_instruction': '🍏 iOS инструкция',
-        'text_windows_instruction': '💻 Windows инструкция',
-        'text_faq': '❓ Вопросы (FAQ)'
-    }
-
-    buttons = []
-    for key, label in fields.items():
-        val = get_setting(key) or '(пусто)'
-        short = val[:35].replace('\n',' ') + '...' if len(val) > 35 else val.replace('\n',' ')
-        buttons.append([types.InlineKeyboardButton(text=f"✏️ {label}: {short}", callback_data=f"edittext_{key}")])
-    buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")])
-
-    await callback.message.edit_text(
-        "💬 <b>Редактирование текстов</b>\nВыберите поле:",
-        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="HTML"
-    )
+    buttons=[]
+    for key,label in ADMIN_TEXT_FIELDS.items():
+        val=get_setting(key) or '(пусто)'
+        short=val[:35].replace('\n',' ')+('...' if len(val)>35 else '')
+        buttons.append([types.InlineKeyboardButton(text=f"✏️ {label}: {short}",callback_data=f"edittext_{key}")])
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад",callback_data="admin_back_to_menu")])
+    await render_screen(callback.message,"💬 <b>Редактирование текстов</b>\nВыберите поле:",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),parse_mode="HTML")
     await callback.answer()
+
 
 @router.callback_query(F.data.startswith("edittext_"))
 async def edit_text_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещён")
         return
-    field = callback.data.replace("edittext_", "")
-    current = get_setting(field) or '(пусто)'
-    await state.update_data(field=field)
-    await state.set_state(EditText.waiting)
-    await callback.message.answer(
-        f"✏️ Поле: <b>{field}</b>\n\nТекущий текст:\n{current}\n\nОтправьте новый текст полностью.\nПоддерживается HTML.",
-        parse_mode="HTML"
-    )
-    await callback.answer()
+    field=callback.data.removeprefix("edittext_")
+    if field not in ADMIN_TEXT_FIELDS:
+        await callback.answer("Недопустимое поле",show_alert=True)
+        return
+    current=get_setting(field) or '(пусто)'
+    preview=current[:2500]+("…" if len(current)>2500 else "")
+    extend_temp.pop(callback.from_user.id,None)
+    await form_begin(callback,state,EditText.waiting,
+        f"✏️ {ADMIN_TEXT_FIELDS[field]}\n\nТекущий текст:\n{preview}\n\nОтправьте новый текст полностью. Поддерживается HTML.",
+        fields={"field":field})
+
 
 @router.message(EditText.waiting)
 async def edit_text_save(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    field = data['field']
-    set_setting(field, message.text)
-    await message.answer(f"✅ Поле <b>{field}</b> обновлено!", parse_mode="HTML")
-    await state.clear()
+    data=await state.get_data()
+    field=data.get('field')
+    if field not in ADMIN_TEXT_FIELDS:
+        await form_finish(message,state,"Недопустимое поле. Изменения не сохранены.")
+        return
+    try:
+        set_setting(field,message.text)
+    except Exception:
+        logging.exception("Admin text update failed")
+        await form_finish(message,state,"Не удалось подтвердить сохранение текста. Проверьте текущее значение.")
+        return
+    await form_finish(message,state,f"✅ {ADMIN_TEXT_FIELDS[field]}: текст обновлён!")
+
 
 # ============================================================
 # АДМИН: АВТОМАТИЗАЦИЯ
@@ -1434,7 +1429,7 @@ async def admin_automation_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"⚙️ <b>Настройки автоматизации</b>\n\n"
         f"📌 Авто-продление: {status}\n"
         f"📌 Авто-уведомления: Активны\n\n"
@@ -1464,7 +1459,7 @@ async def toggle_auto_renew(callback: types.CallbackQuery):
 
     kb = get_back_keyboard("admin_automation")
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"🔄 Авто-продление: {status}",
         reply_markup=kb,
         parse_mode="HTML"
@@ -1505,7 +1500,7 @@ async def auto_notify_status(callback: types.CallbackQuery):
 
     kb = get_back_keyboard("admin_automation")
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 # ============================================================
@@ -1530,7 +1525,7 @@ async def admin_tax_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"🧾 <b>Настройки налогов</b>\n\n"
         f"📌 Статус: {status_text}\n"
         f"📌 {inn_display}\n\n"
@@ -1546,11 +1541,14 @@ async def tax_toggle(callback: types.CallbackQuery):
         await callback.answer("⛔ Доступ запрещён")
         return
 
-    current = get_setting('tax_enabled') == 'true'
-    new_value = 'false' if current else 'true'
-    set_setting('tax_enabled', new_value)
+    from tax_settings_policy import save as save_fiscal
+    try:
+        enabled = await asyncio.to_thread(save_fiscal,DB_PATH,{},toggle=True)
+    except ValueError as exc:
+        await callback.answer(str(exc),show_alert=True)
+        return
 
-    status = "✅ Включено" if new_value == 'true' else "❌ Выключено"
+    status = "✅ Включено" if enabled else "❌ Выключено"
 
     await callback.answer(f"Налоги: {status}", show_alert=True)
     await admin_tax_menu(callback)
@@ -1563,12 +1561,14 @@ async def tax_status(callback: types.CallbackQuery):
 
     tax_enabled = get_setting('tax_enabled') == 'true'
     tax_inn = get_setting('tax_inn') or 'Не настроен'
-    has_password = bool(get_setting('tax_password'))
+    from tax_settings_policy import status as fiscal_status
+    fiscal = await asyncio.to_thread(fiscal_status,DB_PATH)
+    has_password = fiscal["credentials_ready"]
 
     text = (
         f"📊 <b>Статус налоговой интеграции</b>\n\n"
         f"🔹 Включено: {'✅' if tax_enabled else '❌'}\n"
-        f"🔹 ИНН: {tax_inn}\n"
+        f"🔹 ИНН: {escape(tax_inn)}\n"
         f"🔹 Пароль: {'✅ Установлен' if has_password else '❌ Не установлен'}\n\n"
     )
 
@@ -1577,11 +1577,11 @@ async def tax_status(callback: types.CallbackQuery):
     elif not has_password:
         text += "⚠️ Не установлен пароль от «Мой налог»."
     else:
-        text += "✅ Всё готово к работе!"
+        text += "✅ Локальная конфигурация заполнена. Вход в ФНС не проверялся."
 
     kb = get_back_keyboard("admin_tax")
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         text,
         reply_markup=kb,
         parse_mode="HTML"
@@ -1606,7 +1606,7 @@ async def admin_backup_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "🗄 <b>Управление бэкапами</b>\n\nВыберите действие:",
         reply_markup=kb,
         parse_mode="HTML"
@@ -1634,11 +1634,11 @@ async def backup_create(callback: types.CallbackQuery):
         await callback.answer("⛔ Доступ запрещён")
         return
 
-    await callback.message.edit_text("⏳ Создание бэкапа...", parse_mode="HTML")
+    await render_screen(callback.message,"⏳ Создание бэкапа...", parse_mode="HTML")
 
     try:
         result = backup_manager.create_backup()
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             f"✅ <b>Бэкап создан!</b>\n\n"
             f"📅 Дата: {result['timestamp']}\n"
             f"📁 Папка: {BACKUP_DIR}/",
@@ -1646,7 +1646,7 @@ async def backup_create(callback: types.CallbackQuery):
             parse_mode="HTML"
         )
     except Exception as e:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             f"❌ Ошибка создания бэкапа: {str(e)}",
             reply_markup=get_back_keyboard("backup_menu_back")
         )
@@ -1661,7 +1661,7 @@ async def backup_list(callback: types.CallbackQuery):
         backups = backup_manager.get_backup_list()
 
         if not backups:
-            await callback.message.edit_text(
+            await render_screen(callback.message,
                 "📭 Нет сохранённых бэкапов",
                 reply_markup=get_back_keyboard("backup_menu_back")
             )
@@ -1677,13 +1677,13 @@ async def backup_list(callback: types.CallbackQuery):
         if len(backups) > 10:
             text += f"\n... и ещё {len(backups) - 10} бэкапов"
 
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             text,
             reply_markup=get_back_keyboard("backup_menu_back"),
             parse_mode="HTML"
         )
     except Exception as e:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             f"❌ Ошибка: {str(e)}",
             reply_markup=get_back_keyboard("backup_menu_back")
         )
@@ -1698,7 +1698,7 @@ async def backup_restore(callback: types.CallbackQuery):
         backups = backup_manager.get_backup_list()
 
         if not backups:
-            await callback.message.edit_text(
+            await render_screen(callback.message,
                 "📭 Нет бэкапов для восстановления",
                 reply_markup=get_back_keyboard("backup_menu_back")
             )
@@ -1713,14 +1713,14 @@ async def backup_restore(callback: types.CallbackQuery):
             )])
         buttons.append([types.InlineKeyboardButton(text="🔙 В меню бэкапов", callback_data="backup_menu_back")])
 
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             "🔄 <b>Выберите бэкап для восстановления:</b>\n\n"
             "ВНИМАНИЕ! Текущие данные будут заменены!",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
             parse_mode="HTML"
         )
     except Exception as e:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             f"❌ Ошибка: {str(e)}",
             reply_markup=get_back_keyboard("backup_menu_back")
         )
@@ -1738,7 +1738,7 @@ async def backup_restore_confirm(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="❌ Отмена", callback_data="backup_restore")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"⚠️ <b>Восстановление бэкапа</b>\n\n"
         f"Бэкап от: {timestamp}\n\n"
         f"<b>ВНИМАНИЕ!</b> Текущие данные будут заменены!\n\n"
@@ -1756,13 +1756,13 @@ async def backup_restore_execute(callback: types.CallbackQuery):
 
     timestamp = callback.data.replace("backup_restore_execute_", "")
 
-    await callback.message.edit_text("⏳ Восстановление бэкапа...", parse_mode="HTML")
+    await render_screen(callback.message,"⏳ Восстановление бэкапа...", parse_mode="HTML")
 
     try:
         result = backup_manager.restore_backup(timestamp)
 
         if result['success']:
-            await callback.message.edit_text(
+            await render_screen(callback.message,
                 f"✅ <b>Бэкап восстановлен!</b>\n\n"
                 f"📅 Дата: {timestamp}\n"
                 f"🔄 Данные восстановлены из бэкапа.",
@@ -1770,12 +1770,12 @@ async def backup_restore_execute(callback: types.CallbackQuery):
                 parse_mode="HTML"
             )
         else:
-            await callback.message.edit_text(
+            await render_screen(callback.message,
                 f"❌ Ошибка восстановления: {result.get('error', 'Неизвестная ошибка')}",
                 reply_markup=get_back_keyboard("backup_menu_back")
             )
     except Exception as e:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             f"❌ Ошибка: {str(e)}",
             reply_markup=get_back_keyboard("backup_menu_back")
         )
@@ -1824,7 +1824,7 @@ async def admin_broadcast_promo_menu(callback: types.CallbackQuery):
 
     text = "📢 <b>Рассылка промокодов</b>\n\nВыберите раздел:"
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "promo_broadcast_achievements")
@@ -1845,7 +1845,7 @@ async def promo_broadcast_achievements_list(callback: types.CallbackQuery):
     conn.close()
 
     if not promos:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             "🏆 <b>Достижения</b>\n\n❌ Нет активных промокодов в этом разделе.",
             reply_markup=get_back_keyboard("admin_broadcast_promo"),
             parse_mode="HTML"
@@ -1872,7 +1872,7 @@ async def promo_broadcast_achievements_list(callback: types.CallbackQuery):
         callback_data="admin_broadcast_promo"
     )])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"🏆 <b>Достижения</b>\n\nВсего: {len(promos)}\n\nВыберите промокод для рассылки:",
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
@@ -1897,7 +1897,7 @@ async def promo_manual_list(callback: types.CallbackQuery):
     conn.close()
 
     if not promos:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             "✋ <b>Ручные</b>\n\n❌ Нет активных промокодов в этом разделе.",
             reply_markup=get_back_keyboard("admin_broadcast_promo"),
             parse_mode="HTML"
@@ -1917,7 +1917,7 @@ async def promo_manual_list(callback: types.CallbackQuery):
         callback_data="admin_broadcast_promo"
     )])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"✋ <b>Ручные</b>\n\nВсего: {len(promos)}\n\nВыберите промокод для рассылки:",
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
@@ -1957,7 +1957,7 @@ async def broadcast_promo_confirm(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_broadcast_promo")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("confirm_send_"))
@@ -1984,12 +1984,12 @@ async def confirm_send_handler(callback: types.CallbackQuery):
 
     message = f"🎉 <b>Новый промокод!</b>\n\n🏷️ <b>{code}</b> — скидка {discount}%\n\n💡 Введите код в разделе «🎫 Промокоды и достижения»"
 
-    await callback.message.edit_text("⏳ Отправка...", parse_mode="HTML")
+    await render_screen(callback.message,"⏳ Отправка...", parse_mode="HTML")
 
     from broadcast import send_broadcast_with_text
     sent = await send_broadcast_with_text(message)
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"✅ <b>Готово!</b>\n\n📨 Отправлено: {sent} пользователям\n🏷️ Промокод: {code}",
         reply_markup=get_back_keyboard("admin_broadcast_promo"),
         parse_mode="HTML"
@@ -2025,7 +2025,7 @@ async def admin_rate_limit_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"🛡️ <b>Защита от спама и брутфорса</b>\n\n"
         f"📊 Заблокировано пользователей: {blocked_count}\n"
         f"📋 Всего записей в БД: {total_records}\n\n"
@@ -2046,7 +2046,7 @@ async def rate_limit_stats(callback: types.CallbackQuery):
         blocked = conn.execute(
             "SELECT COUNT(DISTINCT user_id) FROM rate_limits WHERE is_blocked = 1"
         ).fetchone()[0]
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "📊 <b>Статистика защиты от спама</b>\\n\\n"
         f"Записей лимитов: {total}\\n"
         f"Заблокировано пользователей: {blocked}\\n\\n"
@@ -2102,7 +2102,7 @@ async def rate_limit_settings(callback: types.CallbackQuery):
     text += "Для изменения настроек отредактируйте файл rate_limiter.py"
 
     kb = get_back_keyboard("admin_rate_limit")
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "rate_limit_unblock")
@@ -2125,7 +2125,7 @@ async def rate_limit_unblock_menu(callback: types.CallbackQuery):
     conn.close()
 
     if not blocked_users:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             "✅ Нет заблокированных пользователей",
             reply_markup=get_back_keyboard("admin_rate_limit"),
             parse_mode="HTML"
@@ -2151,7 +2151,7 @@ async def rate_limit_unblock_menu(callback: types.CallbackQuery):
 
     buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_rate_limit")])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "🔓 <b>Заблокированные пользователи</b>\n\n"
         "Выберите пользователя для снятия блокировки:",
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -2183,7 +2183,7 @@ async def admin_back_to_menu(callback: types.CallbackQuery):
         await callback.answer("⛔ Доступ запрещён")
         return
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "🔧 <b>Админ-панель</b>\n\nВыберите раздел для управления:",
         reply_markup=get_admin_keyboard(),
         parse_mode="HTML"
@@ -2206,7 +2206,7 @@ async def admin_settings_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "⚙️ <b>Настройки бота</b>\n\nВыберите раздел для управления:",
         reply_markup=kb,
         parse_mode="HTML"

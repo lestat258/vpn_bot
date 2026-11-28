@@ -8,6 +8,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, Plai
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+import os
+
 import uvicorn
 
 from database import init_db
@@ -95,4 +97,4 @@ if __name__ == "__main__":
     print("  - /tax-settings - Налоги")
     print("  - /bot-texts - Тексты бота")
     print("=" * 50)
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=os.environ.get("VPN4US_ADMIN_BIND", "0.0.0.0"), port=8000)

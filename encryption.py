@@ -1,150 +1,179 @@
+"""Fernet credentials, compatible with the existing double-base64 format.
+
+Plain legacy values are accepted explicitly. Importing this module never
+creates or rewrites credentials. A missing key is initialized only when
+encryption is needed and no recognizable encrypted credentials exist.
 """
-Модуль шифрования чувствительных данных
-Использует Fernet (симметричное шифрование) из библиотеки cryptography
-"""
-import os
 import base64
+import binascii
 import logging
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from database import get_setting, set_setting
+import sqlite3
+import threading
+from contextlib import closing
+from pathlib import Path
+
+from cryptography.fernet import Fernet, InvalidToken
 
 logger = logging.getLogger(__name__)
 
+
+def _as_bytes(value):
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    if isinstance(value, bytes):
+        return value
+    raise TypeError("Credential must be str or bytes")
+
+
+def _decode(value):
+    return base64.b64decode(value, altchars=b"-_", validate=True)
+
+
+def _encrypted_candidate(value):
+    if not value or not isinstance(value, (str, bytes)):
+        return False
+    raw = _as_bytes(value)
+    if raw.startswith((b"gAAAA", b"Z0FBQU")):
+        return True
+    try:
+        return _decode(raw).startswith(b"gAAAA")
+    except (ValueError, binascii.Error):
+        return False
+
+
+def unwrap_token(value):
+    """Return Fernet token, None for legacy plain text, or fail on malformed marker."""
+    if not _encrypted_candidate(value):
+        return None
+    raw = _as_bytes(value)
+    if raw.startswith(b"gAAAA"):
+        return raw
+    try:
+        token = _decode(raw)
+    except (ValueError, binascii.Error):
+        raise InvalidToken("Malformed encrypted credential") from None
+    if not token.startswith(b"gAAAA"):
+        raise InvalidToken("Malformed encrypted credential")
+    return token
+
+
+def cipher_from_stored_key(value):
+    try:
+        return Fernet(_decode(_as_bytes(value)))
+    except (ValueError, TypeError, binascii.Error):
+        raise ValueError("Invalid stored encryption key; restore original key") from None
+
+
 class EncryptionManager:
-    def __init__(self):
-        self.key = None
+    def __init__(self, path=None):
+        self.path = path
         self.cipher = None
-        self.load_or_generate_key()
-    
+        self.key = None
+        self._lock = threading.Lock()
+
+    def _db_path(self):
+        if self.path is not None:
+            return self.path
+        from runtime_config import DB_PATH
+        return DB_PATH
+
+    def _connect(self):
+        return sqlite3.connect(
+            Path(self._db_path()).resolve().as_uri() + "?mode=rw",
+            uri=True, timeout=10
+        )
+
+    @staticmethod
+    def _existing_ciphertext(db):
+        for (value,) in db.execute("SELECT value FROM settings WHERE key!='encryption_key'"):
+            if _encrypted_candidate(value):
+                return True
+        for table, column in (("servers", "api_token"), ("users", "password")):
+            columns = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+            if column in columns:
+                for (value,) in db.execute(f"SELECT {column} FROM {table}"):
+                    if _encrypted_candidate(value):
+                        return True
+        return False
+
+    def _load_key(self, *, allow_create=False):
+        with self._lock:
+            if self.cipher is not None:
+                return self.cipher
+            with closing(self._connect()) as db:
+                row = db.execute("SELECT value FROM settings WHERE key='encryption_key'").fetchone()
+                if row is None:
+                    if not allow_create:
+                        raise ValueError("Encryption key missing; restore original key")
+                    # Serialize first initialization; never overwrite an existing row.
+                    with db:
+                        db.execute("BEGIN IMMEDIATE")
+                        row = db.execute("SELECT value FROM settings WHERE key='encryption_key'").fetchone()
+                        if row is None:
+                            if self._existing_ciphertext(db):
+                                raise ValueError("Encrypted credentials exist; restore original key")
+                            key = Fernet.generate_key()
+                            stored = base64.urlsafe_b64encode(key).decode("ascii")
+                            db.execute("INSERT INTO settings(key,value) VALUES('encryption_key',?)", (stored,))
+                            row = (stored,)
+                cipher = cipher_from_stored_key(row[0])
+                self.key = _decode(_as_bytes(row[0]))
+                self.cipher = cipher
+                return cipher
+
     def load_or_generate_key(self):
-        """Загружает ключ шифрования из БД или генерирует новый"""
-        try:
-            # Пытаемся загрузить ключ из БД
-            encrypted_key = get_setting('encryption_key')
-            
-            if encrypted_key:
-                # Если ключ есть - расшифровываем его
-                # Ключ хранится в base64, декодируем
-                self.key = base64.urlsafe_b64decode(encrypted_key)
-                self.cipher = Fernet(self.key)
-                logger.info("✅ Ключ шифрования загружен из БД")
-            else:
-                # Генерируем новый ключ
-                self.generate_key()
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки ключа: {e}")
-            # Генерируем новый ключ в случае ошибки
-            self.generate_key()
-    
+        self._load_key(allow_create=True)
+
     def generate_key(self):
-        """Генерирует новый ключ шифрования"""
-        # Генерируем случайный ключ
-        self.key = Fernet.generate_key()
-        self.cipher = Fernet(self.key)
-        
-        # Сохраняем ключ в БД в base64
-        encrypted_key = base64.urlsafe_b64encode(self.key).decode()
-        set_setting('encryption_key', encrypted_key)
-        
-        logger.info("✅ Новый ключ шифрования сгенерирован и сохранён")
+        # Compatibility entry point: no implicit rotation.
+        self._load_key(allow_create=True)
         return self.key
-    
+
     def encrypt(self, data):
-        """Шифрует данные"""
         if not data:
             return data
-        
-        try:
-            if isinstance(data, str):
-                data = data.encode()
-            encrypted = self.cipher.encrypt(data)
-            return base64.urlsafe_b64encode(encrypted).decode()
-        except Exception as e:
-            logger.error(f"❌ Ошибка шифрования: {e}")
-            return data
-    
+        raw = _as_bytes(data)
+        cipher = self._load_key(allow_create=True)
+        return base64.urlsafe_b64encode(cipher.encrypt(raw)).decode("ascii")
+
     def decrypt(self, encrypted_data):
-        """Расшифровывает данные"""
         if not encrypted_data:
             return encrypted_data
-        
-        try:
-            # Декодируем из base64
-            encrypted = base64.urlsafe_b64decode(encrypted_data)
-            decrypted = self.cipher.decrypt(encrypted)
-            return decrypted.decode()
-        except Exception as e:
-            logger.error(f"❌ Ошибка дешифрования: {e}")
+        token = unwrap_token(encrypted_data)
+        if token is None:
             return encrypted_data
-    
-    def is_encrypted(self, data):
-        """Проверяет, зашифрованы ли данные (проверка по формату base64)"""
-        if not data:
-            return False
-        
-        try:
-            # Пробуем декодировать из base64
-            base64.urlsafe_b64decode(data)
-            # Проверяем, что это валидный base64 и длина соответствует зашифрованным данным
-            return True
-        except:
-            return False
-    
-    def migrate_old_data(self):
-        """Миграция старых незашифрованных данных"""
-        import sqlite3
-        from database import DB_PATH
-        
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        
-        # Миграция API токенов в таблице servers
-        c.execute('SELECT id, api_token FROM servers WHERE api_token IS NOT NULL AND api_token != ""')
-        servers = c.fetchall()
-        
-        migrated_count = 0
-        for server_id, api_token in servers:
-            # Проверяем, не зашифрован ли уже
-            if not self.is_encrypted(api_token):
-                encrypted_token = self.encrypt(api_token)
-                c.execute('UPDATE servers SET api_token = ? WHERE id = ?', (encrypted_token, server_id))
-                migrated_count += 1
-        
-        # Миграция паролей в таблице users (если есть)
-        # Проверяем наличие колонки password
-        c.execute("PRAGMA table_info(users)")
-        columns = [col[1] for col in c.fetchall()]
-        
-        if 'password' in columns:
-            c.execute('SELECT telegram_id, password FROM users WHERE password IS NOT NULL AND password != ""')
-            users = c.fetchall()
-            
-            for telegram_id, password in users:
-                if not self.is_encrypted(password):
-                    encrypted_password = self.encrypt(password)
-                    c.execute('UPDATE users SET password = ? WHERE telegram_id = ?', (encrypted_password, telegram_id))
-                    migrated_count += 1
-        
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"✅ Миграция завершена: зашифровано {migrated_count} записей")
-        return migrated_count
+        return self._load_key().decrypt(token).decode("utf-8")
 
-# Глобальный экземпляр
+    def is_encrypted(self, data):
+        # A recognized marker is not proof of authenticity. Do not migrate
+        # damaged ciphertext as though it were a plaintext credential.
+        return _encrypted_candidate(data)
+
+    def migrate_old_data(self):
+        """Explicit legacy server-token migration; never invoked on import."""
+        cipher = self._load_key(allow_create=True)
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            count = 0
+            for server_id, token in db.execute(
+                "SELECT id,api_token FROM servers WHERE api_token IS NOT NULL AND api_token!=''"
+            ).fetchall():
+                existing = unwrap_token(token)
+                if existing is not None:
+                    cipher.decrypt(existing)
+                    continue
+                encrypted = base64.urlsafe_b64encode(cipher.encrypt(_as_bytes(token))).decode("ascii")
+                db.execute("UPDATE servers SET api_token=? WHERE id=?", (encrypted, server_id))
+                count += 1
+            return count
+
+
 encryption_manager = EncryptionManager()
 
-# Функции для удобного импорта
+
 def encrypt(data):
     return encryption_manager.encrypt(data)
 
+
 def decrypt(data):
     return encryption_manager.decrypt(data)
-
-# Автоматическая миграция при импорте
-try:
-    encryption_manager.migrate_old_data()
-except Exception as e:
-    logger.error(f"❌ Ошибка миграции: {e}")

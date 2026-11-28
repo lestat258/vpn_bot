@@ -1,4 +1,9 @@
 from runtime_config import DB_PATH
+from screen_navigation import render_screen, render_command, render_home
+from form_navigation import FORM_SCREEN, PROMO_STATE, current_form_input
+from contextlib import closing
+from subscription_renewal import expiry_presentation
+from html import escape
 from services.vpn_service import vpn_service
 """
 Пользовательские хендлеры бота
@@ -136,16 +141,15 @@ async def cmd_start(message: types.Message):
         "Меню находится в клавиатуре (≡) — выберите нужный раздел или сразу установите VPN."
     )
 
-    start_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-    [types.InlineKeyboardButton(text="Главное меню", callback_data="start_menu")]
-])
-
-    await message.answer(welcome_text, reply_markup=start_kb, parse_mode="HTML", disable_web_page_preview=True)
+    # The welcome itself carries the permanent keyboard. Do not send a
+    # second service message or a redundant inline main-menu button.
+    await render_home(message,welcome_text,
+                      keyboard=get_main_keyboard(message.from_user.id),
+                      parse_mode="HTML", disable_web_page_preview=True)
 
 @router.callback_query(F.data == "start_menu")
 async def start_menu(callback: types.CallbackQuery):
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "Главное меню:",
         reply_markup=get_main_keyboard(callback.from_user.id),
         parse_mode="HTML",
@@ -158,20 +162,21 @@ async def start_menu(callback: types.CallbackQuery):
 @router.callback_query(F.data == "paid_key_guide")
 async def paid_key_guide(callback: types.CallbackQuery):
     await callback.answer()
-    await install_vpn(callback.message)
+    text = get_setting('text_install_vpn') or "Выберите ваше устройство:"
+    await render_screen(callback.message,text,reply_markup=get_device_keyboard(),parse_mode="HTML",disable_web_page_preview=True)
 
 
 @router.message(Command("install"))
 @router.message(F.text == "📥 Установить VPN")
 async def install_vpn(message: types.Message):
     text = get_setting('text_install_vpn') or "Выберите ваше устройство:"
-    await message.answer(text, reply_markup=get_device_keyboard(), parse_mode="HTML", disable_web_page_preview=True)
+    await render_command(message,text, keyboard=get_main_keyboard(message.from_user.id), reply_markup=get_device_keyboard(), parse_mode="HTML", disable_web_page_preview=True)
 
 @router.message(Command("buy"))
 @router.message(F.text == "📋 Купить ключ")
 async def buy_key(message: types.Message):
     """Кнопка 'Купить ключ' — показывает тарифы"""
-    await message.answer("Выберите подходящий тариф:", reply_markup=get_tariffs_keyboard(), parse_mode="HTML")
+    await render_command(message,"Выберите подходящий тариф:", keyboard=get_main_keyboard(message.from_user.id), reply_markup=get_tariffs_keyboard(), parse_mode="HTML")
 
 @router.message(Command("help"))
 @router.message(Command("faq"))
@@ -194,37 +199,26 @@ async def faq(message: types.Message):
     )
 
     kb = get_back_keyboard("back_to_main")
-    await message.answer(faq_text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
+    await render_command(message,faq_text, keyboard=get_main_keyboard(message.from_user.id), reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
 
 @router.message(Command("referral"))
 @router.message(F.text == "🎁 Пригласить друга")
 async def invite_friend(message: types.Message):
-    bot_username = (await message.bot.get_me()).username
-    invite_link = f"https://t.me/{bot_username}?start=ref_{message.from_user.id}"
+    from referral_screen import screen
+    username=(await message.bot.get_me()).username
+    text,kb=screen(DB_PATH,message.from_user.id,username,"main")
+    await render_command(message,text,keyboard=get_main_keyboard(message.from_user.id),
+                         reply_markup=kb,parse_mode="HTML",disable_web_page_preview=True)
 
-    from referral import referral_manager
-    stats = referral_manager.get_referral_stats(message.from_user.id)
 
-    invite_text = (
-        "🎁 <b>Реферальная программа</b>\n\n"
-        "Приглашайте друзей и получайте бонусные дни к подписке!\n\n"
-        "📊 <b>Ваша статистика:</b>\n"
-        f"👤 1 уровень (прямые): {stats['level_1']} чел. → +30 дней\n"
-        f"👤 2 уровень: {stats['level_2']} чел. → +15 дней\n"
-        f"👤 3 уровень: {stats['level_3']} чел. → +5 дней\n"
-        f"📦 Всего бонусных дней: {stats['bonus_days']} дн.\n"
-        f"👥 Всего рефералов: {stats['total']}\n\n"
-        "🔗 <b>Ваша реферальная ссылка:</b>\n"
-        f"<code>{invite_link}</code>\n\n"
-        "📖 <b>Как это работает?</b>\n"
-        "1. Отправьте ссылку другу\n"
-        "2. Друг регистрируется по ссылке\n"
-        "3. Когда друг купит подписку, вы получите бонусные дни!\n"
-        "4. Бонусы начисляются за 3 уровня глубины"
-    )
+@router.callback_query(F.data.in_({"referral_main","referral_levels","referral_history","referral_spend"}))
+async def referral_section(callback: types.CallbackQuery):
+    from referral_screen import screen
+    username=(await callback.bot.get_me()).username
+    text,kb=screen(DB_PATH,callback.from_user.id,username,callback.data.removeprefix("referral_"))
+    await render_screen(callback.message,text,reply_markup=kb,parse_mode="HTML",disable_web_page_preview=True)
+    await callback.answer()
 
-    kb = get_back_keyboard("back_to_main")
-    await message.answer(invite_text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
 
 @router.message(Command("admin"))
 @router.message(F.text == "🔧 Админ-панель")
@@ -232,18 +226,17 @@ async def admin_panel_button(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Доступ запрещён", disable_web_page_preview=True)
         return
-    await message.answer(
+    await render_command(message,
         "🔧 <b>Админ-панель</b>\n\nВыберите раздел для управления:",
+        keyboard=get_main_keyboard(message.from_user.id),
         reply_markup=get_admin_keyboard(),
         parse_mode="HTML"
     )
 
 @router.message(F.text == "/menu")
 async def refresh_menu(message: types.Message):
-    await message.answer(
-        "Главное меню:",
-        reply_markup=get_main_keyboard(message.from_user.id)
-    )
+    await render_home(message,"Главное меню VPN4US",
+                      keyboard=get_main_keyboard(message.from_user.id))
 
 # ============ ОБРАБОТКА УСТРОЙСТВ ============
 
@@ -251,13 +244,25 @@ async def refresh_menu(message: types.Message):
 async def device_instruction(callback: types.CallbackQuery):
     logging.info(f"=== DEVICE INSTRUCTION: {callback.data} ===")
 
-    device = callback.data.replace("device_", "")
+    device = callback.data.removeprefix("device_")
+    await render_install_choices(callback, device)
+
+
+@router.callback_query(F.data.startswith("install_select_"))
+async def install_select_back(callback: types.CallbackQuery):
+    await render_install_choices(callback, callback.data.removeprefix("install_select_"), force_select=True)
+
+
+async def render_install_choices(callback, device, *, force_select=False):
     device_names = {
         'android': 'Android',
         'ios': 'iOS',
         'windows': 'Windows'
     }
-    device_name = device_names.get(device, device)
+    if device not in device_names:
+        await callback.answer("Неизвестное устройство", show_alert=True)
+        return
+    device_name = device_names[device]
 
     # Получаем все активные подписки пользователя
     conn = sqlite3.connect(DB_PATH)
@@ -273,7 +278,7 @@ async def device_instruction(callback: types.CallbackQuery):
     conn.close()
 
     if not subs:
-        await callback.message.answer(
+        await render_screen(callback.message, 
             "❌ У вас нет активной подписки.\n\n"
             "Пожалуйста, выберите тариф в разделе «📋 Купить ключ» и оплатите подписку.",
             reply_markup=get_tariffs_keyboard(),
@@ -283,7 +288,7 @@ async def device_instruction(callback: types.CallbackQuery):
         return
 
     # Если подписка одна - сразу показываем инструкцию
-    if len(subs) == 1:
+    if len(subs) == 1 and not force_select:
         sub_id, email, end_date, tariff_name, xui_client_uid = subs[0]
         await show_instruction_for_key(callback, device, device_name, sub_id, email, tariff_name, xui_client_uid)
         return
@@ -292,9 +297,9 @@ async def device_instruction(callback: types.CallbackQuery):
     buttons = []
     for sub in subs:
         sub_id, email, end_date, tariff_name, xui_client_uid = sub
-        days_left = (datetime.fromisoformat(end_date) - datetime.now()).days
+        _, date_label, remaining = expiry_presentation(end_date)
         buttons.append([types.InlineKeyboardButton(
-            text=f"📦 {tariff_name} (до {end_date[:10]}, {days_left} дн.)",
+            text=f"📦 {tariff_name} (до {date_label}, {remaining.lower()})",
             callback_data=f"select_device_{device}_{sub_id}"
         )])
 
@@ -302,10 +307,9 @@ async def device_instruction(callback: types.CallbackQuery):
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    await callback.message.answer(
+    await render_screen(callback.message, 
         f"📱 <b>Вы выбрали {device_name}</b>\n\n"
-        f"У вас есть несколько активных подписок.\n"
-        f"Выберите, для какой подписки показать инструкцию:",
+        "Выберите, для какой подписки показать инструкцию:",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -316,9 +320,14 @@ async def device_key_selected(callback: types.CallbackQuery):
     """Обработчик выбора ключа для устройства"""
     logging.info(f"=== DEVICE KEY SELECTED: {callback.data} ===")
 
-    parts = callback.data.split("_")
-    device = parts[2]
-    sub_id = int(parts[3])
+    try:
+        _, _, device, raw_id = callback.data.split("_")
+        sub_id = int(raw_id)
+        if device not in ("android", "ios", "windows") or sub_id <= 0:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Некорректный выбор", show_alert=True)
+        return
 
     device_names = {
         'android': 'Android',
@@ -341,30 +350,32 @@ async def device_key_selected(callback: types.CallbackQuery):
     conn.close()
 
     if not sub:
-        await callback.message.answer("❌ Подписка не найдена", parse_mode="HTML")
+        await render_screen(callback.message, "❌ Подписка не найдена", 
+                            reply_markup=get_back_keyboard(f"install_select_{device}"), parse_mode="HTML")
         await callback.answer()
         return
 
     email, end_date, tariff_name, xui_client_uid = sub
 
-    await show_instruction_for_key(callback, device, device_name, sub_id, email, tariff_name, xui_client_uid)
+    await show_instruction_for_key(callback, device, device_name, sub_id, email, tariff_name, xui_client_uid,
+                                   back_to=f"install_select_{device}")
 
-async def show_instruction_for_key(callback, device, device_name, sub_id, email, tariff_name, xui_client_uid):
-    """Показывает инструкцию для выбранного ключа"""
-    from services.vpn_service import vpn_service
+async def show_instruction_for_key(callback, device, device_name, sub_id, email, tariff_name, xui_client_uid,
+                                   *, back_to="back_to_devices"):
+    """Показывает инструкцию для выбранного ключа с возвратом в исходный экран."""
 
     instructions = {
         'android': get_setting('text_android_instruction') or (
             "📱 <b>Настройка для Android</b>\n\n"
             "1. Установите Incy из Google Play\n"
-            "2. Нажмите «Добавить в 1 клик» ниже\n"
+            "2. Скопируйте ссылку ниже и добавьте подписку в Incy\n"
             "3. Подтвердите импорт подписки\n"
             "4. Нажмите «Подключиться»"
         ),
         'ios': get_setting('text_ios_instruction') or (
             "🍏 <b>Настройка для iOS</b>\n\n"
             "1. Установите Incy из App Store\n"
-            "2. Нажмите «Добавить в 1 клик» ниже\n"
+            "2. Скопируйте ссылку ниже и добавьте подписку в Incy\n"
             "3. Подтвердите импорт подписки\n"
             "4. Нажмите «Подключиться»"
         ),
@@ -381,22 +392,24 @@ async def show_instruction_for_key(callback, device, device_name, sub_id, email,
     # "best" server. Never invent or reconstruct links on a shared panel.
     link = await vpn_service.get_subscription_link(sub_id)
     if not isinstance(link, str) or not link.startswith("https://"):
-        await callback.message.answer(
+        await render_screen(callback.message, 
             "Не удалось получить ссылку подписки. Откройте «Мои ключи» "
             "или обратитесь в поддержку — новый ключ создавать не нужно.",
-            reply_markup=get_back_keyboard("back_to_keys_from_install"),
+            reply_markup=get_back_keyboard(back_to),
         )
         await callback.answer()
         return
 
     text = instructions.get(device, instructions['android'])
-    text = f"📦 <b>Тариф: {tariff_name}</b>\n\n" + text
+    # Older configured instructions may still reference the removed deep link.
+    text = text.replace("Нажмите «Добавить в 1 клик» ниже",
+                        "Скопируйте ссылку ниже и добавьте подписку в Incy")
+    text = f"📦 <b>Тариф: {escape(tariff_name)}</b>\n\n" + text
 
     if device == 'windows':
-        text += f"\n\n🔗 <b>Ваша ссылка:</b>\n<code>{link}</code>"
+        text += f"\n\n🔗 <b>Ваша ссылка:</b>\n<code>{escape(link)}</code>"
         kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="🔙 Назад к ключам", callback_data="back_to_keys_from_install")],
-            [types.InlineKeyboardButton(text="🔙 Назад к устройствам", callback_data="back_to_devices")]
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data=back_to)]
         ])
     else:
         if device == 'ios':
@@ -406,16 +419,15 @@ async def show_instruction_for_key(callback, device, device_name, sub_id, email,
             app_store_link = "https://play.google.com/store/apps/details?id=llc.itdev.incy"
             button_text = "📲 Скачать Incy (Google Play)"
 
-        text += f"\n\n🔗 <b>Ваша ссылка для подключения:</b>\n<code>{link}</code>"
+        text += f"\n\n🔗 <b>Ваша ссылка для подключения:</b>\n<code>{escape(link)}</code>"
         text += "\n\n👆 Коснитесь ссылки, чтобы скопировать её в буфер обмена"
 
         kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text=button_text, url=app_store_link)],
-            [types.InlineKeyboardButton(text="🔙 Назад к ключам", callback_data="back_to_keys_from_install")],
-            [types.InlineKeyboardButton(text="🔙 Назад к устройствам", callback_data="back_to_devices")]
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data=back_to)]
         ])
 
-    await callback.message.answer(
+    await render_screen(callback.message, 
         text,
         reply_markup=kb,
         parse_mode="HTML",
@@ -426,8 +438,7 @@ async def show_instruction_for_key(callback, device, device_name, sub_id, email,
 @router.callback_query(F.data == "back_to_devices")
 async def back_to_devices(callback: types.CallbackQuery):
     """Возврат к выбору устройства"""
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "Выберите ваше устройство:",
         reply_markup=get_device_keyboard(),
         parse_mode="HTML"
@@ -436,17 +447,13 @@ async def back_to_devices(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "back_to_keys_from_install")
 async def back_to_keys_from_install(callback: types.CallbackQuery):
-    """Возврат к списку ключей из установки VPN"""
-    await callback.message.delete()
-    # Показываем список ключей
-    from handlers.profile import show_my_keys
-    await show_my_keys(callback)
+    """У старой кнопки нет данных об устройстве; возвращаем в установку."""
+    await back_to_devices(callback)
 
 @router.callback_query(F.data == "back_to_main")
 async def back_to_main(callback: types.CallbackQuery):
     """Возврат в главное меню"""
-    await callback.message.delete()
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "Главное меню:",
         reply_markup=get_main_keyboard(callback.from_user.id),
         parse_mode="HTML"
@@ -455,99 +462,76 @@ async def back_to_main(callback: types.CallbackQuery):
 
 # ============ ОБРАБОТКА ПРОМОКОДОВ (ИСПРАВЛЕНА) ============
 
-@router.message(F.text, EnterPromocode.waiting)
+async def promo_input_error(message, state, error):
+    from handlers.profile import PROMO_PROMPT
+    result = await render_command(message, error + "\n\n" + PROMO_PROMPT,
+        reply_markup=get_back_keyboard("promo_achievements"), parse_mode="HTML")
+    mid = getattr(result, "message_id", None)
+    if mid is not None:
+        await state.update_data({FORM_SCREEN: mid})
+
+
+@router.message(EnterPromocode.waiting)
 async def process_promocode_input(message: types.Message, state: FSMContext):
-    """
-    Обработка введённого промокода.
-    Срабатывает ТОЛЬКО когда пользователь в состоянии EnterPromocode.waiting.
-    """
-    code = message.text.strip().upper()
-    
-    # Проверяем, что это не команда
-    if code.startswith('/'):
+    if not await current_form_input(message, state, PROMO_STATE):
         await state.clear()
-        await message.answer("❌ Ввод промокода отменён.", parse_mode="HTML")
+        await message.answer("Ввод завершён. Откройте промокоды заново.")
+        return
+    code = (message.text or "").strip().upper()
+    if code.startswith("/") or code in ("ОТМЕНА", "CANCEL"):
+        from handlers.profile import promo_menu_content
+        await state.clear()
+        text, kb = promo_menu_content(message.from_user.id)
+        await render_command(message, "Ввод промокода отменён.\n\n" + text,
+                             reply_markup=kb, parse_mode="HTML", clean_cancel=True)
         return
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute('''
-        SELECT id, discount_percent, discount_amount, valid_until, max_uses, used_count
-        FROM promocodes
-        WHERE code = ? AND is_active = 1
-    ''', (code,))
-    promocode = c.fetchone()
-
-    if not promocode:
-        await message.answer("❌ Промокод не найден или неактивен", parse_mode="HTML")
-        conn.close()
-        await state.clear()
+    # Activation claims the code quota, payment consumes the discount.
+    owner = message.from_user.id
+    error = None
+    discount_text = None
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        from promo_reservations import has_open, expire_manual_grant, save_manual_grant, _unexpired
+        expire_manual_grant(conn,owner)
+        c = conn.cursor()
+        if has_open(conn,owner):
+            error = "❌ Сначала завершите ожидающий счёт со скидкой."
+        elif c.execute("SELECT 1 FROM settings WHERE key=? AND value<>''", (f"promocode_user_{owner}",)).fetchone():
+            error = "❌ У вас уже есть активированный ручной промокод."
+        c.execute("""
+            SELECT id, discount_percent, discount_amount, valid_until, max_uses, used_count
+            FROM promocodes WHERE code = ? AND is_active = 1
+        """, (code,))
+        promo = c.fetchone()
+        if error is not None:
+            pass
+        elif not promo:
+            error = "❌ Промокод не найден или неактивен"
+        else:
+            pid, percent, amount, valid_until, max_uses, used_count = promo
+            if valid_until and not _unexpired(valid_until):
+                error = "❌ Срок действия промокода истёк"
+            elif used_count >= max_uses:
+                error = "❌ Промокод уже использован максимальное количество раз"
+            elif c.execute("SELECT id FROM promocode_uses WHERE promocode_id=? AND user_id=?", (pid, owner)).fetchone():
+                error = "❌ Вы уже использовали этот промокод"
+            elif percent > 0:
+                value, discount_text = f"{percent}|0", f"{percent}%"
+            elif amount > 0:
+                value, discount_text = f"0|{amount}", f"{amount} ₽"
+            else:
+                error = "❌ Промокод не содержит скидку"
+            if error is None:
+                c.execute("INSERT INTO promocode_uses (promocode_id,user_id) VALUES (?,?)", (pid, owner))
+                c.execute("UPDATE promocodes SET used_count=used_count+1 WHERE id=?", (pid,))
+                c.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
+                          (f"promocode_user_{owner}", value))
+                save_manual_grant(conn,owner,pid,value,valid_until)
+    if error is not None:
+        await promo_input_error(message, state, error)
         return
-
-    promocode_id, discount_percent, discount_amount, valid_until, max_uses, used_count = promocode
-
-    if valid_until and datetime.now() > datetime.fromisoformat(valid_until):
-        await message.answer("❌ Срок действия промокода истек", parse_mode="HTML")
-        conn.close()
-        await state.clear()
-        return
-
-    if used_count >= max_uses:
-        await message.answer("❌ Промокод уже использован максимальное количество раз", parse_mode="HTML")
-        conn.close()
-        await state.clear()
-        return
-
-    c.execute('SELECT id FROM promocode_uses WHERE promocode_id = ? AND user_id = ?',
-              (promocode_id, message.from_user.id))
-    if c.fetchone():
-        await message.answer("❌ Вы уже использовали этот промокод", parse_mode="HTML")
-        conn.close()
-        await state.clear()
-        return
-
-    c.execute('INSERT INTO promocode_uses (promocode_id, user_id) VALUES (?, ?)',
-              (promocode_id, message.from_user.id))
-    c.execute('UPDATE promocodes SET used_count = used_count + 1 WHERE id = ?', (promocode_id,))
-    conn.commit()
-    conn.close()
-
-    # Сохраняем промокод в настройках пользователя
-    if discount_percent > 0:
-        set_setting(f'promocode_user_{message.from_user.id}', f'{discount_percent}|0')
-        await message.answer(
-            f"✅ <b>Промокод активирован!</b>\n\n"
-            f"🎁 Скидка: <b>{discount_percent}%</b>\n"
-            f"💡 Скидка будет применена к следующей покупке.",
-            parse_mode="HTML"
-        )
-    elif discount_amount > 0:
-        set_setting(f'promocode_user_{message.from_user.id}', f'0|{discount_amount}')
-        await message.answer(
-            f"✅ <b>Промокод активирован!</b>\n\n"
-            f"🎁 Скидка: <b>{discount_amount} ₽</b>\n"
-            f"💡 Скидка будет применена к следующей покупке.",
-            parse_mode="HTML"
-        )
-
-    # Очищаем состояние
     await state.clear()
-    
-    # Возвращаемся в главное меню
-    await message.answer(
-        "Главное меню:",
-        reply_markup=get_main_keyboard(message.from_user.id),
-        parse_mode="HTML"
-    )
-
-@router.message(Command("cancel"), EnterPromocode.waiting)
-async def cancel_promocode_input(message: types.Message, state: FSMContext):
-    """Отмена ввода промокода"""
-    await state.clear()
-    await message.answer(
-        "❌ Ввод промокода отменён.",
-        reply_markup=get_main_keyboard(message.from_user.id),
-        parse_mode="HTML"
-    )
-
+    await render_command(message,
+        f"✅ <b>Промокод активирован!</b>\n\n🎁 Скидка: <b>{discount_text}</b>",
+        reply_markup=get_back_keyboard("promo_achievements"), parse_mode="HTML")

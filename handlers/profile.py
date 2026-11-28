@@ -1,4 +1,10 @@
 from runtime_config import DB_PATH
+from screen_navigation import render_screen, render_command, render_photo_screen
+from form_navigation import FORM_SCREEN, is_current_screen, current_deposit_input
+import asyncio
+import hashlib
+from balance_ledger import validate_deposit_amount, deposit_metadata, register_deposit, rubles
+from subscription_renewal import expiry_presentation, renewable_subscriptions
 from services.vpn_service import vpn_service
 """
 Обработчики профиля и ключей
@@ -40,26 +46,26 @@ router = Router()
 
 ADMIN_ID = int(get_setting('admin_id') or 812021055)
 
-renew_temp = {}
 
 # ============ ПРОФИЛЬ ============
 
 @router.message(Command("profile"))
 @router.message(F.text == "👤 Профиль")
-async def profile(message: types.Message):
+async def profile(message: types.Message, *, callback=None):
+    owner = callback.from_user.id if callback is not None else message.from_user.id
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    c.execute('SELECT first_name, created_at, referrer_id, balance FROM users WHERE telegram_id = ?', (message.from_user.id,))
+    c.execute('SELECT first_name, created_at, referrer_id, balance FROM users WHERE telegram_id = ?', (owner,))
     user = c.fetchone()
 
-    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ? AND is_active = 1 AND datetime(end_date) > datetime("now")', (message.from_user.id,))
+    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ? AND is_active = 1 AND datetime(end_date) > datetime("now")', (owner,))
     active_subs_count = c.fetchone()[0]
 
-    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ?', (message.from_user.id,))
+    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ?', (owner,))
     total_subs_count = c.fetchone()[0]
 
-    c.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (message.from_user.id,))
+    c.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (owner,))
     ref_count = c.fetchone()[0]
 
     conn.close()
@@ -80,8 +86,9 @@ async def profile(message: types.Message):
     has_promocodes = c.fetchone()[0] > 0
     conn.close()
 
-    await message.answer(
-        profile_text,
+    renderer = render_screen if callback is not None else render_command
+    options = {} if callback is not None else {"keyboard": get_main_keyboard(owner)}
+    await renderer(message,profile_text, **options,
         reply_markup=get_profile_keyboard(has_promocodes),
         parse_mode="HTML",
         disable_web_page_preview=True
@@ -89,13 +96,7 @@ async def profile(message: types.Message):
 
 @router.callback_query(F.data == "back_to_profile")
 async def back_to_profile(callback: types.CallbackQuery):
-    await callback.message.delete()
-    class FakeMessage:
-        from_user = callback.from_user
-        chat = callback.message.chat
-        async def answer(self, *args, **kwargs):
-            await callback.message.answer(*args, **kwargs)
-    await profile(FakeMessage())
+    await profile(callback.message,callback=callback)
     await callback.answer()
 
 # ============ БАЛАНС И АВТО-ПРОДЛЕНИЕ ============
@@ -150,7 +151,7 @@ async def balance_auto_renew_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="back_to_profile")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "balance_help")
@@ -175,31 +176,30 @@ async def balance_help(callback: types.CallbackQuery):
 • Вы всегда можете отключить авто-продление"""
 
     kb = get_back_keyboard("balance_auto_renew")
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 # ============ КЛЮЧИ ============
 
 @router.callback_query(F.data == "my_keys")
 async def show_my_keys(callback: types.CallbackQuery):
-    await callback.message.delete()
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ? AND is_active = 1 AND datetime(end_date) > datetime("now")', (callback.from_user.id,))
+    c.execute('SELECT COUNT(*) FROM subscriptions WHERE telegram_id = ? AND is_active = 1', (callback.from_user.id,))
     count = c.fetchone()[0]
     conn.close()
 
     if count == 0:
         kb = get_back_keyboard("back_to_tariffs")
-        await callback.message.answer(
-            "🔑 <b>У вас нет активных ключей</b>\n\n"
+        await render_screen(callback.message, 
+            "🔑 <b>У вас нет доступных ключей</b>\n\n"
             "Вы можете приобрести ключ в разделе «📋 Купить ключ».",
             reply_markup=kb,
             parse_mode="HTML"
         )
     else:
-        await callback.message.answer(
+        await render_screen(callback.message, 
             "🔑 <b>Ваши ключи</b>\n\nВыберите подписку чтобы увидеть ключ и инструкцию:",
             reply_markup=get_keys_keyboard(callback.from_user.id),
             parse_mode="HTML"
@@ -217,11 +217,11 @@ async def render_key_detail(callback: types.CallbackQuery, sub_id: int):
     sub = get_subscription_details(sub_id)
 
     if not sub or sub[8] != callback.from_user.id:
-        await callback.message.answer("❌ Подписка не найдена", parse_mode="HTML")
+        await render_screen(callback.message, "❌ Подписка не найдена", parse_mode="HTML")
         return
 
     sub_id, email, end_date, tariff_name, xui_client_uid, traffic_used, tariff_id, start_date, user_id = sub
-    days_left = (datetime.fromisoformat(end_date) - datetime.now()).days
+    current, expiry_label, remaining = expiry_presentation(end_date)
     tariff = get_tariff_by_id(tariff_id)
     traffic_limit = tariff[4] if tariff else 0
     ip_limit = tariff[5] if tariff else 3
@@ -236,27 +236,35 @@ async def render_key_detail(callback: types.CallbackQuery, sub_id: int):
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('SELECT auto_renew FROM subscriptions WHERE id = ?', (sub_id,))
+    c.execute('SELECT auto_renew,is_active FROM subscriptions WHERE id = ? AND telegram_id=?', (sub_id,callback.from_user.id))
     auto_renew_row = c.fetchone()
     conn.close()
     auto_renew_enabled = auto_renew_row[0] == 1 if auto_renew_row else False
     auto_renew_text = "✅" if auto_renew_enabled else "❌"
     user_balance = get_user_balance(callback.from_user.id)
 
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+    available = bool(auto_renew_row and auto_renew_row[1] == 1)
+    current = current and available
+    buttons = [
         [types.InlineKeyboardButton(text="🔄 Продлить", callback_data=f"renew_from_key_{sub_id}")],
         [types.InlineKeyboardButton(text=f"🔄 Авто-продление {auto_renew_text}", callback_data=f"toggle_auto_renew_{sub_id}")],
-        [types.InlineKeyboardButton(text="🛟 Запросить отключение", callback_data=f"delete_key_{sub_id}")],
+    ] if available else []
+    if current:
+        buttons.append([types.InlineKeyboardButton(text="🛟 Запросить отключение", callback_data=f"delete_key_{sub_id}")])
+    buttons.extend([
         [types.InlineKeyboardButton(text="🔙 Назад к ключам", callback_data="my_keys")],
         [types.InlineKeyboardButton(text="🏠 На главную", callback_data="back_to_main")]
     ])
+    kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    status_label = ("Истекает" if current else "Истёк" if available else "Окончание")
+    remaining_label = ("Осталось: " + remaining if current else
+                       "Срок действия истёк" if available else "Доступ отключён")
 
     text = (
         f"🔑 <b>Ключ: {escape(tariff_name)}</b>\n\n"
-        f"📧 E-mail в панели: <code>{escape(email or '')}</code>\n"
-        f"📅 Создан: {start_date[:10] if start_date else 'Неизвестно'}\n"
-        f"📅 Истекает: {end_date[:10]}\n"
-        f"⏳ Осталось: {days_left} дн.\n\n"
+        f"📅 Создан: {datetime.fromisoformat(start_date).strftime('%d.%m.%Y') if start_date else 'Неизвестно'}\n"
+        f"📅 {status_label}: {expiry_label}\n"
+        f"⏳ {remaining_label}\n\n"
         f"📊 <b>Трафик:</b>\n"
         f"   • Использовано: {traffic_used_gb:.2f} ГБ\n"
         f"   • Лимит: {traffic_limit_str}\n"
@@ -272,39 +280,36 @@ async def render_key_detail(callback: types.CallbackQuery, sub_id: int):
         photo = types.BufferedInputFile(_subscription_qr(link), filename="subscription.png")
         if len(text.encode("utf-16-le")) // 2 <= 1024:
             media = types.InputMediaPhoto(media=photo, caption=text, parse_mode="HTML")
-            await message.edit_media(media=media, reply_markup=kb)
+            await render_photo_screen(message,media,reply_markup=kb)
             return
         await message.answer_photo(photo)
 
-    if message.photo:
-        await message.answer(text, reply_markup=kb, parse_mode="HTML")
-        try:
-            await message.delete()
-        except TelegramBadRequest:
-            pass
-    else:
-        await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(message,text,reply_markup=kb,parse_mode="HTML")
 
 # ============ ПРОДЛЕНИЕ КЛЮЧА ============
 
 @router.callback_query(F.data.startswith("renew_from_key_"))
 async def renew_from_key(callback: types.CallbackQuery):
-    sub_id = int(callback.data.replace("renew_from_key_", ""))
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT telegram_id FROM subscriptions WHERE id = ?', (sub_id,))
-    sub = c.fetchone()
-    conn.close()
-
-    if not sub or sub[0] != callback.from_user.id:
-        await callback.answer("⛔ Доступ запрещён")
+    try:
+        sub_id = int(callback.data.removeprefix("renew_from_key_"))
+        if sub_id <= 0:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Некорректный ключ", show_alert=True)
         return
-
-    renew_temp[callback.from_user.id] = sub_id
-    await callback.message.answer(
-        "📋 <b>Выберите тариф для продления</b>\n\n"
-        "После оплаты дни будут добавлены к вашей подписке.",
-        reply_markup=get_tariffs_keyboard(),
+    rows = renewable_subscriptions(DB_PATH, callback.from_user.id, sub_id)
+    if not rows:
+        await callback.answer("⛔ Продление недоступно. Обратитесь в поддержку.", show_alert=True)
+        return
+    _, end_date, name = rows[0]
+    current, date_label, _ = expiry_presentation(end_date)
+    status = "до" if current else "истёк"
+    await render_screen(callback.message, 
+        f"📋 <b>Выберите тариф для продления</b>\n\n"
+        f"🔑 Ключ №{sub_id}: {escape(name)} ({status} {date_label})\n\n"
+        "Действующий ключ продлевается от даты окончания, просроченный — "
+        "от текущего времени с округлением в пользу пользователя.",
+        reply_markup=get_tariffs_keyboard(subscription_id=sub_id),
         parse_mode="HTML"
     )
     await callback.answer()
@@ -315,7 +320,7 @@ async def renew_from_key(callback: types.CallbackQuery):
 async def user_delete_key(callback: types.CallbackQuery):
     # Deliberate safety guard: a shared 3x-ui panel must not be modified
     # until precise per-client ownership and inbound scoping are implemented.
-    await callback.message.answer(
+    await render_screen(callback.message, 
         "⚠️ Удаление ключа пока недоступно. Ваш доступ сохранится. "
         "Для отключения обратитесь в службу поддержки.",
         reply_markup=get_back_keyboard("my_keys"),
@@ -334,9 +339,8 @@ async def user_confirm_delete_key(callback: types.CallbackQuery):
 
 # ============ ПОПОЛНЕНИЕ БАЛАНСА ============
 
-@router.callback_query(F.data == "deposit")
-async def deposit_menu(callback: types.CallbackQuery):
-    balance = get_user_balance(callback.from_user.id)
+def deposit_menu_content(owner, notice=""):
+    balance = get_user_balance(owner)
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="100 ₽", callback_data="deposit_100")],
         [types.InlineKeyboardButton(text="200 ₽", callback_data="deposit_200")],
@@ -345,131 +349,138 @@ async def deposit_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="✏️ Своя сумма", callback_data="deposit_custom")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_profile")]
     ])
-    await callback.message.edit_text(
-        f"💰 <b>Пополнение баланса</b>\n\n"
-        f"Текущий баланс: <b>{balance:.2f} ₽</b>\n\n"
-        f"Выберите сумму для пополнения или введите свою:",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+    text = (f"💰 <b>Пополнение баланса</b>\n\n"
+            f"Текущий баланс: <b>{balance:.2f} ₽</b>\n\n"
+            "Выберите сумму для пополнения или введите свою:")
+    return (f"{notice}\n\n{text}" if notice else text), kb
+
+
+@router.callback_query(F.data == "deposit")
+async def deposit_menu(callback: types.CallbackQuery):
+    text, kb = deposit_menu_content(callback.from_user.id)
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
+
+
+DEPOSIT_PROMPT = (
+    "✏️ <b>Введите сумму пополнения</b>\n\n"
+    "Минимальная сумма: <b>10 ₽</b>\n"
+    "Максимальная сумма: <b>100000 ₽</b>\n\n"
+    "Введите число (например: 150, 250.50):\n"
+    "Или отправьте /cancel для отмены"
+)
+
 
 @router.callback_query(F.data == "deposit_custom")
 async def deposit_custom(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.delete()
-    await callback.message.answer(
-        "✏️ <b>Введите сумму пополнения</b>\n\n"
-        "Минимальная сумма: <b>10 ₽</b>\n"
-        "Максимальная сумма: <b>100000 ₽</b>\n\n"
-        "Введите число (например: 150, 250.50):\n"
-        "Или отправьте /cancel для отмены",
-        parse_mode="HTML"
-    )
+    if await state.get_state() is not None:
+        await callback.answer("Сначала завершите текущий ввод.", show_alert=True)
+        return
+    if not is_current_screen(callback.message, getattr(callback.message, "message_id", None)):
+        await callback.answer("Откройте актуальное меню пополнения.", show_alert=True)
+        return
+    result = await render_screen(callback.message, DEPOSIT_PROMPT,
+        reply_markup=get_back_keyboard("cancel_custom_deposit"), parse_mode="HTML")
+    screen_id = getattr(result, "message_id", None)
+    if not is_current_screen(callback.message, screen_id):
+        await callback.answer("Не удалось открыть форму. Попробуйте ещё раз.", show_alert=True)
+        return
+    await state.set_data({FORM_SCREEN: screen_id})
     await state.set_state(CustomDeposit.amount)
     await callback.answer()
 
+
+@router.callback_query(F.data == "cancel_custom_deposit")
+async def cancel_custom_deposit(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if (await state.get_state() != CustomDeposit.amount.state
+            or data.get(FORM_SCREEN) != getattr(callback.message, "message_id", None)
+            or not is_current_screen(callback.message, data.get(FORM_SCREEN))):
+        await callback.answer("Ввод уже завершён", show_alert=True)
+        return
+    await state.clear()
+    text, kb = deposit_menu_content(callback.from_user.id, "Пополнение отменено.")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+async def create_deposit_payment(bot, owner, amount, request_key):
+    from yookassa import Payment
+    username=(await bot.get_me()).username
+    if not username:
+        raise RuntimeError("Bot username unavailable")
+    value=rubles(amount)
+    # Deterministic for repeated delivery of the same Telegram event.
+    key=hashlib.sha256(f"vpn4us-deposit:{owner}:{request_key}".encode()).hexdigest()
+    payment=await asyncio.to_thread(Payment.create,{
+        "amount":{"value":f"{value:.2f}","currency":"RUB"},
+        "confirmation":{"type":"redirect","return_url":f"https://t.me/{username}"},
+        "capture":True,"description":f"Пополнение баланса на {value:.2f} ₽",
+        "metadata":deposit_metadata(owner,amount)
+    },key)
+    url=payment.confirmation.confirmation_url
+    if not isinstance(url,str) or not url.startswith("https://"):
+        raise RuntimeError("Invalid confirmation URL")
+    await asyncio.to_thread(register_deposit,DB_PATH,payment.id,owner,amount)
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text=f"💳 Оплатить {value:.2f} ₽",url=url)],
+        [types.InlineKeyboardButton(text="🔙 Назад",callback_data="deposit")]
+    ])
+
+
 @router.message(CustomDeposit.amount)
 async def deposit_custom_amount(message: types.Message, state: FSMContext):
-    if message.text.lower() in ['/cancel', 'отмена', 'cancel']:
+    if not await current_deposit_input(message, state):
         await state.clear()
-        await message.answer("❌ Пополнение отменено.", parse_mode="HTML")
+        # Do not edit an unrelated active screen or create a payment.
+        await message.answer("Ввод суммы завершён. Откройте пополнение заново.")
+        return
+    raw = (message.text or "").strip()
+    if raw.lower() in ("/cancel", "отмена", "cancel"):
+        await state.clear()
+        text, kb = deposit_menu_content(message.from_user.id, "Пополнение отменено.")
+        await render_command(message, text, reply_markup=kb, parse_mode="HTML", clean_cancel=True)
+        return
+    try:
+        amount = validate_deposit_amount(raw.replace(",", "."))
+    except ValueError:
+        result = await render_command(message,
+            "❌ Введите сумму от 10 до 100000 ₽, не более двух знаков после запятой.\n\n" + DEPOSIT_PROMPT,
+            reply_markup=get_back_keyboard("cancel_custom_deposit"), parse_mode="HTML")
+        # A deleted screen may have been replaced while reporting the error.
+        screen_id = getattr(result, "message_id", None)
+        if screen_id is not None:
+            await state.update_data({FORM_SCREEN: screen_id})
         return
 
+    # Stop accepting amounts before the provider request; a failed render
+    # must never cause a second automatic payment creation.
+    await state.clear()
     try:
-        amount = float(message.text.replace(',', '.'))
-        if amount < 10:
-            await message.answer("❌ Минимальная сумма: <b>10 ₽</b>", parse_mode="HTML")
-            return
-        if amount > 100000:
-            await message.answer("❌ Максимальная сумма: <b>100000 ₽</b>", parse_mode="HTML")
-            return
+        kb = await create_deposit_payment(message.bot, message.from_user.id, amount,
+                                           f"message:{message.chat.id}:{message.message_id}")
+    except Exception:
+        logging.error("Deposit creation failed")
+        await render_command(message, "Не удалось подготовить платёж. Обратитесь в поддержку.",
+                             reply_markup=get_back_keyboard("deposit"))
+        return
+    await render_command(message, f"💳 Пополнение баланса: {rubles(amount):.2f} ₽\nНажмите кнопку для оплаты.",
+                         reply_markup=kb)
 
-        amount = round(amount, 2)
-        from yookassa import Payment
-
-        payment = Payment.create({
-            "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
-            "confirmation": {"type": "redirect", "return_url": "https://t.me/lestat258_bot"},
-            "capture": True,
-            "description": f"Пополнение баланса на {amount:.2f}₽",
-            "metadata": {
-                "telegram_id": message.from_user.id,
-                "type": "deposit",
-                "amount": amount
-            }
-        })
-
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('INSERT INTO payments (payment_id, telegram_id, tariff_id, amount_rub, status) VALUES (?, ?, ?, ?, ?)',
-                  (payment.id, message.from_user.id, 0, amount, 'pending'))
-        conn.commit()
-        conn.close()
-
-        kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text=f"💳 Оплатить {amount:.2f}₽", url=payment.confirmation.confirmation_url)],
-            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="deposit")]
-        ])
-
-        await message.answer(
-            f"💳 <b>Пополнение баланса</b>\n\n"
-            f"Сумма: <b>{amount:.2f} ₽</b>\n\n"
-            f"Нажмите кнопку для оплаты:",
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
-        await state.clear()
-    except ValueError:
-        await message.answer("❌ Введите число. Пример: 150", parse_mode="HTML")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}", parse_mode="HTML")
-        await state.clear()
 
 @router.callback_query(F.data.startswith("deposit_"))
 async def deposit_process(callback: types.CallbackQuery):
-    if callback.data == "deposit_custom":
+    if callback.data=="deposit_custom":
         return
-    amount = int(callback.data.replace("deposit_", ""))
     try:
-        from yookassa import Payment
-        payment = Payment.create({
-            "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
-            "confirmation": {"type": "redirect", "return_url": "https://t.me/lestat258_bot"},
-            "capture": True,
-            "description": f"Пополнение баланса на {amount}₽",
-            "metadata": {
-                "telegram_id": callback.from_user.id,
-                "type": "deposit",
-                "amount": amount
-            }
-        })
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('INSERT INTO payments (payment_id, telegram_id, tariff_id, amount_rub, status) VALUES (?, ?, ?, ?, ?)',
-                  (payment.id, callback.from_user.id, 0, amount, 'pending'))
-        conn.commit()
-        conn.close()
-        kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text=f"💳 Оплатить {amount}₽", url=payment.confirmation.confirmation_url)],
-            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="deposit")]
-        ])
-        await callback.message.edit_text(
-            f"💳 <b>Пополнение баланса</b>\n\n"
-            f"Сумма: <b>{amount} ₽</b>\n\n"
-            f"Нажмите кнопку для оплаты:",
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        await callback.message.edit_text(f"❌ Ошибка: {e}", reply_markup=get_back_keyboard("deposit"))
+        amount=validate_deposit_amount(callback.data.removeprefix("deposit_"))
+        kb=await create_deposit_payment(callback.bot,callback.from_user.id,amount,f"callback:{callback.id}")
+        await render_screen(callback.message, f"💳 Пополнение баланса: {rubles(amount):.2f} ₽\nНажмите кнопку для оплаты.",reply_markup=kb)
+    except Exception:
+        logging.error("Deposit creation failed")
+        await render_screen(callback.message, "Не удалось подготовить платёж. Обратитесь в поддержку.")
     await callback.answer()
 
-@router.message(Command("cancel"))
-async def cancel_deposit(message: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state == CustomDeposit.amount:
-        await state.clear()
-        await message.answer("❌ Пополнение отменено.", parse_mode="HTML")
 
 # ============ АВТО-ПРОДЛЕНИЕ ============
 
@@ -499,21 +510,34 @@ async def toggle_auto_renew(callback: types.CallbackQuery):
 
 # ============ ПРОМОКОДЫ И ДОСТИЖЕНИЯ ============
 
-@router.callback_query(F.data == "promo_achievements")
-async def promo_achievements_menu(callback: types.CallbackQuery):
-    """Объединённое меню промокодов и достижений (главное меню раздела)"""
+def promo_menu_content(owner):
+    """Build the same parent menu for callbacks and text cancellation."""
     from trigger_manager import trigger_manager
     from datetime import datetime
 
-    trigger_manager.cleanup_expired_promocodes(callback.from_user.id)
+    trigger_manager.cleanup_expired_promocodes(owner)
 
-    active = trigger_manager.get_user_promocodes(callback.from_user.id)
-    status = trigger_manager.get_user_trigger_status(callback.from_user.id)
+    active = trigger_manager.get_user_promocodes(owner)
+    status = trigger_manager.get_user_trigger_status(owner)
 
     text = "🎫 <b>Промокоды и достижения</b>\n\n"
+    from promo_reservations import open_reservation, manual_discount_status, archive_info
+    pending = open_reservation(DB_PATH,owner)
+    archived = archive_info(DB_PATH,owner) if pending else None
+    manual = manual_discount_status(DB_PATH,owner)
+    if archived and archived["archived"]:
+        text += "📁 Счёт со скидкой отложен. Резерв сохранён.\n\n"
+    elif pending:
+        text += "⏳ Скидка зарезервирована в ожидающем счёте.\n\n"
 
+    if manual:
+        discount, deadline = manual
+        text += f"🏷️ Ручной промокод: <b>{escape(discount)}</b>\n"
+        if deadline:
+            text += f"Срок действия: {escape(deadline[:10])}\n"
+        text += "\n"
     if active:
-        text += "🟢 <b>Ваши промокоды:</b>\n\n"
+        text += "🟢 <b>Ваши награды:</b>\n\n"
         for promo in active:
             days_left = (datetime.fromisoformat(promo['expires_at']) - datetime.now()).days
             if promo['discount_percent'] > 0:
@@ -523,7 +547,7 @@ async def promo_achievements_menu(callback: types.CallbackQuery):
             text += f"📌 <b>{promo['code']}</b> — {discount_text} (ещё {days_left} дн.)\n"
         text += "\n💡 Нажмите «Мои промокоды» для управления\n\n"
     else:
-        text += "📭 <b>У вас нет активных промокодов</b>\n\n"
+        text += "📭 <b>У вас нет активных наград</b>\n\n"
 
     if status:
         text += "🏆 <b>Прогресс достижений:</b>\n\n"
@@ -554,13 +578,22 @@ async def promo_achievements_menu(callback: types.CallbackQuery):
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="🎫 Мои промокоды", callback_data="my_promocodes")],
+        [types.InlineKeyboardButton(text="📁 Отложенный счёт со скидкой" if archived and archived["archived"] else "🧾 Ожидающий счёт со скидкой", callback_data="promo_pending")],
         [types.InlineKeyboardButton(text="🏆 Все достижения", callback_data="my_achievements")],
         [types.InlineKeyboardButton(text="🏷️ Ввести промокод", callback_data="profile_promocode")],
         [types.InlineKeyboardButton(text="📖 Как это работает", callback_data="achievements_help")],
         [types.InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="back_to_profile")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    return text, kb
+
+
+@router.callback_query(F.data == "promo_achievements")
+async def promo_achievements_menu(callback: types.CallbackQuery, state: FSMContext=None):
+    if state is not None and await state.get_state()==EnterPromocode.waiting.state:
+        await state.clear()
+    text, kb = promo_menu_content(callback.from_user.id)
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -582,7 +615,7 @@ async def show_my_promocodes(callback: types.CallbackQuery):
         kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")]
         ])
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
         await callback.answer()
         return
 
@@ -611,7 +644,7 @@ async def show_my_promocodes(callback: types.CallbackQuery):
 
     buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message, 
         text,
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
@@ -637,19 +670,19 @@ async def apply_promo_confirm(callback: types.CallbackQuery):
     discount_text = f"{promo['discount_percent']}%" if promo['discount_percent'] > 0 else f"{promo['discount_amount']}₽"
     days_left = (datetime.fromisoformat(promo['expires_at']) - datetime.now()).days
 
-    text = f"🎫 <b>Применить промокод?</b>\n\n"
+    text = f"🎫 <b>Промокод</b>\n\n"
     text += f"📌 <b>{promo['code']}</b>\n"
     text += f"💰 Скидка: {discount_text}\n"
     text += f"⏳ Действует: {days_left} дн.\n\n"
-    text += "Промокод будет применён к следующей покупке.\n"
+    text += "При покупке сравнивается первая действующая награда и ручной промокод. Применяется большая скидка.\n"
     text += "⚠️ Промокоды не суммируются!"
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="✅ Да, применить", callback_data=f"confirm_apply_promo_{promo_id}")],
-        [types.InlineKeyboardButton(text="❌ Нет, отмена", callback_data="my_promocodes")]
+        [types.InlineKeyboardButton(text="К тарифам", callback_data="back_to_tariffs")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="my_promocodes")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -660,7 +693,7 @@ async def confirm_apply_promo(callback: types.CallbackQuery):
     promo_id = int(callback.data.replace("confirm_apply_promo_", ""))
 
     if trigger_manager.use_promocode(callback.from_user.id, promo_id):
-        await callback.answer("✅ Промокод применён!", show_alert=True)
+        await callback.answer("Награда доступна. Скидка определяется при покупке.", show_alert=True)
     else:
         await callback.answer("❌ Не удалось применить", show_alert=True)
     await show_my_promocodes(callback)
@@ -700,7 +733,7 @@ async def show_achievements(callback: types.CallbackQuery):
         kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")]
         ])
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
         await callback.answer()
         return
 
@@ -746,7 +779,7 @@ async def show_achievements(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -789,95 +822,33 @@ async def achievements_help(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
+
+
+PROMO_PROMPT = (
+    "🏷️ <b>Ввести промокод</b>\n\n"
+    "Введите промокод, чтобы получить скидку на подписку.\n"
+    "Промокоды действуют ограниченное время.\n\n"
+    "✏️ Отправьте код промокода в этом чате.\n"
+    "Или отправьте /cancel для отмены."
+)
 
 
 @router.callback_query(F.data == "profile_promocode")
 async def profile_promocode(callback: types.CallbackQuery, state: FSMContext):
-    """Ввод промокода"""
-    await state.set_state(EnterPromocode.waiting)  # ← ВАЖНО!
-    
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="promo_achievements")]
-    ])
-
-    await callback.message.edit_text(
-        "🏷️ <b>Ввести промокод</b>\n\n"
-        "Введите промокод, чтобы получить скидку на подписку.\n"
-        "Промокоды действуют ограниченное время.\n\n"
-        "✏️ Отправьте код промокода в этом чате.\n"
-        "Или отправьте /cancel для отмены.",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+    if await state.get_state() is not None:
+        await callback.answer("Сначала завершите текущий ввод.", show_alert=True)
+        return
+    if not is_current_screen(callback.message, getattr(callback.message, "message_id", None)):
+        await callback.answer("Откройте актуальное меню промокодов.", show_alert=True)
+        return
+    result = await render_screen(callback.message, PROMO_PROMPT,
+        reply_markup=get_back_keyboard("promo_achievements"), parse_mode="HTML")
+    mid = getattr(result, "message_id", None)
+    if not is_current_screen(callback.message, mid):
+        await callback.answer("Не удалось открыть форму. Попробуйте ещё раз.", show_alert=True)
+        return
+    await state.set_data({FORM_SCREEN: mid})
+    await state.set_state(EnterPromocode.waiting)
     await callback.answer()
-
-
-# @router.message(F.text)  # ВРЕМЕННО ОТКЛЮЧЕНО
-async def process_promocode_input(message: types.Message, state: FSMContext):
-    """Обработка введённого промокода"""
-    if message.text.startswith('/'):
-        return
-
-    code = message.text.strip().upper()
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute('''
-        SELECT id, discount_percent, discount_amount, valid_until, max_uses, used_count
-        FROM promocodes
-        WHERE code = ? AND is_active = 1
-    ''', (code,))
-    promocode = c.fetchone()
-
-    if not promocode:
-        await message.answer("❌ Промокод не найден или неактивен", parse_mode="HTML")
-        conn.close()
-        return
-
-    promocode_id, discount_percent, discount_amount, valid_until, max_uses, used_count = promocode
-
-    if valid_until and datetime.now() > datetime.fromisoformat(valid_until):
-        await message.answer("❌ Срок действия промокода истек", parse_mode="HTML")
-        conn.close()
-        return
-
-    if used_count >= max_uses:
-        await message.answer("❌ Промокод уже использован максимальное количество раз", parse_mode="HTML")
-        conn.close()
-        return
-
-    c.execute('SELECT id FROM promocode_uses WHERE promocode_id = ? AND user_id = ?',
-              (promocode_id, message.from_user.id))
-    if c.fetchone():
-        await message.answer("❌ Вы уже использовали этот промокод", parse_mode="HTML")
-        conn.close()
-        return
-
-    c.execute('INSERT INTO promocode_uses (promocode_id, user_id) VALUES (?, ?)',
-              (promocode_id, message.from_user.id))
-    c.execute('UPDATE promocodes SET used_count = used_count + 1 WHERE id = ?', (promocode_id,))
-    conn.commit()
-    conn.close()
-
-    if discount_percent > 0:
-        set_setting(f'promocode_user_{message.from_user.id}', f'{discount_percent}|0')
-        await message.answer(
-            f"✅ <b>Промокод активирован!</b>\n\n"
-            f"🎁 Скидка: <b>{discount_percent}%</b>\n"
-            f"💡 Скидка будет применена к следующей покупке.",
-            parse_mode="HTML"
-        )
-    elif discount_amount > 0:
-        set_setting(f'promocode_user_{message.from_user.id}', f'0|{discount_amount}')
-        await message.answer(
-            f"✅ <b>Промокод активирован!</b>\n\n"
-            f"🎁 Скидка: <b>{discount_amount} ₽</b>\n"
-            f"💡 Скидка будет применена к следующей покупке.",
-            parse_mode="HTML"
-        )
-
-    # Возвращаемся в главное меню промокодов
-    await promo_achievements_menu(message)

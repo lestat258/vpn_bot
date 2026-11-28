@@ -27,7 +27,7 @@ def _load_payment(db_path, payment_id):
             SELECT p.telegram_id, p.tariff_id, t.name, t.duration_days,
                    t.traffic_gb, t.ip_limit
               FROM payments p JOIN tariffs t ON t.id=p.tariff_id
-             WHERE p.payment_id=?
+             WHERE p.payment_id=? AND p.tariff_id>0
         ''', (payment_id,)).fetchone()
         return dict(row) if row else None
 
@@ -193,7 +193,8 @@ async def process_verified_payment(payment_id, verified_data, *, db_path=DEFAULT
 
         # Commit completion BEFORE any Telegram notification. A notification
         # failure must never result in a second VPN subscription/renewal.
-        await asyncio.to_thread(ledger.complete, payment_id, sub_id)
+        await asyncio.to_thread(ledger.complete, payment_id, sub_id,
+                                duration_days=duration, action='renew' if renewed else 'new_key')
 
     except Exception as exc:
         LOG.error('VPN outcome requires reconciliation: %s', type(exc).__name__)
