@@ -9,8 +9,10 @@ import logging
 import asyncio
 import sqlite3
 from promo_checkout import create_checkout, request_key, check_open_checkout
-from promo_reservations import ReservationBusy, ZeroPayable
-from balance_ledger import rubles
+from promo_reservations import (ReservationBusy, ZeroPayable, archive_info, set_archived,
+    prepare_full_price, full_price_details)
+from balance_ledger import rubles, kopecks
+from form_navigation import is_current_screen
 from datetime import datetime, timedelta
 from aiogram import Router, types, F, Bot
 
@@ -330,7 +332,7 @@ async def create_free_subscription(callback, tariff_id, name, days, traffic_gb, 
 # ОБРАБОТКА ПЛАТЕЖА
 # ============================================================
 
-async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip_limit, action='new_key', subscription_id=None, back_to='back_to_tariffs'):
+async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip_limit, action='new_key', subscription_id=None, back_to='back_to_tariffs', full_price_token=None):
     """Обрабатывает создание платежа"""
     target_text = ""
     if action == "renew":
@@ -346,9 +348,9 @@ async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip
         if not username:
             raise RuntimeError("Telegram bot username unavailable")
         amount, discount, url = await asyncio.to_thread(
-            create_checkout, DB_PATH, Payment, request_key(callback.bot.id, callback.id),
+            create_checkout, DB_PATH, Payment, request_key(callback.bot.id, full_price_token or callback.id),
             callback.from_user.id, tariff_id, name, price, username,
-            action=action, subscription_id=subscription_id)
+            action=action, subscription_id=subscription_id, full_price_token=full_price_token)
         buttons = []
         if url:
             buttons.append([types.InlineKeyboardButton(text=f"💳 Оплатить {rubles(amount):.2f} ₽",url=url)])
@@ -357,6 +359,8 @@ async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip
         buttons.append([types.InlineKeyboardButton(text="🔙 Назад",callback_data=back_to)])
         kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
         text = f"📋 <b>{escape(name)}</b>\n" + target_text + f"💰 {price:.2f} ₽"
+        if full_price_token:
+            text += "\nНовый счёт без скидки. Отложенный счёт остаётся действующим до отмены ЮKassa."
         if discount:
             text += f" → <b>{rubles(amount):.2f} ₽</b> (скидка {rubles(discount):.2f} ₽)"
             text += "\nПромокод зарезервирован до подтверждения или отмены оплаты."
@@ -364,10 +368,22 @@ async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip
         text += "Нажмите кнопку для оплаты:" if url else "Ссылка недоступна. Проверьте счёт или обратитесь в поддержку."
         await render_screen(callback.message,text,reply_markup=kb,parse_mode="HTML")
     except ReservationBusy:
-        kb=types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="Проверить ожидающий счёт",callback_data="promo_pending")],
-            [types.InlineKeyboardButton(text="🔙 Назад",callback_data=back_to)]])
-        await render_screen(callback.message,"У вас уже есть счёт с зарезервированной скидкой.",reply_markup=kb)
+        token=await asyncio.to_thread(prepare_full_price,DB_PATH,callback.from_user.id,
+                                      tariff_id,price,action,subscription_id)
+        buttons=[]
+        if token:
+            text=(f"📋 <b>{escape(name)}</b>\n"+target_text
+                  + f"💰 <b>{price:.2f} ₽</b> без скидки\n\n"
+                  "Скидка остаётся в отложенном счёте. Старую ссылку всё ещё можно оплатить; "
+                  "если оплатить оба счёта, будут обработаны обе покупки.\n\n"
+                  "Создать отдельный счёт за полную стоимость?")
+            buttons.append([types.InlineKeyboardButton(text=f"Подтвердить {price:.2f} ₽ без скидки",
+                callback_data=f"promo_full_{token}")])
+        else:
+            text="У вас уже есть счёт с зарезервированной скидкой. Проверьте его или отложите, чтобы выбрать другой тариф."
+        buttons.append([types.InlineKeyboardButton(text="Проверить ожидающий счёт",callback_data="promo_pending")])
+        buttons.append([types.InlineKeyboardButton(text="🔙 Назад",callback_data=back_to)])
+        await render_screen(callback.message,text,reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),parse_mode="HTML")
     except ZeroPayable:
         await callback.answer("Нулевая сумма не поддерживается. Обратитесь в поддержку.",show_alert=True)
         return
@@ -378,6 +394,52 @@ async def process_payment(callback, tariff_id, name, price, days, traffic_gb, ip
             [types.InlineKeyboardButton(text="🔙 Назад",callback_data=back_to)]])
         await render_screen(callback.message,"Не удалось подтвердить создание счёта. Проверьте ожидающий счёт или обратитесь в поддержку.",reply_markup=kb)
     await callback.answer()
+
+
+def current_checkout_button(callback):
+    """Require the action to be displayed on the current bot screen."""
+    message=callback.message
+    if not is_current_screen(message,getattr(message,"message_id",None)):
+        return False
+    markup=getattr(message,"reply_markup",None)
+    return any(b.callback_data==callback.data for row in getattr(markup,"inline_keyboard",[]) for b in row)
+
+
+@router.callback_query(F.data.startswith("promo_full_"))
+async def confirm_full_price(callback: types.CallbackQuery):
+    token=callback.data.removeprefix("promo_full_")
+    if not current_checkout_button(callback):
+        await callback.answer("Выберите тариф заново.",show_alert=True)
+        return
+    details=await asyncio.to_thread(full_price_details,DB_PATH,token,callback.from_user.id)
+    if not details:
+        await callback.answer("Подтверждение устарело. Выберите тариф заново.",show_alert=True)
+        return
+    tariff=renewal_tariff(DB_PATH,details["tariff_id"])
+    if not tariff or kopecks(tariff[2])!=details["original_kopecks"]:
+        await callback.answer("Тариф или стоимость изменились. Выберите заново.",show_alert=True)
+        return
+    subscription_id=details["subscription_id"]
+    await process_payment(callback,*tariff,action=details["action"],subscription_id=subscription_id,
+        back_to=f"renew_from_key_{subscription_id}" if subscription_id else "back_to_tariffs",
+        full_price_token=token)
+
+
+@router.callback_query(F.data.startswith("promo_archive_") | F.data.startswith("promo_restore_"))
+async def change_promo_archive(callback: types.CallbackQuery):
+    if not current_checkout_button(callback):
+        await callback.answer("Откройте ожидающий счёт заново.",show_alert=True)
+        return
+    try:
+        order_id=int(callback.data.rsplit("_",1)[1])
+        archived=callback.data.startswith("promo_archive_")
+    except ValueError:
+        await callback.answer("Некорректный счёт.",show_alert=True)
+        return
+    if not await asyncio.to_thread(set_archived,DB_PATH,callback.from_user.id,order_id,archived):
+        await callback.answer("Состояние счёта изменилось. Проверьте статус.",show_alert=True)
+        return
+    await promo_pending(callback)
 
 
 @router.callback_query(F.data == "promo_pending")
@@ -398,8 +460,17 @@ async def promo_pending(callback: types.CallbackQuery):
     buttons=[]
     if amount is not None:
         text+=f"\nСумма: {rubles(amount):.2f} ₽"
-    if status=="pending" and url:
-        buttons.append([types.InlineKeyboardButton(text="💳 Оплатить",url=url)])
+    if status=="pending":
+        info=await asyncio.to_thread(archive_info,DB_PATH,callback.from_user.id)
+        if info and info["archived"]:
+            text+="\n\nСчёт отложен. Скидка остаётся в резерве, старая платёжная ссылка не отменена. Можно выбрать другой тариф без скидки."
+            buttons.append([types.InlineKeyboardButton(text="Вернуть счёт к оплате",callback_data=f"promo_restore_{info['order_id']}")])
+        else:
+            if url:
+                buttons.append([types.InlineKeyboardButton(text="💳 Оплатить",url=url)])
+            if info:
+                text+="\n\nМожно отложить счёт, но это не отменит платёжную ссылку и не освободит скидку."
+                buttons.append([types.InlineKeyboardButton(text="Отложить счёт",callback_data=f"promo_archive_{info['order_id']}")])
     if status in ("pending","paid","review"):
         buttons.append([types.InlineKeyboardButton(text="Обновить статус",callback_data="promo_pending")])
     buttons.append([types.InlineKeyboardButton(text="🔙 Назад",callback_data="promo_achievements")])

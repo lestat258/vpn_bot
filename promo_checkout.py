@@ -38,8 +38,8 @@ def payment_link(payment):
     return url if isinstance(url,str) and url.startswith("https://") else None
 
 
-def create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,username,*,action="new_key",subscription_id=None):
-    row,fresh=reserve(path,checkout_id,owner,tariff_id,price,action=action,subscription_id=subscription_id)
+def create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,username,*,action="new_key",subscription_id=None,full_price_token=None):
+    row,fresh=reserve(path,checkout_id,owner,tariff_id,price,action=action,subscription_id=subscription_id,full_price_token=full_price_token)
     if row and not fresh:
         raise ReservationBusy("Already attempted")
     original=kopecks(price,positive=True)

@@ -521,10 +521,13 @@ def promo_menu_content(owner):
     status = trigger_manager.get_user_trigger_status(owner)
 
     text = "🎫 <b>Промокоды и достижения</b>\n\n"
-    from promo_reservations import open_reservation, manual_discount_status
+    from promo_reservations import open_reservation, manual_discount_status, archive_info
     pending = open_reservation(DB_PATH,owner)
+    archived = archive_info(DB_PATH,owner) if pending else None
     manual = manual_discount_status(DB_PATH,owner)
-    if pending:
+    if archived and archived["archived"]:
+        text += "📁 Счёт со скидкой отложен. Резерв сохранён.\n\n"
+    elif pending:
         text += "⏳ Скидка зарезервирована в ожидающем счёте.\n\n"
 
     if manual:
@@ -575,7 +578,7 @@ def promo_menu_content(owner):
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="🎫 Мои промокоды", callback_data="my_promocodes")],
-        [types.InlineKeyboardButton(text="🧾 Ожидающий счёт со скидкой", callback_data="promo_pending")],
+        [types.InlineKeyboardButton(text="📁 Отложенный счёт со скидкой" if archived and archived["archived"] else "🧾 Ожидающий счёт со скидкой", callback_data="promo_pending")],
         [types.InlineKeyboardButton(text="🏆 Все достижения", callback_data="my_achievements")],
         [types.InlineKeyboardButton(text="🏷️ Ввести промокод", callback_data="profile_promocode")],
         [types.InlineKeyboardButton(text="📖 Как это работает", callback_data="achievements_help")],
