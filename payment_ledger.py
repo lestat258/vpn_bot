@@ -96,6 +96,8 @@ class PaymentLedger:
                 "UPDATE payments SET status='paid' WHERE payment_id=?",
                 (payment_id,)
             )
+            from referral_accrual import record_completed_purchase
+            record_completed_purchase(db, payment_id)
 
     def mark_review(self, payment_id, reason):
         """Retain uncertain outcome for manual reconciliation. No auto-retry."""
