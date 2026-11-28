@@ -204,32 +204,21 @@ async def faq(message: types.Message):
 @router.message(Command("referral"))
 @router.message(F.text == "🎁 Пригласить друга")
 async def invite_friend(message: types.Message):
-    bot_username = (await message.bot.get_me()).username
-    invite_link = f"https://t.me/{bot_username}?start=ref_{message.from_user.id}"
+    from referral_screen import screen
+    username=(await message.bot.get_me()).username
+    text,kb=screen(DB_PATH,message.from_user.id,username,"main")
+    await render_command(message,text,keyboard=get_main_keyboard(message.from_user.id),
+                         reply_markup=kb,parse_mode="HTML",disable_web_page_preview=True)
 
-    from referral import referral_manager
-    stats = referral_manager.get_referral_stats(message.from_user.id)
 
-    invite_text = (
-        "🎁 <b>Реферальная программа</b>\n\n"
-        "Приглашайте друзей и получайте бонусные дни к подписке!\n\n"
-        "📊 <b>Ваша статистика:</b>\n"
-        f"👤 1 уровень (прямые): {stats['level_1']} чел. → +30 дней\n"
-        f"👤 2 уровень: {stats['level_2']} чел. → +15 дней\n"
-        f"👤 3 уровень: {stats['level_3']} чел. → +5 дней\n"
-        f"📦 Всего бонусных дней: {stats['bonus_days']} дн.\n"
-        f"👥 Всего рефералов: {stats['total']}\n\n"
-        "🔗 <b>Ваша реферальная ссылка:</b>\n"
-        f"<code>{invite_link}</code>\n\n"
-        "📖 <b>Как это работает?</b>\n"
-        "1. Отправьте ссылку другу\n"
-        "2. Друг регистрируется по ссылке\n"
-        "3. Когда друг купит подписку, вы получите бонусные дни!\n"
-        "4. Бонусы начисляются за 3 уровня глубины"
-    )
+@router.callback_query(F.data.in_({"referral_main","referral_levels","referral_history","referral_spend"}))
+async def referral_section(callback: types.CallbackQuery):
+    from referral_screen import screen
+    username=(await callback.bot.get_me()).username
+    text,kb=screen(DB_PATH,callback.from_user.id,username,callback.data.removeprefix("referral_"))
+    await render_screen(callback.message,text,reply_markup=kb,parse_mode="HTML",disable_web_page_preview=True)
+    await callback.answer()
 
-    kb = get_back_keyboard("back_to_main")
-    await render_command(message,invite_text, keyboard=get_main_keyboard(message.from_user.id), reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
 
 @router.message(Command("admin"))
 @router.message(F.text == "🔧 Админ-панель")
