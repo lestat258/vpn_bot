@@ -5,7 +5,7 @@ distinguished from quota enforcement by this API version.
 import fcntl
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -37,14 +37,22 @@ def client_state(api, email, uid, subid):
     return dict(client),tuple(sorted(ids)),payload.get("usedTraffic")
 
 
+@contextmanager
+def renewal_lock(path, subscription_id):
+    if type(subscription_id) is not int or subscription_id<=0:
+        raise ValueError("Invalid subscription")
+    lock_path=Path(path).with_name(f".renew-{subscription_id}.lock")
+    with lock_path.open("a") as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        yield
+
+
 def renew_subscription(path, subscription_id, paid_days, tariff_id, api_factory, *, clock=None, auto=None):
     if type(subscription_id) is not int or subscription_id<=0 or type(paid_days) is not int or paid_days<=0:
         raise ValueError("Invalid subscription or duration")
     from auto_renewal import pending, reserve, complete, review
     now_ms=clock or (lambda: time.time_ns()//1000000)
-    lock_path=Path(path).with_name(f".renew-{subscription_id}.lock")
-    with lock_path.open("a") as lock, closing(sqlite3.connect(path,timeout=15)) as db:
-        fcntl.flock(lock,fcntl.LOCK_EX)
+    with renewal_lock(path,subscription_id), closing(sqlite3.connect(path,timeout=15)) as db:
         if pending(db,subscription_id):
             raise ValueError("Automatic renewal awaits reconciliation")
         if auto is not None and (auto.subscription_id,auto.days,auto.tariff_id)!=(subscription_id,paid_days,tariff_id):
@@ -85,7 +93,8 @@ def renew_subscription(path, subscription_id, paid_days, tariff_id, api_factory,
         operation_id=None
         if auto is not None:
             operation_id=reserve(path,auto,now=now,target_ms=target_ms,
-                                 server_id=server_id,uid=uid,subid=subid)
+                                 server_id=server_id,uid=uid,subid=subid,email=email,
+                                 url=url,token=token,inbounds=inbounds)
         try:
             reply=api._request("POST","/panel/api/clients/bulkAdjust",
                                {"emails":[email],"addDays":adjustment},retries=1)
@@ -108,7 +117,7 @@ def renew_subscription(path, subscription_id, paid_days, tariff_id, api_factory,
                 if updated.rowcount!=1:
                     raise ValueError("Subscription changed during renewal; reconciliation required")
                 if operation_id is not None:
-                    complete(db,operation_id)
+                    complete(db,operation_id,subscription_id,server_id,inbounds)
         except Exception:
             if operation_id is not None:
                 try:
@@ -144,7 +153,8 @@ def renewable_subscriptions(path, owner, subscription_id=None):
         params.append(subscription_id)
     sql+=" ORDER BY s.end_date DESC,s.id DESC"
     with closing(sqlite3.connect(path)) as db:
-        return db.execute(sql,params).fetchall()
+        from auto_renewal import pending
+        return [row for row in db.execute(sql,params).fetchall() if not pending(db,row[0])]
 
 
 def renewal_tariff(path, tariff_id):
