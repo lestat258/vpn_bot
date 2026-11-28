@@ -3,6 +3,7 @@ Never repeat an ambiguous external income registration. Historical not_started
 rows are deliberately not eligible; reconcile those with FNS separately.
 """
 from runtime_config import DB_PATH
+from balance_ledger import deposit_exists, deposit_row, kopecks
 import asyncio
 import base64
 import logging
@@ -40,14 +41,14 @@ def queue_verified(path, payment_id):
             INSERT OR IGNORE INTO payment_processing
               (payment_id, payment_state, vpn_state, tax_state)
             SELECT payment_id, 'verified', 'not_started', 'queued'
-            FROM payments WHERE payment_id=? AND status='pending' AND amount_rub>0
+            FROM payments WHERE payment_id=? AND status='pending' AND amount_rub>0 AND tariff_id<>0
         """, (payment_id,))
 
 
 def claim(path, payment_id):
     with transaction(path) as db:
         row = db.execute("""
-            SELECT p.telegram_id, p.amount_rub, p.status,
+            SELECT p.telegram_id, p.amount_rub, p.status, p.tariff_id, j.vpn_state,
                    j.tax_state, j.receipt_uuid, j.payment_state,
                    j.refund_state, j.is_legacy
             FROM payments p JOIN payment_processing j USING(payment_id)
@@ -59,7 +60,7 @@ def claim(path, payment_id):
             return None
         settings = dict(db.execute("""
             SELECT key,value FROM settings WHERE key IN
-              ('tax_enabled','tax_description_template')
+              ('tax_enabled','tax_description_template','tax_deposit_policy')
         """))
         state = "processing"
         if row["receipt_uuid"] or db.execute(
@@ -69,6 +70,25 @@ def claim(path, payment_id):
             state = "needs_review"
         elif settings.get("tax_enabled") != "true":
             state = "skipped"
+        description=(settings.get("tax_description_template") or "Оплата VPN-подписки")[:255]
+        if row["tariff_id"]==0 and state=="processing":
+            description="Предоплата услуг VPN4US"
+            try:
+                if (settings.get("tax_deposit_policy")!="npd_prepayment"
+                        or row["status"]!="paid" or row["vpn_state"]!="done"
+                        or not deposit_exists(db,payment_id)):
+                    raise ValueError("Deposit fiscal policy or order unavailable")
+                deposit=deposit_row(db,payment_id)
+                op=db.execute("SELECT * FROM balance_operations WHERE operation_id=?",
+                              ("deposit:"+payment_id,)).fetchone()
+                if (deposit["refunded_kopecks"] or not op
+                        or op["telegram_id"]!=row["telegram_id"] or op["kind"]!="deposit"
+                        or op["payment_id"]!=payment_id or op["actor_id"] is not None
+                        or op["delta_kopecks"]!=kopecks(row["amount_rub"],positive=True)
+                        or op["before_kopecks"]+op["delta_kopecks"]!=op["after_kopecks"]):
+                    raise ValueError("Deposit fiscal identity mismatch")
+            except (ValueError,TypeError,sqlite3.Error):
+                state="needs_review"
         db.execute("""
             UPDATE payment_processing SET tax_state=?,
                 updated_at=CURRENT_TIMESTAMP WHERE payment_id=?
@@ -76,7 +96,7 @@ def claim(path, payment_id):
         if state != "processing":
             return None
         return (int(row["telegram_id"]), Decimal(str(row["amount_rub"])),
-                (settings.get("tax_description_template") or "Оплата VPN-подписки")[:255])
+                description)
 
 
 def complete(path, payment_id, user_id, amount, description, receipt_uuid, url):
