@@ -816,7 +816,7 @@ async def admin_delete_tariff_start(callback: types.CallbackQuery):
         )] for t in tariffs
     ] + [[types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_tariffs")]])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "🗑 <b>Выберите тариф для удаления:</b>",
         reply_markup=kb,
         parse_mode="HTML"
@@ -847,7 +847,7 @@ async def admin_delete_tariff_confirm(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_tariffs")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"⚠️ <b>Удаление тарифа</b>\n\n"
         f"📦 Тариф: {tariff[1]}\n\n"
         f"<b>ВНИМАНИЕ!</b> Удаление тарифа не удалит существующие подписки.\n\n"
@@ -1157,7 +1157,7 @@ async def server_detail(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад к списку", callback_data="admin_servers_menu")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("server_check_"))
@@ -1168,7 +1168,7 @@ async def server_check(callback: types.CallbackQuery):
 
     server_id = int(callback.data.replace("server_check_", ""))
 
-    await callback.message.edit_text("⏳ Проверка сервера...", parse_mode="HTML")
+    await render_screen(callback.message,"⏳ Проверка сервера...", parse_mode="HTML")
 
     try:
         result = server_manager.check_server_health(server_id)
@@ -1235,7 +1235,7 @@ async def server_delete_handler(callback: types.CallbackQuery):
             [types.InlineKeyboardButton(text="❌ Отмена", callback_data=f"server_detail_{server_id}")]
         ])
 
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             f"⚠️ <b>Удаление сервера</b>\n\n"
             f"Сервер: <b>{server[0]}</b>\n\n"
             f"<b>ВНИМАНИЕ!</b> Это действие удалит сервер из базы данных.\n\n"
@@ -1339,7 +1339,7 @@ async def admin_stats(callback: types.CallbackQuery):
     text = f"📊 <b>Статистика:</b>\n\n👤 Пользователей: {users}\n✅ Подписок: {subs}\n💰 Платежей: {paid[0] or 0} на {paid[1] or 0:.0f}₽"
     kb = get_back_keyboard("admin_back_to_menu")
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 # ============================================================
@@ -1429,7 +1429,7 @@ async def admin_automation_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"⚙️ <b>Настройки автоматизации</b>\n\n"
         f"📌 Авто-продление: {status}\n"
         f"📌 Авто-уведомления: Активны\n\n"
@@ -1459,7 +1459,7 @@ async def toggle_auto_renew(callback: types.CallbackQuery):
 
     kb = get_back_keyboard("admin_automation")
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"🔄 Авто-продление: {status}",
         reply_markup=kb,
         parse_mode="HTML"
@@ -1500,7 +1500,7 @@ async def auto_notify_status(callback: types.CallbackQuery):
 
     kb = get_back_keyboard("admin_automation")
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 # ============================================================
@@ -1525,7 +1525,7 @@ async def admin_tax_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"🧾 <b>Настройки налогов</b>\n\n"
         f"📌 Статус: {status_text}\n"
         f"📌 {inn_display}\n\n"
@@ -1576,7 +1576,7 @@ async def tax_status(callback: types.CallbackQuery):
 
     kb = get_back_keyboard("admin_tax")
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         text,
         reply_markup=kb,
         parse_mode="HTML"
@@ -1601,7 +1601,7 @@ async def admin_backup_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "🗄 <b>Управление бэкапами</b>\n\nВыберите действие:",
         reply_markup=kb,
         parse_mode="HTML"
@@ -1629,11 +1629,11 @@ async def backup_create(callback: types.CallbackQuery):
         await callback.answer("⛔ Доступ запрещён")
         return
 
-    await callback.message.edit_text("⏳ Создание бэкапа...", parse_mode="HTML")
+    await render_screen(callback.message,"⏳ Создание бэкапа...", parse_mode="HTML")
 
     try:
         result = backup_manager.create_backup()
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             f"✅ <b>Бэкап создан!</b>\n\n"
             f"📅 Дата: {result['timestamp']}\n"
             f"📁 Папка: {BACKUP_DIR}/",
@@ -1641,7 +1641,7 @@ async def backup_create(callback: types.CallbackQuery):
             parse_mode="HTML"
         )
     except Exception as e:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             f"❌ Ошибка создания бэкапа: {str(e)}",
             reply_markup=get_back_keyboard("backup_menu_back")
         )
@@ -1656,7 +1656,7 @@ async def backup_list(callback: types.CallbackQuery):
         backups = backup_manager.get_backup_list()
 
         if not backups:
-            await callback.message.edit_text(
+            await render_screen(callback.message,
                 "📭 Нет сохранённых бэкапов",
                 reply_markup=get_back_keyboard("backup_menu_back")
             )
@@ -1672,13 +1672,13 @@ async def backup_list(callback: types.CallbackQuery):
         if len(backups) > 10:
             text += f"\n... и ещё {len(backups) - 10} бэкапов"
 
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             text,
             reply_markup=get_back_keyboard("backup_menu_back"),
             parse_mode="HTML"
         )
     except Exception as e:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             f"❌ Ошибка: {str(e)}",
             reply_markup=get_back_keyboard("backup_menu_back")
         )
@@ -1693,7 +1693,7 @@ async def backup_restore(callback: types.CallbackQuery):
         backups = backup_manager.get_backup_list()
 
         if not backups:
-            await callback.message.edit_text(
+            await render_screen(callback.message,
                 "📭 Нет бэкапов для восстановления",
                 reply_markup=get_back_keyboard("backup_menu_back")
             )
@@ -1708,14 +1708,14 @@ async def backup_restore(callback: types.CallbackQuery):
             )])
         buttons.append([types.InlineKeyboardButton(text="🔙 В меню бэкапов", callback_data="backup_menu_back")])
 
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             "🔄 <b>Выберите бэкап для восстановления:</b>\n\n"
             "ВНИМАНИЕ! Текущие данные будут заменены!",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
             parse_mode="HTML"
         )
     except Exception as e:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             f"❌ Ошибка: {str(e)}",
             reply_markup=get_back_keyboard("backup_menu_back")
         )
@@ -1733,7 +1733,7 @@ async def backup_restore_confirm(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="❌ Отмена", callback_data="backup_restore")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"⚠️ <b>Восстановление бэкапа</b>\n\n"
         f"Бэкап от: {timestamp}\n\n"
         f"<b>ВНИМАНИЕ!</b> Текущие данные будут заменены!\n\n"
@@ -1751,13 +1751,13 @@ async def backup_restore_execute(callback: types.CallbackQuery):
 
     timestamp = callback.data.replace("backup_restore_execute_", "")
 
-    await callback.message.edit_text("⏳ Восстановление бэкапа...", parse_mode="HTML")
+    await render_screen(callback.message,"⏳ Восстановление бэкапа...", parse_mode="HTML")
 
     try:
         result = backup_manager.restore_backup(timestamp)
 
         if result['success']:
-            await callback.message.edit_text(
+            await render_screen(callback.message,
                 f"✅ <b>Бэкап восстановлен!</b>\n\n"
                 f"📅 Дата: {timestamp}\n"
                 f"🔄 Данные восстановлены из бэкапа.",
@@ -1765,12 +1765,12 @@ async def backup_restore_execute(callback: types.CallbackQuery):
                 parse_mode="HTML"
             )
         else:
-            await callback.message.edit_text(
+            await render_screen(callback.message,
                 f"❌ Ошибка восстановления: {result.get('error', 'Неизвестная ошибка')}",
                 reply_markup=get_back_keyboard("backup_menu_back")
             )
     except Exception as e:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             f"❌ Ошибка: {str(e)}",
             reply_markup=get_back_keyboard("backup_menu_back")
         )
@@ -1819,7 +1819,7 @@ async def admin_broadcast_promo_menu(callback: types.CallbackQuery):
 
     text = "📢 <b>Рассылка промокодов</b>\n\nВыберите раздел:"
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "promo_broadcast_achievements")
@@ -1840,7 +1840,7 @@ async def promo_broadcast_achievements_list(callback: types.CallbackQuery):
     conn.close()
 
     if not promos:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             "🏆 <b>Достижения</b>\n\n❌ Нет активных промокодов в этом разделе.",
             reply_markup=get_back_keyboard("admin_broadcast_promo"),
             parse_mode="HTML"
@@ -1867,7 +1867,7 @@ async def promo_broadcast_achievements_list(callback: types.CallbackQuery):
         callback_data="admin_broadcast_promo"
     )])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"🏆 <b>Достижения</b>\n\nВсего: {len(promos)}\n\nВыберите промокод для рассылки:",
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
@@ -1892,7 +1892,7 @@ async def promo_manual_list(callback: types.CallbackQuery):
     conn.close()
 
     if not promos:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             "✋ <b>Ручные</b>\n\n❌ Нет активных промокодов в этом разделе.",
             reply_markup=get_back_keyboard("admin_broadcast_promo"),
             parse_mode="HTML"
@@ -1912,7 +1912,7 @@ async def promo_manual_list(callback: types.CallbackQuery):
         callback_data="admin_broadcast_promo"
     )])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"✋ <b>Ручные</b>\n\nВсего: {len(promos)}\n\nВыберите промокод для рассылки:",
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
@@ -1952,7 +1952,7 @@ async def broadcast_promo_confirm(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_broadcast_promo")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("confirm_send_"))
@@ -1979,12 +1979,12 @@ async def confirm_send_handler(callback: types.CallbackQuery):
 
     message = f"🎉 <b>Новый промокод!</b>\n\n🏷️ <b>{code}</b> — скидка {discount}%\n\n💡 Введите код в разделе «🎫 Промокоды и достижения»"
 
-    await callback.message.edit_text("⏳ Отправка...", parse_mode="HTML")
+    await render_screen(callback.message,"⏳ Отправка...", parse_mode="HTML")
 
     from broadcast import send_broadcast_with_text
     sent = await send_broadcast_with_text(message)
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"✅ <b>Готово!</b>\n\n📨 Отправлено: {sent} пользователям\n🏷️ Промокод: {code}",
         reply_markup=get_back_keyboard("admin_broadcast_promo"),
         parse_mode="HTML"
@@ -2020,7 +2020,7 @@ async def admin_rate_limit_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         f"🛡️ <b>Защита от спама и брутфорса</b>\n\n"
         f"📊 Заблокировано пользователей: {blocked_count}\n"
         f"📋 Всего записей в БД: {total_records}\n\n"
@@ -2041,7 +2041,7 @@ async def rate_limit_stats(callback: types.CallbackQuery):
         blocked = conn.execute(
             "SELECT COUNT(DISTINCT user_id) FROM rate_limits WHERE is_blocked = 1"
         ).fetchone()[0]
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "📊 <b>Статистика защиты от спама</b>\\n\\n"
         f"Записей лимитов: {total}\\n"
         f"Заблокировано пользователей: {blocked}\\n\\n"
@@ -2097,7 +2097,7 @@ async def rate_limit_settings(callback: types.CallbackQuery):
     text += "Для изменения настроек отредактируйте файл rate_limiter.py"
 
     kb = get_back_keyboard("admin_rate_limit")
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await render_screen(callback.message,text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "rate_limit_unblock")
@@ -2120,7 +2120,7 @@ async def rate_limit_unblock_menu(callback: types.CallbackQuery):
     conn.close()
 
     if not blocked_users:
-        await callback.message.edit_text(
+        await render_screen(callback.message,
             "✅ Нет заблокированных пользователей",
             reply_markup=get_back_keyboard("admin_rate_limit"),
             parse_mode="HTML"
@@ -2146,7 +2146,7 @@ async def rate_limit_unblock_menu(callback: types.CallbackQuery):
 
     buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_rate_limit")])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "🔓 <b>Заблокированные пользователи</b>\n\n"
         "Выберите пользователя для снятия блокировки:",
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -2178,7 +2178,7 @@ async def admin_back_to_menu(callback: types.CallbackQuery):
         await callback.answer("⛔ Доступ запрещён")
         return
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "🔧 <b>Админ-панель</b>\n\nВыберите раздел для управления:",
         reply_markup=get_admin_keyboard(),
         parse_mode="HTML"
@@ -2201,7 +2201,7 @@ async def admin_settings_menu(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back_to_menu")]
     ])
 
-    await callback.message.edit_text(
+    await render_screen(callback.message,
         "⚙️ <b>Настройки бота</b>\n\nВыберите раздел для управления:",
         reply_markup=kb,
         parse_mode="HTML"
