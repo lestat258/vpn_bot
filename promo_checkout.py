@@ -39,6 +39,20 @@ def payment_link(payment):
 
 
 def create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,username,*,action="new_key",subscription_id=None,full_price_token=None):
+    if action == "renew":
+        from subscription_renewal import renewal_lock
+        from auto_renewal import pending, manual_attempt_pending
+        with renewal_lock(path,subscription_id):
+            with closing(sqlite3.connect(path)) as db:
+                if pending(db,subscription_id) or manual_attempt_pending(db,subscription_id):
+                    raise ReservationBusy("Renewal awaits reconciliation")
+            return _create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,username,
+                                    action=action,subscription_id=subscription_id,full_price_token=full_price_token)
+    return _create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,username,
+                            action=action,subscription_id=subscription_id,full_price_token=full_price_token)
+
+
+def _create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,username,*,action,subscription_id,full_price_token):
     row,fresh=reserve(path,checkout_id,owner,tariff_id,price,action=action,subscription_id=subscription_id,full_price_token=full_price_token)
     if row and not fresh:
         raise ReservationBusy("Already attempted")
@@ -57,6 +71,9 @@ def create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,usernam
         "description":f"VPN {name}"[:128],
         "metadata":metadata,
     }
+    if action == "renew":
+        from auto_renewal import begin_manual_attempt, finish_manual_attempt
+        begin_manual_attempt(path,checkout_id,owner,subscription_id)
     payment=provider.create(payload,checkout_id)
     pid=provider_fields(payment,metadata,amount)
     if row:
@@ -70,6 +87,8 @@ def create_checkout(path,provider,checkout_id,owner,tariff_id,name,price,usernam
                     (pid,owner,tariff_id,str(rubles(amount))))
             elif existing[:2]!=(owner,tariff_id) or kopecks(existing[2])!=amount or existing[3]!="pending":
                 raise ReservationConflict("Existing payment differs")
+    if action == "renew":
+        finish_manual_attempt(path,checkout_id)
     return amount,discount,payment_link(payment)
 
 

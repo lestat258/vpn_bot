@@ -3,20 +3,24 @@
 """
 from runtime_config import DB_PATH
 import sqlite3
+import asyncio
+import time
 import logging
 from datetime import datetime, timedelta
 from aiogram import Bot
 from database import get_setting
 from encryption import decrypt
 from xui_client import XUIClient
-from server_manager import server_manager
+from auto_renewal import activated, enabled, candidates, process_one, review_count
+from contextlib import closing
+from balance_ledger import rubles
 
 logger = logging.getLogger(__name__)
 
 class AutoRenewManager:
-    def __init__(self):
-        self.bot = None
-        self.db_path = DB_PATH
+    def __init__(self, db_path=DB_PATH, bot=None):
+        self.bot = bot
+        self.db_path = db_path
     
     async def init_bot(self):
         """Инициализация бота"""
@@ -35,33 +39,8 @@ class AutoRenewManager:
                     logger.info("✅ Бот инициализирован с токеном (без расшифровки)")
     
     def get_subscriptions_for_renew(self):
-        """Получает подписки, которые нужно продлить (истекают сегодня)"""
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        # Подписки, которые истекают сегодня и у которых включено авто-продление
-        c.execute('''
-            SELECT 
-                s.id, 
-                s.telegram_id, 
-                s.tariff_id, 
-                s.end_date, 
-                s.xui_email,
-                t.price_rub,
-                t.duration_days,
-                t.name as tariff_name
-            FROM subscriptions s
-            JOIN tariffs t ON t.id = s.tariff_id
-            WHERE s.is_active = 1
-                AND s.auto_renew = 1
-                AND date(s.end_date) <= date('now')
-                AND date(s.end_date) > date('now', '-1 day')
-        ''')
-        subscriptions = c.fetchall()
-        conn.close()
-        
-        return subscriptions
-    
+        return candidates(self.db_path, time.time_ns() // 1000000)
+
     def get_subscriptions_expiring_soon(self, days=3):
         """Получает подписки, которые истекут через N дней (для предупреждений)"""
         conn = sqlite3.connect(self.db_path)
@@ -91,130 +70,70 @@ class AutoRenewManager:
         
         return subscriptions
     
-    def get_user_balance(self, telegram_id):
-        """Получает баланс пользователя"""
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        c.execute('SELECT balance FROM users WHERE telegram_id = ?', (telegram_id,))
-        result = c.fetchone()
-        conn.close()
-        return result[0] if result else 0
-    
-    def extend_subscription(self, subscription_id, new_end_date, tariff_id, xui_email):
-        """Продлевает подписку"""
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        c.execute('''
-            UPDATE subscriptions 
-            SET end_date = ?, tariff_id = ?
-            WHERE id = ?
-        ''', (new_end_date.isoformat(), tariff_id, subscription_id))
-        conn.commit()
-        conn.close()
-        
-        # Обновляем в 3X-UI
-        try:
-            server = server_manager.get_best_server()
-            if server:
-                xui = XUIClient(url=server['url'], api_token=server['api_token'])
-                xui.update_client_expiry(xui_email, int(new_end_date.timestamp() * 1000))
-                logger.info(f"✅ Обновлён expiryTime в 3X-UI для {xui_email}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка обновления 3X-UI: {e}")
-        
-        return True
-    
     async def process_renewals(self):
-        """Обрабатывает автоматическое продление подписок"""
+        """Run only explicitly enabled, journaled automatic renewals."""
+        if not activated():
+            return
+        subscriptions = await asyncio.to_thread(self.get_subscriptions_for_renew)
+        if not subscriptions:
+            pending = await asyncio.to_thread(review_count, self.db_path)
+            if pending:
+                logger.warning("Auto renewal: %s operations awaiting reconciliation", pending)
+            return
+
         await self.init_bot()
         if not self.bot:
-            logger.error("❌ Бот не инициализирован для авто-продления")
+            logger.warning("Automatic renewal skipped: notification bot unavailable")
             return
-        
-        # Получаем подписки для продления
-        subscriptions = self.get_subscriptions_for_renew()
-        
-        if not subscriptions:
-            logger.info("ℹ️ Нет подписок для автоматического продления")
-            return
-        
-        renewed_count = 0
-        failed_count = 0
-        
-        for sub in subscriptions:
-            sub_id, telegram_id, tariff_id, end_date, xui_email, price, duration_days, tariff_name = sub
-            
-            # Проверяем баланс пользователя
-            balance = self.get_user_balance(telegram_id)
-            
-            if balance >= price:
-                # Списываем деньги
-                conn = sqlite3.connect(self.db_path)
-                c = conn.cursor()
-                c.execute('UPDATE users SET balance = balance - ? WHERE telegram_id = ?', (price, telegram_id))
-                conn.commit()
-                conn.close()
-                
-                # Продлеваем подписку
-                new_end_date = datetime.fromisoformat(end_date) + timedelta(days=duration_days)
-                self.extend_subscription(sub_id, new_end_date, tariff_id, xui_email)
-                
-                # Уведомляем пользователя
-                try:
-                    await self.bot.send_message(
-                        chat_id=telegram_id,
-                        text=f"✅ <b>Подписка автоматически продлена!</b>\n\n"
-                             f"📦 Тариф: {tariff_name}\n"
-                             f"💰 С баланса списано: {price:.0f} ₽\n"
-                             f"📅 Новая дата окончания: {new_end_date.strftime('%d.%m.%Y')}\n"
-                             f"💳 Остаток на балансе: {balance - price:.2f} ₽\n\n"
-                             f"Спасибо, что остаётесь с нами! 🚀",
-                        parse_mode="HTML"
-                    )
-                    logger.info(f"✅ Подписка {sub_id} продлена для пользователя {telegram_id}")
-                    renewed_count += 1
-                except Exception as e:
-                    logger.error(f"❌ Ошибка уведомления пользователя {telegram_id}: {e}")
-                    renewed_count += 1
-                    
-            else:
-                # Недостаточно средств - уведомляем пользователя
-                try:
-                    await self.bot.send_message(
-                        chat_id=telegram_id,
-                        text=f"⚠️ <b>Недостаточно средств для автоматического продления!</b>\n\n"
-                             f"📦 Тариф: {tariff_name}\n"
-                             f"💰 Нужно: {price:.0f} ₽\n"
-                             f"💳 На балансе: {balance:.2f} ₽\n"
-                             f"📅 Подписка истекает: {end_date[:10]}\n\n"
-                             f"Пополните баланс в разделе «👤 Профиль» или продлите подписку вручную.",
-                        parse_mode="HTML"
-                    )
-                    failed_count += 1
-                    logger.warning(f"⚠️ Недостаточно средств у пользователя {telegram_id} для продления")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка уведомления пользователя {telegram_id}: {e}")
-                    failed_count += 1
-        
-        logger.info(f"📊 Авто-продление: {renewed_count} успешно, {failed_count} не удалось")
-        
-        # Отправляем отчёт администратору
-        if renewed_count > 0 or failed_count > 0:
+
+        renewed = failed = 0
+        for candidate in subscriptions:
             try:
-                admin_id = int(get_setting('admin_id') or 812021055)
-                await self.bot.send_message(
-                    chat_id=admin_id,
-                    text=f"📊 <b>Отчёт по авто-продлению</b>\n\n"
-                         f"✅ Продлено: {renewed_count}\n"
-                         f"❌ Не удалось: {failed_count}\n"
-                         f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}",
-                    parse_mode="HTML"
+                new_end = await asyncio.to_thread(
+                    process_one, self.db_path, candidate, XUIClient
                 )
-            except Exception as e:
-                logger.error(f"❌ Ошибка отправки отчёта админу: {e}")
-    
+            except Exception as exc:
+                failed += 1
+                logger.warning("Automatic renewal %s not completed: %s",
+                               candidate.subscription_id, type(exc).__name__)
+                continue
+
+            renewed += 1
+            try:
+                await self.bot.send_message(
+                    chat_id=candidate.owner,
+                    text=(
+                        f"✅ Подписка №{candidate.subscription_id} автоматически продлена!\n\n"
+                        f"С баланса списано: {rubles(candidate.price):.2f} ₽\n"
+                        f"Новая дата окончания: {new_end:%d.%m.%Y %H:%M}"
+                    )
+                )
+            except Exception as exc:
+                # Notification failures must never repeat the renewal.
+                logger.warning("Renewal notification %s not confirmed: %s",
+                               candidate.subscription_id, type(exc).__name__)
+
+        pending = await asyncio.to_thread(review_count, self.db_path)
+        logger.info("Auto renewal: completed=%s, not completed=%s, review=%s",
+                    renewed, failed, pending)
+        try:
+            admin_id = int(get_setting('admin_id'))
+            await self.bot.send_message(
+                chat_id=admin_id,
+                text=f"Автопродление: успешно {renewed}, не завершено {failed}. "
+                     f"Операций на сверке: {pending}. "
+                     "Не повторяйте операции на сверке вручную."
+            )
+        except Exception as exc:
+            logger.warning("Auto renewal admin report not confirmed: %s", type(exc).__name__)
+
     async def check_expiring_soon(self):
         """Проверяет подписки, которые истекут скоро, и предупреждает пользователей"""
+        if not activated():
+            return
+        with closing(sqlite3.connect(self.db_path)) as db:
+            if not enabled(db):
+                return
         await self.init_bot()
         if not self.bot:
             return
