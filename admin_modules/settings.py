@@ -4,7 +4,8 @@ import os
 import secrets
 import subprocess
 
-from runtime_config import DATA_DIR, TEMPLATE_DIR
+from runtime_config import DATA_DIR, TEMPLATE_DIR, DB_PATH
+from tax_settings_policy import save as save_fiscal, status as fiscal_status
 from fastapi.responses import RedirectResponse
 """Модуль настроек"""
 from fastapi import APIRouter, Request, Form
@@ -125,7 +126,14 @@ async def tax_settings_page(request: Request):
     """Страница настроек налогов"""
     if not check_auth(request):
         return RedirectResponse("/")
-    return templates.TemplateResponse("tax_settings.html", {"request": request, "settings": get_all_settings()})
+    settings = get_all_settings()
+    return templates.TemplateResponse("tax_settings.html", {
+        "request": request,
+        "settings": {k:settings.get(k,"") for k in ("tax_enabled","tax_inn","tax_description_template")},
+        "fiscal": await asyncio.to_thread(fiscal_status,DB_PATH),
+        "has_password": bool(settings.get("tax_password")),
+        "csrf": activation_token(request),
+    }, headers={"Cache-Control":"no-store"})
 
 @settings_router.post("/tax-settings")
 async def save_tax_settings(request: Request):
@@ -133,9 +141,13 @@ async def save_tax_settings(request: Request):
     if not check_auth(request):
         return RedirectResponse("/")
     form = await request.form()
-    for key in ['tax_enabled', 'tax_inn', 'tax_password', 'tax_description_template']:
-        if key in form:
-            set_setting(key, form[key])
+    if not hmac.compare_digest(activation_token(request).encode(), str(form.get("csrf","")).encode()):
+        return HTMLResponse("Обновите страницу настроек.",status_code=403)
+    try:
+        await asyncio.to_thread(save_fiscal,DB_PATH,form)
+    except ValueError as exc:
+        from html import escape
+        return HTMLResponse(escape(str(exc)),status_code=400,headers={"Cache-Control":"no-store"})
     return RedirectResponse("/tax-settings?saved=1", status_code=302)
 
 @settings_router.get("/bot-texts", response_class=HTMLResponse)
