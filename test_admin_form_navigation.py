@@ -1,5 +1,7 @@
 """Admin form navigation: real middleware, isolated state and SQLite."""
 import math
+from urllib.parse import urlsplit
+from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
 import logging
 import sqlite3
 import tempfile
@@ -8,7 +10,7 @@ from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
-from states import AddTariff, EditTariff, EditText
+from states import AddTariff, EditTariff, EditText, AddServer, SendMessageToUser
 import admin_form_navigation as form
 import screen_navigation as nav
 from test_renewal_checkout import load_functions
@@ -57,17 +59,20 @@ class AdminFormTests(unittest.IsolatedAsyncioTestCase):
                 CREATE TABLE tariffs(id INTEGER PRIMARY KEY,name TEXT,price_rub REAL,
                   duration_days INTEGER,traffic_gb REAL,ip_limit INTEGER,is_active INTEGER DEFAULT 1);
                 INSERT INTO tariffs VALUES(1,'Existing',150,30,0,3,1);
+                CREATE TABLE servers(id INTEGER PRIMARY KEY,name TEXT,url TEXT,api_token TEXT,is_active INTEGER,status TEXT);
             """)
-        self.bot=SimpleNamespace(id=100)
+        self.bot=SimpleNamespace(id=100,send_message=AsyncMock())
         self.admin=SimpleNamespace(id=42)
         self.chat=SimpleNamespace(type="private",id=42)
         self.screen=SimpleNamespace(bot=self.bot,chat=self.chat,from_user=SimpleNamespace(id=100),
             message_id=7,reply_markup=None)
-        self.message=SimpleNamespace(bot=self.bot,chat=self.chat,from_user=self.admin,text="hello",answer=AsyncMock())
+        self.message=SimpleNamespace(bot=self.bot,chat=self.chat,from_user=self.admin,text="hello",answer=AsyncMock(),delete=AsyncMock())
         self.callback=SimpleNamespace(message=self.screen,from_user=self.admin,data="admin_add_tariff",answer=AsyncMock())
         self.state=State()
         self.next=AsyncMock()
         self.settings=Mock()
+        self.encrypt=Mock(side_effect=lambda token: 'encrypted:'+token)
+        self.user=Mock(side_effect=lambda uid: (1,uid,'Username','Name') if uid==43 else None)
         self.legacy={42:1}
         self.middleware=form.AdminFormNavigation(42)
         nav._save((100,42),7,"text")
@@ -76,14 +81,17 @@ class AdminFormTests(unittest.IsolatedAsyncioTestCase):
             "admin_add_tariff_start","tariff_name","tariff_price","tariff_days","tariff_traffic","tariff_ip",
             "tariff_number","admin_edit_tariff_select","admin_edit_tariff_start","edit_tariff_field",
             "edit_tariff_name","edit_tariff_price","edit_tariff_days","edit_tariff_traffic","edit_tariff_ip_limit",
-            "edit_text_start","edit_text_save"},
+            "edit_text_start","edit_text_save","admin_add_server_start","server_name","panel_url","server_url","server_token",
+            "send_message_from_user_card","send_message_process"},
             dict(types=SimpleNamespace(CallbackQuery=object,Message=object,
                  InlineKeyboardMarkup=form.types.InlineKeyboardMarkup,InlineKeyboardButton=form.types.InlineKeyboardButton),
                  FSMContext=object,ADMIN_ID=42,DB_PATH=self.db,AddTariff=AddTariff,EditTariff=EditTariff,
                  EditText=EditText,sqlite3=sqlite3,closing=closing,logging=logging,math=math,
                  form_begin=form.begin,form_step=form.step,form_retry=form.retry,form_finish=form.finish,
                  get_setting=lambda _: "<b>Old</b>",set_setting=self.settings,
-                 ADMIN_TEXT_FIELDS={"text_faq":"FAQ"},extend_temp=self.legacy))
+                 ADMIN_TEXT_FIELDS={"text_faq":"FAQ"},extend_temp=self.legacy,
+                 AddServer=AddServer,SendMessageToUser=SendMessageToUser,urlsplit=urlsplit,
+                 TelegramAPIError=TelegramAPIError,encrypt=self.encrypt,get_user_by_telegram_id=self.user))
 
     def set_buttons(self,*values):
         self.screen.reply_markup=SimpleNamespace(inline_keyboard=[
@@ -263,3 +271,144 @@ class AdminFormTests(unittest.IsolatedAsyncioTestCase):
         await self.call(self.callback,lambda event,data:self.env["edit_text_start"](event,self.state))
         self.assertIsNone(self.state.current)
         self.settings.assert_not_called()
+
+
+    def servers(self):
+        with closing(sqlite3.connect(self.db)) as db:
+            return db.execute("SELECT name,url,api_token,is_active,status FROM servers").fetchall()
+
+    async def start_server(self):
+        self.callback.data="admin_add_server"
+        self.set_buttons(self.callback.data)
+        await self.call(self.callback,lambda event,data:self.env["admin_add_server_start"](event,self.state))
+
+    async def start_send(self):
+        self.callback.data="user_send_message_43"
+        self.set_buttons(self.callback.data)
+        await self.call(self.callback,lambda event,data:self.env["send_message_from_user_card"](event,self.state))
+
+    async def server_to_token(self):
+        await self.start_server()
+        await self.enter("Test","server_name")
+        await self.enter("https://example.invalid/panel/","server_url")
+
+    async def test_server_start_and_back(self):
+        await self.start_server()
+        self.assertEqual(self.state.current,AddServer.name.state)
+        await self.enter("Test","server_name")
+        self.callback.data="admin_servers_menu"
+        await self.call(self.callback)
+        self.assertIsNone(self.state.current)
+        self.assertEqual(self.servers(),[])
+
+    async def test_server_url_rejects_invalid_and_credential_urls(self):
+        await self.start_server()
+        await self.enter("Test","server_name")
+        for value in ("example.invalid","ftp://example.invalid","https://user:pass@example.invalid",
+                      "https://example.invalid/?token=x","https://example.invalid/#x","https://example.invalid:99999"):
+            await self.enter(value,"server_url")
+            self.assertEqual(self.state.current,AddServer.url.state)
+        self.assertEqual(self.servers(),[])
+
+    async def test_server_token_encrypted_and_removed(self):
+        await self.server_to_token()
+        await self.enter("fake-token","server_token")
+        self.encrypt.assert_called_once_with("fake-token")
+        self.message.delete.assert_awaited_once()
+        self.assertEqual(self.servers(),[("Test","https://example.invalid/panel","encrypted:fake-token",1,"pending")])
+        self.assertIsNone(self.state.current)
+        self.assertNotIn("fake-token",form.render_command.await_args.args[1])
+
+    async def test_server_cancel_before_token_never_writes(self):
+        await self.server_to_token()
+        await self.enter("/cancel","server_token")
+        self.encrypt.assert_not_called()
+        self.assertEqual(self.servers(),[])
+
+    async def test_server_invalid_token_not_written(self):
+        await self.server_to_token()
+        await self.enter("bad token","server_token")
+        self.encrypt.assert_not_called()
+        self.assertEqual(self.state.current,AddServer.token.state)
+        self.message.delete.assert_awaited_once()
+        self.assertEqual(self.servers(),[])
+
+    async def test_server_failed_encryption_no_plaintext_fallback(self):
+        await self.server_to_token()
+        self.encrypt.side_effect=ValueError("secret")
+        await self.enter("fake-token","server_token")
+        self.assertEqual(self.servers(),[])
+        self.assertIsNone(self.state.current)
+        self.assertNotIn("secret",form.render_command.await_args.args[1])
+
+    async def test_server_duplicate_url_does_not_overwrite(self):
+        await self.server_to_token()
+        with closing(sqlite3.connect(self.db)) as db,db:
+            db.execute("INSERT INTO servers VALUES(1,'Old','https://example.invalid/panel/','old',1,'online')")
+        await self.enter("fake-token","server_token")
+        self.assertEqual(self.servers(),[("Old","https://example.invalid/panel/","old",1,"online")])
+
+    async def test_token_delete_failure_warns_without_echoing(self):
+        await self.server_to_token()
+        self.message.delete.side_effect=TelegramBadRequest(method=None,message="cannot delete")
+        await self.enter("fake-token","server_token")
+        self.assertEqual(len(self.servers()),1)
+        self.assertIn("вручную",form.render_command.await_args.args[1])
+        self.assertNotIn("fake-token",form.render_command.await_args.args[1])
+
+    async def test_send_back_returns_exact_recipient(self):
+        await self.start_send()
+        self.assertEqual(self.state.current,SendMessageToUser.message_text.state)
+        self.assertEqual(self.screen.reply_markup.inline_keyboard[0][0].callback_data,"user_back_to_43")
+        self.callback.data="user_back_to_44"
+        await self.call(self.callback)
+        self.assertEqual(self.state.current,SendMessageToUser.message_text.state)
+        self.callback.data="user_back_to_43"
+        await self.call(self.callback)
+        self.assertIsNone(self.state.current)
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_send_cancel_and_menu_never_send(self):
+        await self.start_send()
+        await self.enter("/cancel","send_message_process")
+        self.bot.send_message.assert_not_awaited()
+        self.assertEqual(self.screen.reply_markup.inline_keyboard[0][0].callback_data,"user_back_to_43")
+        await self.start_send()
+        self.message.text="👤 Профиль"
+        await self.call(self.message)
+        self.assertIsNone(self.state.current)
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_send_success_only_selected_user(self):
+        await self.start_send()
+        await self.enter("<b>Test</b>","send_message_process")
+        self.bot.send_message.assert_awaited_once_with(chat_id=43,
+            text="📨 <b>Сообщение от администратора</b>\n\n<b>Test</b>",parse_mode="HTML")
+        self.assertIsNone(self.state.current)
+        self.assertEqual(self.screen.reply_markup.inline_keyboard[0][0].callback_data,"user_back_to_43")
+
+    async def test_send_missing_recipient_no_delivery(self):
+        await self.start_send()
+        self.user.return_value=None
+        self.user.side_effect=None
+        await self.enter("Test","send_message_process")
+        self.bot.send_message.assert_not_awaited()
+        self.assertIsNone(self.state.current)
+
+    async def test_send_uncertain_no_retry(self):
+        await self.start_send()
+        self.bot.send_message.side_effect=TimeoutError("unknown")
+        await self.enter("Test","send_message_process")
+        self.assertIsNone(self.state.current)
+        self.bot.send_message.assert_awaited_once()
+        self.message.text="Test again"
+        await self.call(self.message)
+        self.bot.send_message.assert_awaited_once()
+
+    async def test_send_nontext_keeps_target(self):
+        await self.start_send()
+        self.message.text=None
+        await self.call(self.message)
+        self.assertEqual(self.state.current,SendMessageToUser.message_text.state)
+        self.assertEqual(self.screen.reply_markup.inline_keyboard[0][0].callback_data,"user_back_to_43")
+        self.bot.send_message.assert_not_awaited()

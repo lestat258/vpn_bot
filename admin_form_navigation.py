@@ -4,14 +4,26 @@ Only these form states are managed here. Other admin workflows retain their
 existing routing until separately migrated.
 """
 from aiogram import BaseMiddleware, types
-from states import AddTariff, EditTariff, EditText
+from states import AddTariff, EditTariff, EditText, AddServer, SendMessageToUser
+from aiogram.exceptions import TelegramAPIError
 from form_navigation import is_current_screen, menu_navigation, FORM_SCREEN
 from screen_navigation import render_screen, render_command, _key, _read
 
 PARENTS = {s.state: "admin_tariffs" for s in (*AddTariff.__all_states__, *EditTariff.__all_states__)}
 PARENTS[EditText.waiting.state] = "admin_texts"
 SELECT = EditTariff.tariff_id.state
-STARTS = {"admin_add_tariff", "admin_edit_tariff"}
+PARENTS.update({s.state: "admin_servers_menu" for s in AddServer.__all_states__})
+SEND = SendMessageToUser.message_text.state
+PARENTS[SEND] = "admin_users"
+STARTS = {"admin_add_tariff", "admin_edit_tariff", "admin_add_server"}
+
+
+def parent_for(current, fields):
+    if current == SEND:
+        user = fields.get("user_id")
+        if type(user) is int and user > 0:
+            return f"user_back_to_{user}"
+    return PARENTS[current]
 PROMPT = "admin_form_prompt"
 
 
@@ -48,7 +60,7 @@ def tracked_id(message, *, command):
 
 
 async def begin(callback, state, target, text, *, fields=None, keyboard=None):
-    parent = PARENTS[target.state]
+    parent = parent_for(target.state, fields or {})
     await state.clear()
     await render_screen(callback.message, text, reply_markup=keyboard or back_keyboard(parent))
     await state.set_data({**(fields or {}), FORM_SCREEN: tracked_id(callback.message, command=False), PROMPT: text})
@@ -57,7 +69,7 @@ async def begin(callback, state, target, text, *, fields=None, keyboard=None):
 
 
 async def step(message, state, target, text, **fields):
-    await render_command(message, text, reply_markup=back_keyboard(PARENTS[target.state]))
+    await render_command(message, text, reply_markup=back_keyboard(parent_for(target.state, {**await state.get_data(), **fields})))
     await state.update_data(**fields, **{FORM_SCREEN: tracked_id(message, command=True), PROMPT: text})
     await state.set_state(target)
 
@@ -66,13 +78,13 @@ async def retry(message, state, error):
     current = await state.get_state()
     data = await state.get_data()
     text = error + "\n\n" + data[PROMPT]
-    await render_command(message, text, reply_markup=back_keyboard(PARENTS[current]))
+    await render_command(message, text, reply_markup=back_keyboard(parent_for(current, data)))
     await state.update_data(**{FORM_SCREEN: tracked_id(message, command=True)})
 
 
 async def finish(message, state, text, *, clean_cancel=False):
     current = await state.get_state()
-    parent = PARENTS[current]
+    parent = parent_for(current, await state.get_data())
     # Clear before displaying result: an ambiguous Telegram response must not
     # repeat an already committed administrative operation.
     await state.clear()
@@ -92,7 +104,7 @@ class AdminFormNavigation(BaseMiddleware):
         if callback:
             value = event.data or ""
             select = value.startswith("admin_edit_tariff_select_")
-            start = value in STARTS or value.startswith("edittext_")
+            start = value in STARTS or value.startswith(("edittext_", "user_send_message_"))
             if current not in PARENTS:
                 if start or select:
                     if (current is not None or select or not private_admin(event, self.admin_id)
@@ -106,7 +118,7 @@ class AdminFormNavigation(BaseMiddleware):
                     or not callback_is_current(event)):
                 await event.answer("Откройте актуальную форму.", show_alert=True)
                 return
-            if value == PARENTS[current]:
+            if value == parent_for(current, await state.get_data()):
                 await state.clear()
                 data["raw_state"] = None
                 return await handler(event, data)
