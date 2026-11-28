@@ -1,5 +1,5 @@
 """
-Модуль многоуровневой реферальной системы
+Регистрация рефералов и совместимость старой статистики
 """
 from runtime_config import DB_PATH
 import sqlite3
@@ -13,12 +13,6 @@ logger = logging.getLogger(__name__)
 class ReferralManager:
     def __init__(self):
         self.db_path = DB_PATH
-        # Настройки бонусов (в днях)
-        self.bonus_levels = {
-            1: 30,  # 1 уровень: +30 дней
-            2: 15,  # 2 уровень: +15 дней
-            3: 5    # 3 уровень: +5 дней
-        }
     
     @staticmethod
     def _chain(db, user_id):
@@ -123,35 +117,9 @@ class ReferralManager:
         return " → ".join(levels)
     
     def apply_referral_bonus(self, user_id: int, subscription_id: int, days: int) -> int:
-        """Применяет реферальные бонусы к подписке"""
-        chain = self.get_referral_chain(user_id)
-        if not chain:
-            return days
-        
-        total_bonus = 0
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        for level, referrer_id in enumerate(chain, 1):
-            if level > 3:
-                break
-            
-            bonus_days = self.bonus_levels.get(level, 0)
-            if bonus_days > 0:
-                total_bonus += bonus_days
-                
-                c.execute('''
-                    INSERT INTO referral_bonuses (user_id, referrer_id, level, bonus_days, subscription_id)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (user_id, referrer_id, level, bonus_days, subscription_id))
-                
-                logger.info(f"✅ Бонус {bonus_days} дней (уровень {level}) для {user_id} от {referrer_id}")
-        
-        conn.commit()
-        conn.close()
-        
-        return days + total_bonus
-    
+        """Legacy API cannot create or spend awards."""
+        raise RuntimeError("Legacy referral bonus API disabled")
+
     def get_user_referral_link(self, user_id: int, bot_username: str) -> str:
         """Генерирует реферальную ссылку"""
         return f"https://t.me/{bot_username}?start=ref_{user_id}"
