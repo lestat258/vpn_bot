@@ -37,13 +37,18 @@ def client_state(api, email, uid, subid):
     return dict(client),tuple(sorted(ids)),payload.get("usedTraffic")
 
 
-def renew_subscription(path, subscription_id, paid_days, tariff_id, api_factory, *, clock=None):
+def renew_subscription(path, subscription_id, paid_days, tariff_id, api_factory, *, clock=None, auto=None):
     if type(subscription_id) is not int or subscription_id<=0 or type(paid_days) is not int or paid_days<=0:
         raise ValueError("Invalid subscription or duration")
+    from auto_renewal import pending, reserve, complete, review
     now_ms=clock or (lambda: time.time_ns()//1000000)
     lock_path=Path(path).with_name(f".renew-{subscription_id}.lock")
     with lock_path.open("a") as lock, closing(sqlite3.connect(path,timeout=15)) as db:
         fcntl.flock(lock,fcntl.LOCK_EX)
+        if pending(db,subscription_id):
+            raise ValueError("Automatic renewal awaits reconciliation")
+        if auto is not None and (auto.subscription_id,auto.days,auto.tariff_id)!=(subscription_id,paid_days,tariff_id):
+            raise ValueError("Automatic renewal identity mismatch")
         row=db.execute("""
             SELECT s.end_date,s.xui_email,s.xui_client_uid,s.xui_subid,
                    v.url,v.api_token,s.is_active,s.managed_by_vpn4us,
@@ -54,6 +59,8 @@ def renew_subscription(path, subscription_id, paid_days, tariff_id, api_factory,
         if not row:
             raise ValueError("Subscription or owner missing")
         end,email,uid,subid,url,token,active,managed,blocked,server_active,server_id,owner=row
+        if auto is not None and (owner,end)!=(auto.owner,auto.end_date):
+            raise ValueError("Automatic renewal candidate changed")
         if (active,managed,blocked,server_active)!=(1,1,0,1):
             raise ValueError("Subscription or owner administratively unavailable")
         expected=tuple(r[0] for r in db.execute("""
@@ -75,26 +82,41 @@ def renew_subscription(path, subscription_id, paid_days, tariff_id, api_factory,
                 raise ValueError("Traffic depletion or unknown usage")
         adjustment=renewal_days(old_ms,now,paid_days)
         target_ms=old_ms+adjustment*DAY_MS
-        reply=api._request("POST","/panel/api/clients/bulkAdjust",
-                           {"emails":[email],"addDays":adjustment},retries=1)
-        after,after_ids,_=client_state(api,email,uid,subid)
-        if (not reply or reply.get("success") is not True
-                or (reply.get("obj") or {}).get("adjusted")!=1
-                or after["expiryTime"]!=target_ms or after["enable"] is not True
-                or after_ids!=inbounds or after["totalGB"]!=before["totalGB"]):
-            raise ValueError("Renewal not confirmed; manual reconciliation required")
-        new_end=datetime.fromtimestamp(target_ms/1000,tz=local_end.tzinfo)
-        with db:
-            updated=db.execute("""
-                UPDATE subscriptions SET end_date=?,tariff_id=COALESCE(?,tariff_id)
-                 WHERE id=? AND end_date=? AND xui_client_uid=? AND xui_subid=?
-                   AND server_id=? AND telegram_id=? AND is_active=1 AND managed_by_vpn4us=1
-                   AND EXISTS(SELECT 1 FROM users WHERE telegram_id=? AND is_blocked=0)
-                   AND EXISTS(SELECT 1 FROM servers WHERE id=? AND is_active=1)
-            """,(new_end.isoformat(),tariff_id,subscription_id,end,uid,subid,
-                 server_id,owner,owner,server_id))
-            if updated.rowcount!=1:
-                raise ValueError("Subscription changed during renewal; reconciliation required")
+        operation_id=None
+        if auto is not None:
+            operation_id=reserve(path,auto,now=now,target_ms=target_ms,
+                                 server_id=server_id,uid=uid,subid=subid)
+        try:
+            reply=api._request("POST","/panel/api/clients/bulkAdjust",
+                               {"emails":[email],"addDays":adjustment},retries=1)
+            after,after_ids,_=client_state(api,email,uid,subid)
+            if (not reply or reply.get("success") is not True
+                    or (reply.get("obj") or {}).get("adjusted")!=1
+                    or after["expiryTime"]!=target_ms or after["enable"] is not True
+                    or after_ids!=inbounds or after["totalGB"]!=before["totalGB"]):
+                raise ValueError("Renewal not confirmed; manual reconciliation required")
+            new_end=datetime.fromtimestamp(target_ms/1000,tz=local_end.tzinfo)
+            with db:
+                updated=db.execute("""
+                    UPDATE subscriptions SET end_date=?,tariff_id=COALESCE(?,tariff_id)
+                     WHERE id=? AND end_date=? AND xui_client_uid=? AND xui_subid=?
+                       AND server_id=? AND telegram_id=? AND is_active=1 AND managed_by_vpn4us=1
+                       AND EXISTS(SELECT 1 FROM users WHERE telegram_id=? AND is_blocked=0)
+                       AND EXISTS(SELECT 1 FROM servers WHERE id=? AND is_active=1)
+                """,(new_end.isoformat(),tariff_id,subscription_id,end,uid,subid,
+                     server_id,owner,owner,server_id))
+                if updated.rowcount!=1:
+                    raise ValueError("Subscription changed during renewal; reconciliation required")
+                if operation_id is not None:
+                    complete(db,operation_id)
+        except Exception:
+            if operation_id is not None:
+                try:
+                    review(path,operation_id)
+                except Exception:
+                    # The durable reserved row already blocks retries.
+                    pass
+            raise
         return new_end
 
 
