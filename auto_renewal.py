@@ -4,6 +4,7 @@ The feature is OFF unless explicitly activated via both the process environment
 and the existing administrator setting. No historical subscriptions are replayed.
 """
 import logging
+import json
 import os
 import sqlite3
 from contextlib import closing
@@ -60,12 +61,37 @@ def ensure_schema(db):
         UNIQUE(subscription_id,original_end))""")
 
 
+def ensure_review_schema(db):
+    db.execute("""CREATE TABLE IF NOT EXISTS auto_renewal_evidence(
+        operation_id TEXT PRIMARY KEY,
+        original_ms INTEGER NOT NULL, email TEXT NOT NULL,
+        server_hash TEXT NOT NULL, inbounds TEXT NOT NULL,
+        total_gb INTEGER NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)))""")
+    db.execute("""CREATE TABLE IF NOT EXISTS auto_renewal_resolutions(
+        operation_id TEXT PRIMARY KEY, outcome TEXT NOT NULL CHECK(outcome IN ('confirmed','refunded')),
+        actor_id INTEGER NOT NULL, evidence TEXT NOT NULL,
+        observed_ms INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+
+
+def resolution_filter(db):
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_renewal_resolutions'").fetchone():
+        return " AND NOT EXISTS(SELECT 1 FROM auto_renewal_resolutions r WHERE r.operation_id=auto_renewal_operations.operation_id)"
+    return ""
+
+
 def pending(db, subscription_id):
     if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_renewal_operations'").fetchone():
         return False
     return bool(db.execute("""SELECT 1 FROM auto_renewal_operations
-        WHERE subscription_id=? AND state IN ('reserved','needs_review') LIMIT 1""",
+        WHERE subscription_id=? AND state IN ('reserved','needs_review')""" + resolution_filter(db) + " LIMIT 1",
         (subscription_id,)).fetchone())
+
+
+def attempted_cycle(db, subscription_id, end_date):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_renewal_operations'").fetchone():
+        return False
+    return bool(db.execute("SELECT 1 FROM auto_renewal_operations WHERE subscription_id=? AND original_end=?",
+                           (subscription_id,end_date)).fetchone())
 
 
 def open_payment(db, owner):
@@ -136,14 +162,14 @@ def candidates(path, now):
         result = []
         for sid,owner,tid,end,price,days in rows:
             try:
-                if type(days) is int and 0<days<=3660 and due(end,now) and not pending(db,sid) and not open_payment(db,owner):
+                if type(days) is int and 0<days<=3660 and due(end,now) and not pending(db,sid) and not attempted_cycle(db,sid,end) and not open_payment(db,owner):
                     result.append(Candidate(sid,owner,tid,end,kopecks(price,positive=True,maximum=MAX_KOPECKS),days))
             except (ValueError,TypeError,OverflowError):
                 LOG.warning("Invalid auto renewal candidate %s",sid)
         return result
 
 
-def reserve(path, candidate, *, now, target_ms, server_id, uid, subid, email, url, token, inbounds):
+def reserve(path, candidate, *, now, target_ms, server_id, uid, subid, email, url, token, inbounds, before):
     """Recheck all financial and eligibility facts in one write transaction.
 
     Called only with the shared subscription renewal lock held, AFTER panel
@@ -152,7 +178,9 @@ def reserve(path, candidate, *, now, target_ms, server_id, uid, subid, email, ur
     c = candidate
     with transaction(path) as db:
         ensure_schema(db)
+        ensure_review_schema(db)
         if (not enabled(db) or not due(c.end_date,now) or pending(db,c.subscription_id)
+                or attempted_cycle(db,c.subscription_id,c.end_date)
                 or open_payment(db,c.owner) or type(c.days) is not int or not 0<c.days<=3660):
             raise ValueError("Auto renewal disabled, not due or awaiting review")
         row = db.execute("""SELECT s.telegram_id,s.tariff_id,s.end_date,t.price_rub,t.duration_days,
@@ -173,6 +201,10 @@ def reserve(path, candidate, *, now, target_ms, server_id, uid, subid, email, ur
             tariff_id,original_end,target_ms,amount_kopecks,duration_days,server_id,client_uid,client_subid,state)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,'reserved')""",
             (operation_id,c.subscription_id,c.owner,c.tariff_id,c.end_date,target_ms,c.price,c.days,server_id,uid,subid))
+        db.execute("""INSERT INTO auto_renewal_evidence(operation_id,original_ms,email,
+            server_hash,inbounds,total_gb,enabled) VALUES(?,?,?,?,?,?,?)""",
+            (operation_id,before["expiryTime"],email,sha256(url.encode()).hexdigest(),
+             json.dumps(list(inbounds),separators=(",",":")),before["totalGB"],int(before["enable"])))
         _,changed = apply_operation(db,operation_id,c.owner,"auto_renew_reserve",-c.price)
         if not changed:
             raise ValueError("Duplicate auto renewal reservation")
@@ -212,4 +244,4 @@ def review_count(path):
     with closing(sqlite3.connect(path)) as db:
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_renewal_operations'").fetchone():
             return 0
-        return db.execute("SELECT count(*) FROM auto_renewal_operations WHERE state IN ('reserved','needs_review')").fetchone()[0]
+        return db.execute("SELECT count(*) FROM auto_renewal_operations WHERE state IN ('reserved','needs_review')" + resolution_filter(db)).fetchone()[0]

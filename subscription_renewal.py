@@ -94,7 +94,7 @@ def renew_subscription(path, subscription_id, paid_days, tariff_id, api_factory,
         if auto is not None:
             operation_id=reserve(path,auto,now=now,target_ms=target_ms,
                                  server_id=server_id,uid=uid,subid=subid,email=email,
-                                 url=url,token=token,inbounds=inbounds)
+                                 url=url,token=token,inbounds=inbounds,before=before)
         try:
             reply=api._request("POST","/panel/api/clients/bulkAdjust",
                                {"emails":[email],"addDays":adjustment},retries=1)
